@@ -29,6 +29,10 @@ node_modules/
 .screenshots/snap-*.cjs.bak
 # 通用备份: .bak-v2 / .bak-v3 等
 *.bak-*
+# commit message 临时文件
+.commit-msg.tmp
+# PowerShell 5.1 pipe 编码 fixture 临时文件
+test-stdin-*.jsonl
 
 # ---- build 产物 ----
 dist/

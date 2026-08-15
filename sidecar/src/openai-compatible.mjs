@@ -52,6 +52,16 @@ async function runOpenAICompatiblePrompt(config, userContent) {
   send({ type: 'agent_start' });
   send({ type: 'message_start' });
 
+  // 跟踪是否已发过 agent_end, 防止重复
+  let agentEndSent = false;
+  const finishUp = () => {
+    if (!agentEndSent) {
+      send({ type: 'message_end' });
+      send({ type: 'agent_end' });
+      agentEndSent = true;
+    }
+  };
+
   let resp;
   try {
     resp = await fetch(url, {
@@ -65,14 +75,14 @@ async function runOpenAICompatiblePrompt(config, userContent) {
     });
   } catch (e) {
     send({ type: 'error', message: `Network error: ${e instanceof Error ? e.message : String(e)}` });
-    send({ type: 'agent_end' });
+    finishUp();
     return;
   }
 
   if (!resp.ok || !resp.body) {
     const errText = await resp.text().catch(() => '(no body)');
     send({ type: 'error', message: `HTTP ${resp.status}: ${errText.slice(0, 500)}` });
-    send({ type: 'agent_end' });
+    finishUp();
     return;
   }
 
@@ -94,8 +104,7 @@ async function runOpenAICompatiblePrompt(config, userContent) {
         if (!trimmed || !trimmed.startsWith('data:')) continue;
         const data = trimmed.slice(5).trim();
         if (data === '[DONE]') {
-          send({ type: 'message_end' });
-          send({ type: 'agent_end' });
+          finishUp();
           return;
         }
         try {
@@ -107,8 +116,7 @@ async function runOpenAICompatiblePrompt(config, userContent) {
             send({ type: 'message_update', delta });
           }
           if (choice.finish_reason === 'stop' || choice.finish_reason === 'length') {
-            send({ type: 'message_end' });
-            send({ type: 'agent_end' });
+            finishUp();
             return;
           }
         } catch {
@@ -116,15 +124,14 @@ async function runOpenAICompatiblePrompt(config, userContent) {
         }
       }
     }
-    send({ type: 'message_end' });
-    send({ type: 'agent_end' });
+    finishUp();
   } catch (e) {
     if (e instanceof Error && e.name === 'AbortError') {
       send({ type: 'error', message: 'Aborted' });
     } else {
       send({ type: 'error', message: `Stream read error: ${e instanceof Error ? e.message : String(e)}` });
     }
-    send({ type: 'agent_end' });
+    finishUp();
   } finally {
     try { reader.releaseLock(); } catch {}
     if (currentAbortController === ac) currentAbortController = null;
