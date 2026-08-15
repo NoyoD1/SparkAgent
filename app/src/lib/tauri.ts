@@ -131,6 +131,16 @@ class PiTauriClient {
       error: string | null;
     };
   }
+
+  async fetchProviderModels(
+    providerId: string,
+    baseUrl: string,
+  ): Promise<Array<{ id: string; label: string | null }>> {
+    return (await invoke('fetch_provider_models', { providerId, baseUrl })) as Array<{
+      id: string;
+      label: string | null;
+    }>;
+  }
 }
 
 export const piTauri = new PiTauriClient();

@@ -32,3 +32,5 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "linux-
 thiserror = "1"
 # Time for log timestamps
 chrono = "0.4"
+# HTTP client (sync, simple, no async SSL cert chain)
+ureq = { version = "2", features = ["json"] }

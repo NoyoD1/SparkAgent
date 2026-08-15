@@ -1,43 +1,43 @@
 /**
- * Provider model fetch — client 端
- * 调 server /api/providers/fetch-models, 返回 model 列表
+ * Provider model fetch — Phase 3 Tauri 版
  *
- * v0.2: apiKey 走 server .env, client 不传
+ * 走 Tauri command 'fetch_provider_models' (Rust 用 ureq 调 {baseUrl}/models).
+ * apiKey 从 OS keychain 读 (Rust 拿, 不进前端).
+ *
+ * 返回: { ok, models: [{id, label?}], error? }
  */
+import { piTauri } from './tauri';
 
-import type { ProviderType, ModelInfo } from '@/stores/config';
+export interface ModelInfo {
+  id: string;
+  label?: string;
+}
 
 export interface FetchModelsRequest {
-  type: ProviderType;
-  /** v0.2 deprecated, 留空走 server env. openai-compatible 可选. */
-  apiKey?: string;
+  type: string;
   baseUrl?: string;
-  /** v0.2+: openai-compatible 专用, server 从 process.env[apiKeyEnv] 读 key */
-  apiKeyEnv?: string;
+  /** Phase 3: Tauri 用 providerId 查 keychain (前端不再需要 apiKey) */
+  providerId: string;
 }
 
 export interface FetchModelsResponse {
   ok: boolean;
   models?: ModelInfo[];
-  warning?: string;
   error?: string;
 }
 
 export async function fetchProviderModels(
   req: FetchModelsRequest,
 ): Promise<FetchModelsResponse> {
+  if (req.type === 'openai-compatible' && !req.baseUrl) {
+    return { ok: false, error: 'baseUrl is required for openai-compatible' };
+  }
   try {
-    // 显式不传 apiKey, 强制走 server env
-    const { apiKey: _unused, ...payload } = req;
-    const resp = await fetch('/api/providers/fetch-models', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!resp.ok) {
-      return { ok: false, error: `HTTP ${resp.status}` };
-    }
-    return await resp.json() as FetchModelsResponse;
+    const raw = await piTauri.fetchProviderModels(req.providerId, req.baseUrl ?? '');
+    return {
+      ok: true,
+      models: raw.map((m) => ({ id: m.id, label: m.label ?? undefined })),
+    };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }

@@ -141,6 +141,13 @@ async fn send_prompt(
 // 一次性命令, 跑完可以删 server/.
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct MigrationEntry {
+    pub env_var: String,
+    pub provider_id: String,
+    pub preview: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct MigrationResult {
     pub migrated: Vec<MigrationEntry>,
     pub skipped: Vec<String>,
@@ -148,10 +155,47 @@ pub struct MigrationResult {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct MigrationEntry {
-    pub env_var: String,
-    pub provider_id: String,
-    pub preview: String,
+pub struct ModelInfoDto {
+    pub id: String,
+    pub label: Option<String>,
+}
+
+#[tauri::command]
+async fn fetch_provider_models(
+    provider_id: String,
+    base_url: String,
+) -> Result<Vec<ModelInfoDto>, String> {
+    let api_key = keyring::get(&provider_id)?
+        .ok_or_else(|| format!("No API key in keychain for \"{provider_id}\""))?;
+    let clean_base = base_url.trim_end_matches('/');
+    let url = format!("{clean_base}/models");
+
+    // ureq 是同步 HTTP, 用 spawn_blocking 避免阻塞 Tauri runtime
+    let url_clone = url.clone();
+    let api_key_clone = api_key.clone();
+    let models: Vec<ModelInfoDto> = tokio::task::spawn_blocking(move || -> Result<Vec<ModelInfoDto>, String> {
+        let resp = ureq::get(&url_clone)
+            .set("Authorization", &format!("Bearer {api_key_clone}"))
+            .timeout(std::time::Duration::from_secs(15))
+            .call()
+            .map_err(|e| format!("fetch {url_clone}: {e}"))?;
+        let body: serde_json::Value = resp
+            .into_json()
+            .map_err(|e| format!("parse {url_clone}: {e}"))?;
+        let arr = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| "no .data array in response".to_string())?;
+        Ok(arr
+            .iter()
+            .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+            .map(|id| ModelInfoDto { id, label: None })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))??;
+
+    Ok(models)
 }
 
 #[tauri::command]
@@ -243,6 +287,7 @@ pub fn run() {
             list_api_keys,
             has_api_key,
             send_prompt,
+            fetch_provider_models,
             migrate_from_env,
         ])
         .run(tauri::generate_context!())
