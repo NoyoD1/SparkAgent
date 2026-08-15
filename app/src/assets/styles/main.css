@@ -1,0 +1,142 @@
+/* Pi Agent App — global base styles
+ * Design tokens are loaded from ./tokens.css (321 --pad-* variables)
+ * Components use <style scoped> in their .vue files.
+ */
+
+@import './tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+html {
+  font-family: var(--pad-font-sans);
+  font-size: var(--pad-fs-14);
+  line-height: var(--pad-lh-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--pad-bg-app);
+  color: var(--pad-fg-primary);
+}
+
+/* Scrollbar — 6px slim, matches design */
+.pad-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.pad-scroll::-webkit-scrollbar-thumb {
+  background: var(--pad-border-strong);
+  border-radius: 3px;
+}
+.pad-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--pad-fg-tertiary);
+}
+.pad-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Focus ring — matches pad-ring token */
+button:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--pad-ring);
+  outline-offset: 1px;
+  border-radius: var(--pad-radius-sm);
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: inherit;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+input,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+/* Typography helpers (matches Pi design) */
+.pad-display {
+  font-family: var(--pad-font-sans);
+  font-size: var(--pad-fs-32);
+  font-weight: var(--pad-fw-semibold);
+  line-height: var(--pad-lh-tight);
+  letter-spacing: -0.01em;
+}
+.pad-h1 {
+  font-family: var(--pad-font-sans);
+  font-size: var(--pad-fs-24);
+  font-weight: var(--pad-fw-semibold);
+  line-height: var(--pad-lh-tight);
+}
+.pad-h2 {
+  font-family: var(--pad-font-sans);
+  font-size: var(--pad-fs-20);
+  font-weight: var(--pad-fw-semibold);
+  line-height: var(--pad-lh-tight);
+}
+.pad-h3 {
+  font-family: var(--pad-font-sans);
+  font-size: var(--pad-fs-18);
+  font-weight: var(--pad-fw-medium);
+  line-height: var(--pad-lh-base);
+}
+.pad-body {
+  font-family: var(--pad-font-sans);
+  font-size: var(--pad-fs-14);
+  font-weight: var(--pad-fw-regular);
+  line-height: var(--pad-lh-base);
+}
+.pad-caption {
+  font-family: var(--pad-font-sans);
+  font-size: var(--pad-fs-12);
+  font-weight: var(--pad-fw-regular);
+  line-height: var(--pad-lh-base);
+}
+.pad-eyebrow {
+  font-family: var(--pad-font-sans);
+  font-size: var(--pad-fs-11);
+  font-weight: var(--pad-fw-medium);
+  line-height: var(--pad-lh-base);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.pad-mono {
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-14);
+  font-weight: var(--pad-fw-regular);
+  line-height: var(--pad-lh-base);
+}

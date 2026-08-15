@@ -1,0 +1,90 @@
+<script setup lang="ts">
+/**
+ * SidebarFunctionList — 4 function rows: 插件市场/自动化/办公助理/模板库.
+ * 1:1 mirrors chat.html's nav.function-list block.
+ */
+import { Plug, Zap, Briefcase, LayoutTemplate, Plus } from 'lucide-vue-next';
+import { useSessionStore } from '@/stores/session';
+
+const sessionStore = useSessionStore();
+
+function createNewTask() {
+  sessionStore.createNewSession();
+}
+</script>
+
+<template>
+  <nav class="pad-funcnav">
+    <button class="pad-newtask" @click="createNewTask">
+      <Plus :size="14" :stroke-width="1.75" />
+      <span class="pad-funcnav__label">新建任务</span>
+    </button>
+
+    <button class="pad-funcrow">
+      <Plug :size="16" :stroke-width="1.75" />
+      <span class="pad-funcnav__label">插件市场</span>
+    </button>
+    <button class="pad-funcrow">
+      <Zap :size="16" :stroke-width="1.75" />
+      <span class="pad-funcnav__label">自动化</span>
+    </button>
+    <button class="pad-funcrow">
+      <Briefcase :size="16" :stroke-width="1.75" />
+      <span class="pad-funcnav__label">办公助理</span>
+    </button>
+    <button class="pad-funcrow">
+      <LayoutTemplate :size="16" :stroke-width="1.75" />
+      <span class="pad-funcnav__label">模板库</span>
+    </button>
+  </nav>
+</template>
+
+<style scoped>
+.pad-funcnav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 var(--pad-sp-2);
+  flex-shrink: 0;
+}
+.pad-funcrow,
+.pad-newtask {
+  display: flex;
+  align-items: center;
+  gap: var(--pad-sp-2);
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--pad-sp-3);
+  border-radius: var(--pad-radius-md);
+  font-size: var(--pad-fs-13);
+  color: var(--pad-fg-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background var(--pad-dur-fast) ease,
+    color var(--pad-dur-fast) ease;
+}
+.pad-newtask {
+  color: var(--pad-fg-primary);
+  font-weight: var(--pad-fw-medium);
+}
+.pad-newtask:hover {
+  background: var(--pad-bg-hover);
+}
+.pad-funcrow:hover {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
+}
+
+/* Collapsed sidebar — hide label, center icons */
+:global(.pad-sidebar.is-collapsed) .pad-funcrow,
+:global(.pad-sidebar.is-collapsed) .pad-newtask {
+  justify-content: center;
+  padding: 0;
+}
+:global(.pad-sidebar.is-collapsed) .pad-funcnav__label {
+  display: none;
+}
+</style>

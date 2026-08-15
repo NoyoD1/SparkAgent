@@ -1,0 +1,65 @@
+# =============================================================================
+# Pi Agent — .gitignore
+# =============================================================================
+
+# ---- 依赖 ----
+node_modules/
+.pnpm-store/
+*/node_modules/
+
+# ---- 真实 API key (重要: 不进 git) ----
+.env
+.env.local
+.env.*.local
+!*.env.example
+!**/.env.example
+
+# ---- server log (可能有 key 痕迹) ----
+.server.log
+.server.log.err
+*.log
+!*.log.example
+
+# ---- 临时截图 + 测试产物 ----
+.screenshots/*.png
+.screenshots/*.log
+.screenshots/*.out.log
+.screenshots/*.bak-*
+.screenshots/.test-*.cjs
+.screenshots/test-*.cjs
+.screenshots/snap-*.cjs.bak
+
+# ---- build 产物 ----
+dist/
+build/
+out/
+*.tsbuildinfo
+.DS_Store
+
+# ---- 编辑器/系统 ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+.DS_Store
+$RECYCLE.BIN/
+desktop.ini
+*.lnk
+
+# ---- Tauri (Phase 3) ----
+src-tauri/
+src-tauri/target/
+*.app
+*.dmg
+*.exe
+*.msi
+*.deb
+*.AppImage
+
+# ---- 其他仓库 / 临时目录 ----
+# pi/ 是另一份 git 仓库的 clone (不同的项目, 不要混)
+pi/
+# 临时 inspect SDK 用的废纸篓
+tmp-inspect-pi-sdk/

@@ -1,0 +1,330 @@
+/* @light-only */
+/* Source: structured-spec */
+/* Pi Agent Design System — token spec for rounded-panel, borderless desktop-agent UI */
+/* @group-priority: accent, surface, text, status, border */
+
+/* ============================================================
+   PRIMITIVES (theme-independent)
+   Four ramps: accent, background, foreground, status.
+   Never consume primitives directly in product code — use the
+   semantic role tokens or the --color-* alias layer below.
+   ============================================================ */
+:root {
+  /* Accent ramp */
+  --pad-accent-50: #eeeeff;
+  --pad-accent-100: #dedeff;
+  --pad-accent-200: #b8b8ff;
+  --pad-accent-300: #9292ff;
+  --pad-accent-400: #6b6bff;
+  --pad-accent-500: #5b5bff; /* @primary */
+  --pad-accent-600: #4747e0;
+  --pad-accent-700: #3838b8;
+  --pad-accent-800: #2a2a8a;
+  --pad-accent-900: #1c1c5c;
+
+  /* Background ramp (surfaces) */
+  --pad-bg-50: #ffffff;
+  --pad-bg-100: #fafafa;
+  --pad-bg-200: #f5f5f5;
+  --pad-bg-300: #f0f0f0;
+  --pad-bg-400: #ebebeb;
+  --pad-bg-500: #e5e5e5;
+  --pad-bg-600: #d4d4d4;
+  --pad-bg-700: #a3a3a3;
+  --pad-bg-800: #737373;
+  --pad-bg-900: #404040;
+
+  /* Foreground ramp (text / icons) */
+  --pad-fg-50: #ffffff;
+  --pad-fg-100: #f5f5f5;
+  --pad-fg-200: #e5e5e5;
+  --pad-fg-300: #d4d4d4;
+  --pad-fg-400: #a3a3a3;
+  --pad-fg-500: #9a9a9a;
+  --pad-fg-600: #5c5c5c;
+  --pad-fg-700: #404040;
+  --pad-fg-800: #262626;
+  --pad-fg-900: #1a1a1a;
+
+  /* ============================================================
+     SEMANTIC ROLE TOKENS — light theme
+     ============================================================ */
+
+  /* surfaces */
+  --pad-background: var(--pad-bg-50);
+  --pad-card: var(--pad-bg-50);
+  --pad-popover: var(--pad-bg-50);
+  --pad-muted: var(--pad-bg-100);
+  --pad-bg-app: var(--pad-bg-50);
+  --pad-bg-sidebar: var(--pad-bg-200);
+  --pad-bg-hover: var(--pad-bg-300);
+  --pad-bg-active: var(--pad-bg-400);
+  --pad-bg-elevated: var(--pad-bg-50);
+  --pad-bg-input: var(--pad-bg-100);
+
+  /* foregrounds */
+  --pad-foreground: var(--pad-fg-900);
+  --pad-card-foreground: var(--pad-fg-900);
+  --pad-popover-foreground: var(--pad-fg-900);
+  --pad-primary-foreground: var(--pad-fg-50);
+  --pad-secondary-foreground: var(--pad-fg-900);
+  --pad-muted-foreground: var(--pad-fg-600);
+  --pad-accent-foreground: var(--pad-fg-900);
+  --pad-destructive-foreground: var(--pad-bg-50);
+  --pad-fg-primary: var(--pad-fg-900);
+  --pad-fg-secondary: var(--pad-fg-600);
+  --pad-fg-tertiary: var(--pad-fg-500);
+  --pad-fg-inverse: var(--pad-bg-50);
+
+  /* roles */
+  --pad-primary: var(--pad-accent-500);
+  --pad-secondary: var(--pad-bg-200);
+  --pad-accent: var(--pad-accent-500);
+  --pad-accent-hover: var(--pad-accent-600);
+  --pad-accent-soft: var(--pad-accent-50);
+  --pad-input: var(--pad-bg-200);
+  --pad-ring: var(--pad-accent-500);
+
+  /* borders */
+  --pad-border: #e8e8e8;
+  --pad-border-strong: #d4d4d4;
+  --pad-divider: var(--pad-bg-300);
+
+  /* status */
+  --pad-danger: #e5484d;
+  --pad-danger-subtle: #fef2f2;
+  --pad-danger-border: #fecaca;
+  --pad-danger-text: #b91c1c;
+  --pad-success: #30a46c;
+  --pad-success-subtle: #f0fdf4;
+  --pad-success-border: #bbf7d0;
+  --pad-success-text: #15803d;
+  --pad-warning: #f5a524;
+  --pad-warning-subtle: #fffbeb;
+  --pad-warning-border: #fde68a;
+  --pad-warning-text: #b45309;
+
+  /* ============================================================
+     ALIAS LAYER — preferred names for component authoring.
+     Resolves lazily, so it inherits the .dark overrides below.
+     ============================================================ */
+  --color-background: var(--pad-background);
+  --color-surface: var(--pad-card);
+  --color-surface-muted: var(--pad-bg-sidebar);
+  --color-surface-hover: var(--pad-bg-hover);
+  --color-surface-active: var(--pad-bg-active);
+  --color-input-bg: var(--pad-bg-input);
+
+  --color-foreground: var(--pad-foreground);
+  --color-muted-foreground: var(--pad-muted-foreground);
+  --color-placeholder: var(--pad-fg-tertiary);
+  --color-on-primary: var(--pad-primary-foreground);
+
+  --color-primary: var(--pad-primary);
+  --color-primary-hover: var(--pad-accent-hover);
+  --color-primary-soft: var(--pad-accent-soft);
+
+  --color-error: var(--pad-danger);
+  --color-success: var(--pad-success);
+  --color-warning: var(--pad-warning);
+
+  --color-border: var(--pad-border);
+  --color-border-strong: var(--pad-border-strong);
+  --color-divider: var(--pad-divider);
+
+  /* ============================================================
+     TYPOGRAPHY
+     ============================================================ */
+  --pad-font-sans: "PingFang SC", "HarmonyOS Sans", "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --pad-font-mono: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-family-base: var(--pad-font-sans);
+  --font-family-mono: var(--pad-font-mono);
+
+  --pad-fs-10: 10px;
+  --pad-fs-11: 11px;
+  --pad-fs-12: 12px;
+  --pad-fs-13: 13px;
+  --pad-fs-14: 14px;
+  --pad-fs-15: 15px;
+  --pad-fs-16: 16px;
+  --pad-fs-18: 18px;
+  --pad-fs-20: 20px;
+  --pad-fs-22: 22px;
+  --pad-fs-24: 24px;
+  --pad-fs-32: 32px;
+
+  --font-size-display: var(--pad-fs-32);
+  --font-size-h1: var(--pad-fs-24);
+  --font-size-h2: var(--pad-fs-20);
+  --font-size-h3: var(--pad-fs-18);
+  --font-size-body: var(--pad-fs-14);
+  --font-size-caption: var(--pad-fs-12);
+  --font-size-eyebrow: var(--pad-fs-11);
+
+  --pad-fw-regular: 400;
+  --pad-fw-medium: 500;
+  --pad-fw-semibold: 600;
+  --font-weight-regular: var(--pad-fw-regular);
+  --font-weight-medium: var(--pad-fw-medium);
+  --font-weight-semibold: var(--pad-fw-semibold);
+
+  --pad-lh-tight: 1.25;
+  --pad-lh-base: 1.5;
+  --pad-lh-loose: 1.7;
+  --line-height-tight: var(--pad-lh-tight);
+  --line-height-base: var(--pad-lh-base);
+  --line-height-loose: var(--pad-lh-loose);
+
+  /* ============================================================
+     SPACING (4px grid)
+     ============================================================ */
+  --pad-sp-1: 4px;
+  --pad-sp-2: 8px;
+  --pad-sp-3: 12px;
+  --pad-sp-4: 16px;
+  --pad-sp-5: 20px;
+  --pad-sp-6: 24px;
+  --pad-sp-8: 32px;
+  --pad-sp-10: 40px;
+  --pad-sp-12: 48px;
+
+  --space-1: var(--pad-sp-1);
+  --space-2: var(--pad-sp-2);
+  --space-3: var(--pad-sp-3);
+  --space-4: var(--pad-sp-4);
+  --space-5: var(--pad-sp-5);
+  --space-6: var(--pad-sp-6);
+  --space-8: var(--pad-sp-8);
+  --space-10: var(--pad-sp-10);
+  --space-12: var(--pad-sp-12);
+
+  /* ============================================================
+     BORDER RADIUS
+     ============================================================ */
+  --pad-radius-sm: 4px;
+  --pad-radius-md: 6px;
+  --pad-radius-lg: 8px;
+  --pad-radius-xl: 12px;
+  --pad-radius-pill: 9999px;
+
+  --radius-sm: var(--pad-radius-sm);
+  --radius-md: var(--pad-radius-md);
+  --radius-lg: var(--pad-radius-lg);
+  --radius-xl: var(--pad-radius-xl);
+  --radius-full: var(--pad-radius-pill);
+
+  /* ============================================================
+     SHADOWS (soft, used sparingly — panels rely on background contrast)
+     ============================================================ */
+  --pad-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --pad-shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --pad-shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.10);
+  --pad-shadow-drawer: var(--pad-shadow-modal);
+
+  --shadow-1: var(--pad-shadow-button);
+  --shadow-2: var(--pad-shadow-popover);
+  --shadow-3: var(--pad-shadow-modal);
+
+  /* ============================================================
+     MOTION
+     ============================================================ */
+  --pad-dur-fast: 120ms;
+  --pad-dur-base: 200ms;
+  --pad-dur-slow: 320ms;
+  --duration-fast: var(--pad-dur-fast);
+  --duration-base: var(--pad-dur-base);
+  --duration-slow: var(--pad-dur-slow);
+
+  --pad-ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
+  --pad-ease-out-back: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --pad-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ============================================================
+     SIZING & LAYOUT
+     ============================================================ */
+  --pad-size-icon-sm: 14px;
+  --pad-size-icon-md: 16px;
+  --pad-size-button-height: 32px;
+  --pad-size-input-height: 44px;
+  --pad-sidebar-width: 248px;
+  --pad-drawer-width: 340px;
+  --drawer-width: var(--pad-drawer-width);
+
+  --size-icon-sm: var(--pad-size-icon-sm);
+  --size-icon-md: var(--pad-size-icon-md);
+  --size-button-height: var(--pad-size-button-height);
+  --size-input-height: var(--pad-size-input-height);
+  --sidebar-width: var(--pad-sidebar-width);
+}
+
+/* ============================================================
+   SEMANTIC ROLE TOKENS — dark theme overrides only.
+   Primitives, alias layer, type, radius, shadow and spacing
+   are inherited from :root unchanged.
+   ============================================================ */
+.dark {
+  /* surfaces */
+  --pad-background: var(--pad-bg-900);
+  --pad-card: var(--pad-bg-800);
+  --pad-popover: var(--pad-bg-800);
+  --pad-muted: var(--pad-bg-800);
+  --pad-bg-app: var(--pad-bg-900);
+  --pad-bg-sidebar: var(--pad-bg-800);
+  --pad-bg-hover: var(--pad-bg-700);
+  --pad-bg-active: var(--pad-bg-600);
+  --pad-bg-elevated: var(--pad-bg-800);
+  --pad-bg-input: var(--pad-bg-700);
+
+  /* foregrounds */
+  --pad-foreground: var(--pad-fg-50);
+  --pad-card-foreground: var(--pad-fg-50);
+  --pad-popover-foreground: var(--pad-fg-50);
+  --pad-primary-foreground: var(--pad-fg-900);
+  --pad-secondary-foreground: var(--pad-fg-50);
+  --pad-muted-foreground: var(--pad-fg-400);
+  --pad-accent-foreground: var(--pad-fg-50);
+  --pad-destructive-foreground: var(--pad-fg-50);
+  --pad-fg-primary: var(--pad-fg-50);
+  --pad-fg-secondary: var(--pad-fg-400);
+  --pad-fg-tertiary: var(--pad-fg-500);
+
+  /* roles */
+  --pad-primary: var(--pad-accent-400);
+  --pad-secondary: var(--pad-bg-800);
+  --pad-accent: var(--pad-accent-400);
+  --pad-accent-hover: var(--pad-accent-300);
+  --pad-accent-soft: var(--pad-accent-900);
+  --pad-input: var(--pad-bg-700);
+  --pad-ring: var(--pad-accent-300);
+
+  /* borders */
+  --pad-border: var(--pad-bg-700);
+  --pad-border-strong: var(--pad-bg-600);
+  --pad-divider: var(--pad-bg-700);
+
+  /* status */
+  --pad-danger: #ef4444;
+  --pad-danger-subtle: #2a1416;
+  --pad-danger-border: #7f1d1d;
+  --pad-danger-text: #fca5a5;
+  --pad-success: #22c55e;
+  --pad-success-subtle: #0f2417;
+  --pad-success-border: #166534;
+  --pad-success-text: #4ade80;
+  --pad-warning: #f59e0b;
+  --pad-warning-subtle: #2a1a05;
+  --pad-warning-border: #92400e;
+  --pad-warning-text: #fcd34d;
+}
+
+/* ============================================================
+   TYPOGRAPHY CLASSES
+   ============================================================ */
+.pad-display { font-family: var(--pad-font-sans); font-size: var(--pad-fs-32); font-weight: var(--pad-fw-semibold); line-height: var(--pad-lh-tight); }
+.pad-h1      { font-family: var(--pad-font-sans); font-size: var(--pad-fs-24); font-weight: var(--pad-fw-semibold); line-height: var(--pad-lh-tight); }
+.pad-h2      { font-family: var(--pad-font-sans); font-size: var(--pad-fs-20); font-weight: var(--pad-fw-semibold); line-height: var(--pad-lh-tight); }
+.pad-h3      { font-family: var(--pad-font-sans); font-size: var(--pad-fs-18); font-weight: var(--pad-fw-medium); line-height: var(--pad-lh-base); }
+.pad-body    { font-family: var(--pad-font-sans); font-size: var(--pad-fs-14); font-weight: var(--pad-fw-regular); line-height: var(--pad-lh-base); }
+.pad-caption { font-family: var(--pad-font-sans); font-size: var(--pad-fs-12); font-weight: var(--pad-fw-regular); line-height: var(--pad-lh-base); }
+.pad-eyebrow { font-family: var(--pad-font-sans); font-size: var(--pad-fs-11); font-weight: var(--pad-fw-medium); line-height: var(--pad-lh-base); letter-spacing: 0.04em; text-transform: uppercase; }
+.pad-mono    { font-family: var(--pad-font-mono); font-size: var(--pad-fs-14); font-weight: var(--pad-fw-regular); line-height: var(--pad-lh-base); }

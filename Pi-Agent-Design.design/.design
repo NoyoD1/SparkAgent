@@ -1,0 +1,55 @@
+{
+  "data": [
+    {
+      "id": "page-index",
+      "title": "新建任务 - 空状态",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1786783460000,
+      "canvasData": {
+        "x": 0,
+        "y": 0,
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-b49da300",
+          "measuredAt": 1786783956735
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/index.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-chat",
+      "title": "聊天主区 - 任务摘要抽屉",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1786783460000,
+      "canvasData": {
+        "x": 480,
+        "y": 0,
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-224e4280",
+          "measuredAt": 1786783956735
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/chat.html",
+        "interactions": []
+      }
+    }
+  ],
+  "config": {
+    "autoLayout": true,
+    "deviceType": "desktop",
+    "projectName": "Pi-Agent-Design v2"
+  }
+}

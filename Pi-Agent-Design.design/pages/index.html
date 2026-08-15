@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>新建任务 - Pi Agent Design v2</title>
+  <link rel="stylesheet" href="../colors_and_type.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+  <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      font-family: var(--pad-font-sans);
+      color: var(--pad-foreground);
+      background: var(--pad-background);
+    }
+
+    #app {
+      height: 100vh;
+      width: 100vw;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--pad-bg-active);
+      padding: var(--pad-sp-2);
+      gap: var(--pad-sp-2);
+    }
+
+    #sidebar {
+      width: 248px;
+      background: var(--pad-bg-sidebar);
+      border-radius: var(--pad-radius-xl);
+      transition: width var(--pad-dur-base) var(--pad-ease-in-out);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    #sidebar.collapsed {
+      width: 52px !important;
+    }
+
+    #sidebar.collapsed .sidebar-label,
+    #sidebar.collapsed .tab-label,
+    #sidebar.collapsed .section-title,
+    #sidebar.collapsed .user-meta {
+      display: none;
+    }
+
+    #sidebar.collapsed .tab-btn {
+      flex: 0 0 auto;
+      padding: var(--pad-sp-1);
+    }
+
+    #sidebar.collapsed .workspace-chevron {
+      display: none;
+    }
+
+    #sidebar.collapsed .workspace-row {
+      justify-content: center;
+      padding-left: 0;
+      padding-right: 0;
+    }
+
+    #sidebar.collapsed .function-row {
+      justify-content: center;
+      padding-left: 0;
+      padding-right: 0;
+    }
+
+    #sidebar.collapsed .new-task-btn {
+      justify-content: center;
+      padding-left: 0;
+      padding-right: 0;
+    }
+
+    #sidebar.collapsed .section-header {
+      justify-content: center;
+    }
+
+    .tab-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--pad-sp-1);
+      flex: 1 1 0;
+      padding: var(--pad-sp-1) var(--pad-sp-2);
+      border-radius: var(--pad-radius-md);
+      font-size: var(--pad-fs-12);
+      font-weight: var(--pad-fw-medium);
+      color: var(--pad-fg-secondary);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
+    }
+
+    .tab-btn:hover {
+      background: var(--pad-bg-hover);
+      color: var(--pad-fg-primary);
+    }
+
+    .tab-btn.active {
+      color: var(--pad-fg-primary);
+      background: var(--pad-bg-active);
+    }
+
+    .function-row,
+    .workspace-row,
+    .new-task-btn {
+      display: flex;
+      align-items: center;
+      gap: var(--pad-sp-2);
+      width: 100%;
+      padding: var(--pad-sp-2);
+      border-radius: var(--pad-radius-md);
+      font-size: var(--pad-fs-13);
+      color: var(--pad-fg-secondary);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      text-align: left;
+      transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
+    }
+
+    .function-row:hover,
+    .workspace-row:hover {
+      background: var(--pad-bg-hover);
+      color: var(--pad-fg-primary);
+    }
+
+    .new-task-btn {
+      color: var(--pad-fg-primary);
+      background: var(--pad-bg-active);
+    }
+
+    .new-task-btn:hover {
+      background: var(--pad-bg-hover);
+    }
+
+    .workspace-children {
+      padding-left: var(--pad-sp-8);
+      display: flex;
+      flex-direction: column;
+      gap: var(--pad-sp-1);
+    }
+
+    .workspace-children.hidden {
+      display: none;
+    }
+
+    .workspace-chevron {
+      transition: transform var(--pad-dur-fast) var(--pad-ease-in-out);
+    }
+
+    .workspace-chevron.rotated {
+      transform: rotate(90deg);
+    }
+
+    .file-item {
+      display: block;
+      width: 100%;
+      padding: var(--pad-sp-1) var(--pad-sp-2);
+      border-radius: var(--pad-radius-md);
+      font-size: var(--pad-fs-12);
+      color: var(--pad-fg-secondary);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      text-align: left;
+      transition: background var(--pad-dur-fast) ease;
+    }
+
+    .file-item:hover {
+      background: var(--pad-bg-hover);
+      color: var(--pad-fg-primary);
+    }
+
+    .icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: var(--pad-sp-1);
+      border-radius: var(--pad-radius-md);
+      color: var(--pad-fg-secondary);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
+    }
+
+    .icon-btn:hover {
+      background: var(--pad-bg-hover);
+      color: var(--pad-fg-primary);
+    }
+
+    .composer {
+      width: 100%;
+      max-width: 680px;
+      background: var(--pad-bg-input);
+      border-radius: var(--pad-radius-xl);
+      padding: var(--pad-sp-4);
+    }
+
+    .composer textarea {
+      width: 100%;
+      background: transparent;
+      border: none;
+      outline: none;
+      resize: none;
+      font-size: var(--pad-fs-15);
+      line-height: var(--pad-lh-base);
+      color: var(--pad-fg-primary);
+      font-family: var(--pad-font-sans);
+    }
+
+    .composer textarea::placeholder {
+      color: var(--pad-fg-tertiary);
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--pad-sp-1);
+      padding: var(--pad-sp-1) var(--pad-sp-3);
+      border: none;
+      border-radius: var(--pad-radius-pill);
+      background: var(--pad-bg-hover);
+      font-size: var(--pad-fs-12);
+      color: var(--pad-fg-secondary);
+      cursor: pointer;
+      transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
+    }
+
+    .chip:hover {
+      background: var(--pad-bg-active);
+      color: var(--pad-fg-primary);
+    }
+
+    .send-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: var(--pad-radius-md);
+      background: var(--pad-primary);
+      color: var(--pad-fg-inverse);
+      border: none;
+      cursor: pointer;
+      box-shadow: var(--pad-shadow-button);
+      transition: background var(--pad-dur-fast) ease;
+    }
+
+    .send-btn:hover {
+      background: var(--pad-accent-hover);
+    }
+
+    .path-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--pad-sp-1);
+      padding: var(--pad-sp-1) var(--pad-sp-2);
+      border-radius: var(--pad-radius-md);
+      background: var(--pad-bg-hover);
+      font-size: var(--pad-fs-12);
+      color: var(--pad-fg-secondary);
+      border: none;
+      cursor: pointer;
+      transition: background var(--pad-dur-fast) ease;
+    }
+
+    .path-pill:hover {
+      background: var(--pad-bg-active);
+    }
+
+    .titlebar-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: var(--pad-sp-1);
+      border-radius: var(--pad-radius-md);
+      color: var(--pad-fg-secondary);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
+    }
+
+    .titlebar-btn:hover {
+      background: var(--pad-bg-hover);
+      color: var(--pad-fg-primary);
+    }
+
+    .main-scroll {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      background: var(--pad-card);
+      border-radius: var(--pad-radius-xl);
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- Title bar -->
+    <header class="shrink-0 flex items-center justify-between px-3 rounded-[var(--pad-radius-xl)]" style="height:36px;background:var(--pad-bg-app);">
+      <div class="flex items-center gap-2">
+        <button class="titlebar-btn">
+          <i data-lucide="search" class="w-4 h-4"></i>
+        </button>
+        <button class="titlebar-btn text-xs px-2" style="font-size:var(--pad-fs-12);">编辑(E)</button>
+        <button class="titlebar-btn text-xs px-2" style="font-size:var(--pad-fs-12);">帮助(H)</button>
+      </div>
+      <div class="flex items-center gap-1">
+        <button class="titlebar-btn" aria-label="最小化">
+          <i data-lucide="minus" class="w-4 h-4"></i>
+        </button>
+        <button class="titlebar-btn" aria-label="最大化">
+          <i data-lucide="square" class="w-3.5 h-3.5"></i>
+        </button>
+        <button class="titlebar-btn" aria-label="关闭">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </header>
+
+    <div class="flex flex-1 overflow-hidden" style="gap:var(--pad-sp-2);">
+      <!-- Sidebar -->
+      <aside id="sidebar">
+        <!-- Tabs -->
+        <div class="flex items-center justify-between px-2 pt-2 pb-1 gap-1">
+          <div class="flex items-center flex-1 gap-1">
+            <button class="tab-btn active" data-tab="work" onclick="switchTab('work')">
+              <i data-lucide="briefcase" class="w-3.5 h-3.5"></i>
+              <span class="tab-label">Work</span>
+            </button>
+            <button class="tab-btn" data-tab="code" onclick="switchTab('code')">
+              <i data-lucide="code-2" class="w-3.5 h-3.5"></i>
+              <span class="tab-label">Code</span>
+            </button>
+            <button class="tab-btn" data-tab="design" onclick="switchTab('design')">
+              <i data-lucide="pen-tool" class="w-3.5 h-3.5"></i>
+              <span class="tab-label">Design</span>
+            </button>
+          </div>
+          <button id="sidebar-toggle" class="icon-btn" title="收起/展开侧栏" style="flex-shrink:0;">
+            <i data-lucide="panel-left-close" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+
+        <!-- New task -->
+        <div class="px-2 py-1.5">
+          <button class="new-task-btn" onclick="createNewTask()">
+            <i data-lucide="plus" class="w-4 h-4"></i>
+            <span class="sidebar-label">新建任务</span>
+          </button>
+        </div>
+
+        <!-- Function list -->
+        <nav class="px-2 py-1 flex flex-col gap-0.5">
+          <button class="function-row" onclick="openFunction('market')">
+            <i data-lucide="puzzle" class="w-4 h-4"></i>
+            <span class="sidebar-label">插件市场</span>
+          </button>
+          <button class="function-row" onclick="openFunction('automation')">
+            <i data-lucide="zap" class="w-4 h-4"></i>
+            <span class="sidebar-label">自动化</span>
+          </button>
+          <button class="function-row" onclick="openFunction('assistant')">
+            <i data-lucide="coffee" class="w-4 h-4"></i>
+            <span class="sidebar-label">办公助理</span>
+          </button>
+          <button class="function-row" onclick="openFunction('templates')">
+            <i data-lucide="layout-template" class="w-4 h-4"></i>
+            <span class="sidebar-label">模板库</span>
+          </button>
+        </nav>
+
+        <!-- Task list section -->
+        <div class="section-header flex items-center justify-between px-3 py-2 mt-1">
+          <span class="section-title text-xs" style="font-size:var(--pad-fs-12);color:var(--pad-fg-tertiary);">任务列表</span>
+          <div class="flex items-center gap-1">
+            <button class="icon-btn" onclick="addTaskList()">
+              <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+            </button>
+            <button class="icon-btn" onclick="toggleTaskListView()">
+              <i data-lucide="list" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Workspace list -->
+        <div class="px-2 flex flex-col gap-0.5" id="workspace-list">
+          <div class="workspace-item">
+            <button class="workspace-row" onclick="toggleWorkspace(this)">
+              <i data-lucide="chevron-right" class="w-3.5 h-3.5 workspace-chevron"></i>
+              <i data-lucide="folder" class="w-4 h-4"></i>
+              <span class="sidebar-label flex-1">NX_Photovoltaic</span>
+            </button>
+            <div class="workspace-children hidden">
+              <button class="file-item" onclick="openFile('NX_Photovoltaic/README.md')">README.md</button>
+              <button class="file-item" onclick="openFile('NX_Photovoltaic/src/main.js')">src/main.js</button>
+              <button class="file-item" onclick="openFile('NX_Photovoltaic/package.json')">package.json</button>
+            </div>
+          </div>
+          <div class="workspace-item">
+            <button class="workspace-row" onclick="toggleWorkspace(this)">
+              <i data-lucide="chevron-right" class="w-3.5 h-3.5 workspace-chevron"></i>
+              <i data-lucide="folder" class="w-4 h-4"></i>
+              <span class="sidebar-label flex-1">QA</span>
+            </button>
+            <div class="workspace-children hidden">
+              <button class="file-item" onclick="openFile('QA/tests.spec.ts')">tests.spec.ts</button>
+              <button class="file-item" onclick="openFile('QA/fixtures/data.json')">fixtures/data.json</button>
+            </div>
+          </div>
+          <div class="workspace-item">
+            <button class="workspace-row" onclick="toggleWorkspace(this)">
+              <i data-lucide="chevron-right" class="w-3.5 h-3.5 workspace-chevron"></i>
+              <i data-lucide="folder" class="w-4 h-4"></i>
+              <span class="sidebar-label flex-1">EditTools</span>
+            </button>
+            <div class="workspace-children hidden">
+              <button class="file-item" onclick="openFile('EditTools/editor.tsx')">editor.tsx</button>
+              <button class="file-item" onclick="openFile('EditTools/utils.ts')">utils.ts</button>
+            </div>
+          </div>
+          <div class="workspace-item">
+            <button class="workspace-row" onclick="toggleWorkspace(this)">
+              <i data-lucide="chevron-right" class="w-3.5 h-3.5 workspace-chevron"></i>
+              <i data-lucide="folder" class="w-4 h-4"></i>
+              <span class="sidebar-label flex-1">Energy</span>
+            </button>
+            <div class="workspace-children hidden">
+              <button class="file-item" onclick="openFile('Energy/model.py')">model.py</button>
+              <button class="file-item" onclick="openFile('Energy/config.yaml')">config.yaml</button>
+            </div>
+          </div>
+          <div class="workspace-item">
+            <button class="workspace-row" onclick="toggleWorkspace(this)">
+              <i data-lucide="chevron-right" class="w-3.5 h-3.5 workspace-chevron"></i>
+              <i data-lucide="folder" class="w-4 h-4"></i>
+              <span class="sidebar-label flex-1">PostalParkProject_new</span>
+            </button>
+            <div class="workspace-children hidden">
+              <button class="file-item" onclick="openFile('PostalParkProject_new/index.html')">index.html</button>
+              <button class="file-item" onclick="openFile('PostalParkProject_new/app.js')">app.js</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- User area -->
+        <div class="mt-auto">
+          <div class="flex items-center justify-between px-3 py-2 gap-2">
+            <div class="flex items-center gap-2 min-w-0">
+              <div class="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-semibold" style="background:var(--pad-primary);flex-shrink:0;">燎</div>
+              <div class="user-meta min-w-0">
+                <div class="truncate" style="font-size:var(--pad-fs-13);color:var(--pad-fg-primary);">燎原</div>
+                <div style="font-size:var(--pad-fs-12);color:var(--pad-fg-tertiary);">免费</div>
+              </div>
+            </div>
+            <div class="flex items-center gap-1">
+              <button class="icon-btn" onclick="logout()">
+                <i data-lucide="log-out" class="w-4 h-4"></i>
+              </button>
+              <button class="icon-btn" onclick="openSettings()">
+                <i data-lucide="settings" class="w-4 h-4"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main content -->
+      <main class="main-scroll flex flex-col items-center justify-center p-6">
+        <div class="w-full max-w-2xl flex flex-col items-start gap-4">
+          <!-- Title -->
+          <div class="w-full flex items-center justify-center mb-2">
+            <h1 style="font-family:var(--pad-font-mono);font-size:var(--pad-fs-22);font-weight:var(--pad-fw-semibold);color:var(--pad-fg-primary);">
+              <span style="color:var(--pad-primary);">&lt;/&gt;</span> Code with TRAE
+            </h1>
+          </div>
+
+          <!-- Composer -->
+          <div class="composer">
+            <textarea id="composer-input" rows="3" placeholder="帮你编写代码、调试 Bug、优化性能等开发工作，交付生产级代码产物。"></textarea>
+            <div class="flex items-center justify-between mt-3">
+              <div class="flex items-center gap-1">
+                <button class="icon-btn" onclick="addContext()">
+                  <i data-lucide="plus" class="w-4 h-4"></i>
+                </button>
+                <button class="icon-btn" onclick="attachImage()">
+                  <i data-lucide="image" class="w-4 h-4"></i>
+                </button>
+                <button class="icon-btn" onclick="attachFile()">
+                  <i data-lucide="paperclip" class="w-4 h-4"></i>
+                </button>
+              </div>
+              <div class="flex items-center gap-2">
+                <button class="path-pill" onclick="switchModel()">
+                  Kimi-K2.7-Code
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                </button>
+                <button class="icon-btn" onclick="startVoice()">
+                  <i data-lucide="mic" class="w-4 h-4"></i>
+                </button>
+                <button class="send-btn" onclick="sendMessage()" aria-label="发送">
+                  <i data-lucide="arrow-up" class="w-4 h-4"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Path selector -->
+          <div class="flex items-center gap-2 pl-1">
+            <button class="path-pill" onclick="selectLocalPath()">
+              本地
+              <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+            </button>
+            <span style="color:var(--pad-fg-tertiary);font-size:var(--pad-fs-12);">/</span>
+            <button class="path-pill" onclick="selectWorkspacePath()">
+              NX_Photovoltaic
+              <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+
+          <!-- Quick chips -->
+          <div class="flex flex-wrap items-center gap-2 pl-1">
+            <button class="chip" onclick="useChip('app-dev')">
+              应用开发
+            </button>
+            <button class="chip" onclick="useChip('project-understand')">
+              项目理解
+            </button>
+            <button class="chip" onclick="useChip('game-idea')">
+              游戏创意
+            </button>
+            <button class="chip" onclick="useChip('tool-script')">
+              工具脚本
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      if (window.lucide && typeof lucide.createIcons === 'function') {
+        lucide.createIcons();
+      }
+
+      const sidebar = document.getElementById('sidebar');
+      const toggle = document.getElementById('sidebar-toggle');
+
+      toggle.addEventListener('click', function () {
+        sidebar.classList.toggle('collapsed');
+        const isCollapsed = sidebar.classList.contains('collapsed');
+        toggle.innerHTML = '<i data-lucide="' + (isCollapsed ? 'panel-left-open' : 'panel-left-close') + '" class="w-3.5 h-3.5"></i>';
+        if (window.lucide && typeof lucide.createIcons === 'function') {
+          lucide.createIcons();
+        }
+      });
+    });
+
+    function toggleWorkspace(btn) {
+      const item = btn.closest('.workspace-item');
+      const children = item.querySelector('.workspace-children');
+      const chevron = btn.querySelector('.workspace-chevron');
+      children.classList.toggle('hidden');
+      chevron.classList.toggle('rotated');
+    }
+
+    function switchTab(tab) {
+      document.querySelectorAll('.tab-btn').forEach(function (el) {
+        el.classList.remove('active');
+      });
+      document.querySelector('.tab-btn[data-tab="' + tab + '"]').classList.add('active');
+      console.log('Switched to tab:', tab);
+    }
+
+    function switchView(viewName) {
+      console.log('Switch file view:', viewName);
+    }
+
+    function createNewTask() {
+      console.log('Create new task');
+    }
+
+    function openFunction(name) {
+      console.log('Open function:', name);
+    }
+
+    function addTaskList() {
+      console.log('Add task list');
+    }
+
+    function toggleTaskListView() {
+      console.log('Toggle task list view');
+    }
+
+    function openFile(path) {
+      console.log('Open file:', path);
+    }
+
+    function logout() {
+      console.log('Logout');
+    }
+
+    function openSettings() {
+      console.log('Open settings');
+    }
+
+    function sendMessage() {
+      const input = document.getElementById('composer-input');
+      console.log('Send message:', input.value);
+    }
+
+    function switchModel() {
+      console.log('Switch model');
+    }
+
+    function addContext() {
+      console.log('Add context');
+    }
+
+    function attachImage() {
+      console.log('Attach image');
+    }
+
+    function attachFile() {
+      console.log('Attach file');
+    }
+
+    function startVoice() {
+      console.log('Start voice input');
+    }
+
+    function selectLocalPath() {
+      console.log('Select local path');
+    }
+
+    function selectWorkspacePath() {
+      console.log('Select workspace path');
+    }
+
+    function useChip(chip) {
+      console.log('Use quick chip:', chip);
+    }
+  </script>
+</body>
+</html>
