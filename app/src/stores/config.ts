@@ -31,6 +31,8 @@ export interface ModelInfo {
   id: string;
   label?: string;
   fetchedAt?: string;
+  /** v0.3.2+: 用户在 Settings 手动启停. undefined/true = 启用, false = 停用 */
+  enabled?: boolean;
 }
 
 export interface ProviderOption {
@@ -212,9 +214,26 @@ export const useConfigStore = defineStore('config', () => {
   function setProviderModels(id: string, models: ModelInfo[]) {
     const p = providers.value.find((x) => x.id === id);
     if (!p) return;
-    p.models = models.map((m) => ({ ...m, fetchedAt: new Date().toISOString() }));
+    p.models = models.map((m) => ({
+      ...m,
+      enabled: m.enabled !== false, // 默认为启用, 只在显式 false 时停用
+      fetchedAt: new Date().toISOString(),
+    }));
     // 如果 activeModelId 不在新 list 里, 重置
     if (p.activeModelId && !models.find((m) => m.id === p.activeModelId)) {
+      p.activeModelId = undefined;
+    }
+    p.updatedAt = new Date().toISOString();
+  }
+
+  function toggleModelEnabled(providerId: string, modelId: string) {
+    const p = providers.value.find((x) => x.id === providerId);
+    if (!p) return;
+    const m = p.models.find((x) => x.id === modelId);
+    if (!m) return;
+    m.enabled = m.enabled === false ? true : false;
+    // 关掉的如果是 active, 清掉 active
+    if (m.enabled === false && p.activeModelId === modelId) {
       p.activeModelId = undefined;
     }
     p.updatedAt = new Date().toISOString();
@@ -256,6 +275,7 @@ export const useConfigStore = defineStore('config', () => {
     updateProvider,
     removeProvider,
     setProviderModels,
+    toggleModelEnabled,
     setActiveModel,
     setActiveProvider,
     setThinkingLevel,

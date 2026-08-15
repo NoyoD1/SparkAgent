@@ -70,3 +70,4 @@ src-tauri/WixTools/
 pi/
 # 临时 inspect SDK 用的废纸篓
 tmp-inspect-pi-sdk/
+*.bak-*

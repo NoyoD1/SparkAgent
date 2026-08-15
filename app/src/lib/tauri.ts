@@ -15,6 +15,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
+console.log('[pi-tauri] module loaded, tauri-internals=', typeof (window as any).__TAURI_INTERNALS__);
+
 // ====== Event types (跟 server/src/types.ts ServerToClient 对齐 + 加 sessionId) ======
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
 
@@ -80,21 +82,29 @@ class PiTauriClient {
       thinkingLevel: ThinkingLevel;
     } | null,
   ): Promise<void> {
+    console.log('[pi-tauri] sendPrompt called', { sessionId, contentLen: content.length });
     const cfg = configGetter();
+    console.log('[pi-tauri] sendPrompt config=', cfg);
     if (!cfg || !cfg.providerId || !cfg.provider || !cfg.model) {
       throw new Error('未配置 Provider (去 Settings → Providers 添加并选 active provider + model)');
     }
-    await invoke('send_prompt', {
-      sessionId,
-      content,
-      config: {
-        providerId: cfg.providerId,
-        provider: cfg.provider,
-        model: cfg.model,
-        baseUrl: cfg.baseUrl ?? null,
-        thinkingLevel: cfg.thinkingLevel,
-      },
-    });
+    try {
+      const res = await invoke('send_prompt', {
+        sessionId,
+        content,
+        config: {
+          providerId: cfg.providerId,
+          provider: cfg.provider,
+          model: cfg.model,
+          baseUrl: cfg.baseUrl ?? null,
+          thinkingLevel: cfg.thinkingLevel,
+        },
+      });
+      console.log('[pi-tauri] sendPrompt invoke resolved', res);
+    } catch (e) {
+      console.error('[pi-tauri] sendPrompt invoke FAILED', e);
+      throw e;
+    }
   }
 
   // ====== Keychain API ======
@@ -111,22 +121,22 @@ class PiTauriClient {
   }
 
   async listApiKeys(): Promise<
-    Array<{ provider_id: string; configured: boolean; preview: string | null }>
+    Array<{ providerId: string; configured: boolean; preview: string | null }>
   > {
     return (await invoke('list_api_keys')) as Array<{
-      provider_id: string;
+      providerId: string;
       configured: boolean;
       preview: string | null;
     }>;
   }
 
   async migrateFromEnv(envPath?: string): Promise<{
-    migrated: Array<{ env_var: string; provider_id: string; preview: string }>;
+    migrated: Array<{ envVar: string; providerId: string; preview: string }>;
     skipped: string[];
     error: string | null;
   }> {
     return (await invoke('migrate_from_env', { envPath: envPath ?? null })) as {
-      migrated: Array<{ env_var: string; provider_id: string; preview: string }>;
+      migrated: Array<{ envVar: string; providerId: string; preview: string }>;
       skipped: string[];
       error: string | null;
     };
@@ -145,3 +155,9 @@ class PiTauriClient {
 
 export const piTauri = new PiTauriClient();
 void piTauri['ensureListener']();
+
+// 调试用: 把 piTauri 暴露到 window, 方便 F12 console 直接调
+if (typeof window !== 'undefined') {
+  (window as any).__piTauri = piTauri;
+  console.log('[pi-tauri] window.__piTauri exposed for console debugging');
+}

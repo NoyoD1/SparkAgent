@@ -17,7 +17,7 @@
  */
 import { ref, computed, onMounted } from 'vue';
 import { Plus, Trash2, RefreshCw, CheckCircle2, Star, KeyRound, Sparkles, Server, Save } from 'lucide-vue-next';
-import { useConfigStore, PROVIDER_OPTIONS, THINKING_LEVELS, type ProviderConfig, type ProviderType } from '@/stores/config';
+import { useConfigStore, PROVIDER_OPTIONS, THINKING_LEVELS, type ProviderConfig, type ProviderType, type ModelInfo } from '@/stores/config';
 import { fetchProviderModels } from '@/lib/providers-api';
 import { piTauri } from '@/lib/tauri';
 import AddProviderForm from './AddProviderForm.vue';
@@ -56,7 +56,7 @@ async function refreshAllKeyStatus() {
     const list = await piTauri.listApiKeys();
     const next: Record<string, { configured: boolean; preview: string | null }> = {};
     for (const k of list) {
-      next[k.provider_id] = { configured: k.configured, preview: k.preview };
+      next[k.providerId] = { configured: k.configured, preview: k.preview };
     }
     keyStatus.value = next;
   } catch (e) {
@@ -83,12 +83,23 @@ function setActive(provider: ProviderConfig) {
 }
 
 function activateModel(providerId: string, modelId: string) {
-  config.setActiveModel(providerId, modelId);
+  // 禁用的 model 不能设为 active
   const p = config.providers.find((x) => x.id === providerId);
+  const m = p?.models.find((x) => x.id === modelId);
+  if (!m || m.enabled === false) {
+    fetchState.value = 'fail';
+    fetchMessage.value = '该 model 已停用, 不能激活';
+    return;
+  }
+  config.setActiveModel(providerId, modelId);
   if (p) {
     fetchState.value = 'ok';
     fetchMessage.value = `已激活 ${p.label} / ${modelId}`;
   }
+}
+
+function isModelEnabled(m: ModelInfo): boolean {
+  return m.enabled !== false;
 }
 
 function setThinking(level: 'off' | 'low' | 'medium' | 'high') {
@@ -237,6 +248,7 @@ function closeAdd() {
                 :title="keyStatus[p.id]?.configured ? `已配置: ${keyStatus[p.id]?.preview}` : '未配置 key'"
               />
               <span v-if="p.id === config.activeProviderId" class="pad-provider-card__dot" />
+              <span v-if="p.id === config.activeProviderId" class="pad-provider-card__dot" />
             </button>
             <button v-if="config.providers.length === 0" class="pad-providers__empty" disabled>
               <Sparkles :size="14" :stroke-width="1.75" />
@@ -365,13 +377,23 @@ function closeAdd() {
                 v-for="m in selectedProvider.models"
                 :key="m.id"
                 class="pad-provider-detail__model"
-                :class="{ 'is-active': selectedProvider.activeModelId === m.id }"
+                :class="{
+                  'is-active': selectedProvider.activeModelId === m.id,
+                  'is-disabled': !isModelEnabled(m),
+                }"
               >
+                <input
+                  type="checkbox"
+                  class="pad-provider-detail__model-toggle"
+                  :checked="isModelEnabled(m)"
+                  @change="config.toggleModelEnabled(selectedProvider.id, m.id)"
+                />
                 <input
                   type="radio"
                   :name="`model-${selectedProvider.id}`"
                   :value="m.id"
                   :checked="selectedProvider.activeModelId === m.id"
+                  :disabled="!isModelEnabled(m)"
                   @change="activateModel(selectedProvider.id, m.id)"
                 />
                 <div class="pad-provider-detail__model-body">
@@ -788,6 +810,21 @@ function closeAdd() {
 .pad-provider-detail__model.is-active {
   background: var(--pad-accent-soft);
   border-color: var(--pad-accent);
+}
+.pad-provider-detail__model.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.pad-provider-detail__model.is-disabled:hover {
+  background: transparent;
+}
+.pad-provider-detail__model-toggle {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--pad-accent);
 }
 .pad-provider-detail__model-body {
   flex: 1;

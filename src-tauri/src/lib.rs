@@ -12,7 +12,23 @@ mod sidecar;
 use serde::Deserialize;
 use tauri::{AppHandle, Manager};
 
+/// Debug log to <project>/.tauri-debug.log (DEBUG ONLY).
+/// 用 file 而非 stderr 是因为 cargo tauri dev 的 stderr 被 bash task pipe 吃了看不见.
+fn debug_log(msg: &str) {
+    let log_path = std::path::PathBuf::from("D:/UnityWork/Tools/Pi/.tauri-debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        use std::io::Write;
+        let ts = chrono::Utc::now().format("%H:%M:%S%.3f");
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientConfig {
     /// Frontend provider config id, 用作 keychain 索引 (例如 "prov-shangtang-1")
     pub provider_id: String,
@@ -28,6 +44,7 @@ pub struct ClientConfig {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KeychainInfoDto {
     pub provider_id: String,
     pub configured: bool,
@@ -97,17 +114,28 @@ async fn send_prompt(
     content: String,
     config: ClientConfig,
 ) -> Result<(), String> {
+    debug_log(&format!(
+        "send_prompt: session={}, content_len={}, provider={}, model={}, providerId={}, baseUrl={:?}",
+        session_id, content.len(), config.provider, config.model, config.provider_id, config.base_url
+    ));
     if content.trim().is_empty() {
         return Err("content is empty".to_string());
     }
     // 从 keychain 取 key (永不出现在前端, 不进日志)
-    let api_key = keyring::get(&config.provider_id)?
-        .ok_or_else(|| {
-            format!(
+    let api_key = match keyring::get(&config.provider_id) {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            debug_log(&format!("send_prompt: no apiKey in keychain for {}", config.provider_id));
+            return Err(format!(
                 "No API key for provider \"{}\" in OS keychain. Add it in Settings → Providers.",
                 config.provider_id
-            )
-        })?;
+            ));
+        }
+        Err(e) => {
+            debug_log(&format!("send_prompt: keychain get err: {e}"));
+            return Err(format!("Keychain read error: {e}"));
+        }
+    };
 
     // base_url: openai-compatible 必须, 内置 provider 暂不实现 (Phase 3 MVP 只支持 openai-compatible)
     let base_url = if config.provider == "openai-compatible" {
@@ -119,6 +147,10 @@ async fn send_prompt(
         String::new() // sidecar 内置 provider 暂未实现
     };
 
+    debug_log(&format!(
+        "send_prompt: dispatching to sidecar, base_url={base_url}, key_len={}",
+        api_key.len()
+    ));
     sidecar::run_prompt(
         app,
         sidecar::SidecarConfig {
@@ -141,6 +173,7 @@ async fn send_prompt(
 // 一次性命令, 跑完可以删 server/.
 
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MigrationEntry {
     pub env_var: String,
     pub provider_id: String,
@@ -148,6 +181,7 @@ pub struct MigrationEntry {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MigrationResult {
     pub migrated: Vec<MigrationEntry>,
     pub skipped: Vec<String>,
@@ -265,6 +299,7 @@ async fn migrate_from_env(app: AppHandle, env_path: Option<String>) -> Result<Mi
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

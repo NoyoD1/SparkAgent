@@ -47,8 +47,7 @@ export const useUiStore = defineStore('ui', () => {
   // Settings 内的当前 tab (string 是 tab id, e.g. 'provider', 'general')
   const settingsTab = ref<string>('provider');
 
-  // Active session
-  const activeSessionId = ref<string | null>('sess-1');
+  // Active session — moved to session store (Phase 3 v0.3.2+)
 
   watch(
     widths,
@@ -78,9 +77,7 @@ export const useUiStore = defineStore('ui', () => {
     activeTab.value = t;
   }
 
-  function setActiveSession(id: string | null) {
-    activeSessionId.value = id;
-  }
+  // setActiveSession removed — use sessionStore.selectSession() instead
 
   function setSidebarWidth(px: number) {
     widths.value.sidebar = clampWidth(px, 52, 480);
@@ -102,7 +99,6 @@ export const useUiStore = defineStore('ui', () => {
     sidebarCollapsed,
     drawerCollapsed,
     activeTab,
-    activeSessionId,
     widths,
     viewMode,
     settingsTab,
@@ -112,7 +108,6 @@ export const useUiStore = defineStore('ui', () => {
     toggleDrawer,
     setDrawerCollapsed,
     setActiveTab,
-    setActiveSession,
     setSidebarWidth,
     setDrawerWidth,
     openSettings,

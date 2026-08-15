@@ -17,6 +17,19 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+fn debug_log(msg: &str) {
+    let log_path = std::path::PathBuf::from("D:/UnityWork/Tools/Pi/.tauri-debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        use std::io::Write;
+        let ts = chrono::Utc::now().format("%H:%M:%S%.3f");
+        let _ = writeln!(f, "[{ts}] [sidecar] {msg}");
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SidecarConfig {
     /// Provider type: 'openai-compatible' / 'anthropic' / 'openai' / ...
@@ -39,12 +52,18 @@ pub struct PromptMsg {
 }
 
 fn find_sidecar_script() -> Result<std::path::PathBuf, String> {
-    let project_root = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+    // 用 CARGO_MANIFEST_DIR (编译时绝对路径 = src-tauri/), parent() = 项目根
+    // 不用 current_dir() 因为 cargo tauri dev 时 binary 的 cwd 是 src-tauri/
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let project_root = std::path::Path::new(manifest_dir).parent().ok_or_else(|| {
+        format!("CARGO_MANIFEST_DIR ({manifest_dir}) has no parent (cannot find project root)")
+    })?;
     let script = project_root.join("sidecar").join("src").join("index.mjs");
     if !script.exists() {
         return Err(format!(
-            "Sidecar script not found at {}. Run from project root (cargo tauri dev).",
-            script.display()
+            "Sidecar script not found at {}. cwd={:?}",
+            script.display(),
+            std::env::current_dir().ok()
         ));
     }
     Ok(script)
@@ -71,10 +90,15 @@ fn emit_error(app: &AppHandle, session_id: &str, message: &str) {
 /// 进程在收到 'agent_end' 事件后自然结束.
 pub fn run_prompt(app: AppHandle, config: SidecarConfig, prompt: PromptMsg) {
     let session_id = prompt.session_id;
+    debug_log(&format!("run_prompt: session={session_id}"));
     tokio::spawn(async move {
         let script = match find_sidecar_script() {
-            Ok(s) => s,
+            Ok(s) => {
+                debug_log(&format!("sidecar script: {}", s.display()));
+                s
+            }
             Err(e) => {
+                debug_log(&format!("sidecar not found: {e}"));
                 emit_error(&app, &session_id, &e);
                 return;
             }
@@ -88,8 +112,12 @@ pub fn run_prompt(app: AppHandle, config: SidecarConfig, prompt: PromptMsg) {
             .kill_on_drop(true)
             .spawn()
         {
-            Ok(c) => c,
+            Ok(c) => {
+                debug_log(&format!("node spawned, pid={}", c.id().unwrap_or(0)));
+                c
+            }
             Err(e) => {
+                debug_log(&format!("spawn node failed: {e}"));
                 emit_error(&app, &session_id, &format!("spawn node failed: {e}"));
                 return;
             }
@@ -161,6 +189,7 @@ pub fn run_prompt(app: AppHandle, config: SidecarConfig, prompt: PromptMsg) {
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = reader.next_line().await {
+                debug_log(&format!("stderr: {line}"));
                 log::warn!("[sidecar stderr] {line}");
             }
         });
@@ -168,7 +197,10 @@ pub fn run_prompt(app: AppHandle, config: SidecarConfig, prompt: PromptMsg) {
         // 主 task: 读 stdout, 逐行 emit event
         let mut reader = BufReader::new(stdout).lines();
         let mut got_agent_end = false;
+        let mut event_count = 0u32;
         while let Ok(Some(line)) = reader.next_line().await {
+            event_count += 1;
+            debug_log(&format!("stdout[{event_count}]: {line}"));
             log::info!("[sidecar:{session_id}] {line}");
             if line.trim().is_empty() {
                 continue;
