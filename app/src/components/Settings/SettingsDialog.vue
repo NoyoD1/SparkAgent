@@ -20,8 +20,6 @@ import {
   Plug,             // 扩展 / MCP
   Info,             // 关于
   ArrowLeft,        // 关闭
-  Sparkles,         // 空状态
-  Server,           // 通用 icon
   RotateCcw,        // 重置
 } from 'lucide-vue-next';
 import { useUiStore } from '@/stores/ui';

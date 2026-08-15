@@ -24,9 +24,9 @@ const showModelMenu = ref(false);
 const activeProvider = computed(() => configStore.activeProvider);
 const activeModel = computed(() => configStore.activeModel);
 const providerTypeLabel = computed(() => {
-  if (!activeProvider.value) return null;
-  return PROVIDER_OPTIONS.find((o) => o.id === activeProvider.value.type)?.label
-    ?? activeProvider.value.type;
+  const p = activeProvider.value;
+  if (!p) return null;
+  return PROVIDER_OPTIONS.find((o) => o.id === p.type)?.label ?? p.type;
 });
 
 const hasConfig = computed(() => !!activeProvider.value && !!activeModel.value);

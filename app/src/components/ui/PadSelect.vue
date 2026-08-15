@@ -12,8 +12,8 @@
  * - 弹层: 默认向下, 接近底部自动 flip 向上
  * - 点击外部关闭
  */
-import { ref, computed, nextTick, onBeforeUnmount } from 'vue';
-import { ChevronDown, Check, Search, X } from 'lucide-vue-next';
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue';
+import { ChevronDown, Check, Search } from 'lucide-vue-next';
 
 export interface PadSelectOption<T> {
   value: T;
@@ -55,6 +55,10 @@ const menuRef = ref<HTMLDivElement | null>(null);
 const searchQuery = ref('');
 const activeIndex = ref(0);
 const flipUp = ref(false);
+const windowHeight = ref(typeof window !== 'undefined' ? window.innerHeight : 0);
+if (typeof window !== 'undefined') {
+  window.addEventListener('resize', () => { windowHeight.value = window.innerHeight; });
+}
 
 const filteredOptions = computed(() => {
   if (!props.searchable || !searchQuery.value) return props.options;
@@ -157,7 +161,6 @@ function onDocClick(e: MouseEvent) {
   }
 }
 
-import { onMounted } from 'vue';
 onMounted(() => document.addEventListener('mousedown', onDocClick));
 onBeforeUnmount(() => document.removeEventListener('mousedown', onDocClick));
 </script>
@@ -195,7 +198,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocClick));
           left: triggerRef.getBoundingClientRect().left + 'px',
           width: triggerRef.getBoundingClientRect().width + 'px',
           top: (flipUp ? triggerRef.getBoundingClientRect().top : triggerRef.getBoundingClientRect().bottom + 4) + 'px',
-          bottom: flipUp ? (window.innerHeight - triggerRef.getBoundingClientRect().top + 4) + 'px' : 'auto',
+          bottom: flipUp ? (windowHeight - triggerRef.getBoundingClientRect().top + 4) + 'px' : 'auto',
         } : {}"
         role="listbox"
       >
@@ -213,7 +216,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocClick));
           <template v-for="group in groupedOptions" :key="group.label || '_'">
             <div v-if="group.label" class="pad-select__group-label">{{ group.label }}</div>
             <button
-              v-for="(opt, i) in group.opts"
+              v-for="opt in group.opts"
               :key="String(opt.value)"
               type="button"
               class="pad-select__item"

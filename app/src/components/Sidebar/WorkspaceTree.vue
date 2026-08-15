@@ -3,7 +3,7 @@
  * WorkspaceTree — workspace + nested sessions + file list.
  * 1:1 mirrors chat.html's task list section.
  */
-import { ChevronRight, Folder, Plus, List } from 'lucide-vue-next';
+import { ChevronRight, Plus, List } from 'lucide-vue-next';
 import { storeToRefs } from 'pinia';
 import { useSessionStore } from '@/stores/session';
 import { useUiStore } from '@/stores/ui';

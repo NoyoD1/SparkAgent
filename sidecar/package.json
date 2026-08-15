@@ -1,0 +1,14 @@
+{
+  "name": "pi-agent-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi Agent Tauri 2 sidecar — Node.js script that runs LLM streaming IPC with Rust host.",
+  "main": "src/index.mjs",
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

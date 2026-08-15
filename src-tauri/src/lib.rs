@@ -1,0 +1,250 @@
+/**
+ * Pi Agent Desktop — Tauri 2 main
+ *
+ * 架构:
+ *   [Vue frontend] --invoke/listen--> [Tauri commands + events] --stdin/stdout--> [Node sidecar]
+ *   keychain (keyring crate) 存 apiKey, 不进 localStorage / 不进 WS / 不进 .env
+ */
+mod index_file;
+mod keyring;
+mod sidecar;
+
+use serde::Deserialize;
+use tauri::{AppHandle, Manager};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClientConfig {
+    /// Frontend provider config id, 用作 keychain 索引 (例如 "prov-shangtang-1")
+    pub provider_id: String,
+    /// Provider type: 'openai-compatible' | 'anthropic' | 'openai' | ...
+    pub provider: String,
+    pub model: String,
+    /// OpenAI-compatible 用, 内置 provider 忽略
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// 'off' | 'low' | 'medium' | 'high'
+    #[serde(default)]
+    pub thinking_level: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KeychainInfoDto {
+    pub provider_id: String,
+    pub configured: bool,
+    /// Masked preview, 例如 "sk-FLzj***oMY", configured=false 时为 null
+    pub preview: Option<String>,
+}
+
+// ====== Keychain commands ======
+
+#[tauri::command]
+async fn save_api_key(
+    app: AppHandle,
+    provider_id: String,
+    api_key: String,
+) -> Result<(), String> {
+    if provider_id.is_empty() {
+        return Err("provider_id is empty".to_string());
+    }
+    if api_key.is_empty() {
+        return Err("api_key is empty".to_string());
+    }
+    keyring::save(&provider_id, &api_key)?;
+    index_file::add(&app, &provider_id)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_api_key(
+    app: AppHandle,
+    provider_id: String,
+) -> Result<(), String> {
+    keyring::delete(&provider_id)?;
+    index_file::remove(&app, &provider_id)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_api_keys(app: AppHandle) -> Result<Vec<KeychainInfoDto>, String> {
+    let idx = index_file::load(&app);
+    let mut out = Vec::with_capacity(idx.provider_ids.len());
+    for id in idx.provider_ids {
+        let (configured, preview) = match keyring::get(&id) {
+            Ok(Some(k)) => (true, Some(crate::keyring::mask(&k))),
+            Ok(None) => (false, None),
+            Err(_) => (false, None),
+        };
+        out.push(KeychainInfoDto {
+            provider_id: id,
+            configured,
+            preview,
+        });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+async fn has_api_key(provider_id: String) -> Result<bool, String> {
+    Ok(keyring::get(&provider_id)?.is_some())
+}
+
+// ====== LLM command ======
+
+#[tauri::command]
+async fn send_prompt(
+    app: AppHandle,
+    session_id: String,
+    content: String,
+    config: ClientConfig,
+) -> Result<(), String> {
+    if content.trim().is_empty() {
+        return Err("content is empty".to_string());
+    }
+    // 从 keychain 取 key (永不出现在前端, 不进日志)
+    let api_key = keyring::get(&config.provider_id)?
+        .ok_or_else(|| {
+            format!(
+                "No API key for provider \"{}\" in OS keychain. Add it in Settings → Providers.",
+                config.provider_id
+            )
+        })?;
+
+    // base_url: openai-compatible 必须, 内置 provider 暂不实现 (Phase 3 MVP 只支持 openai-compatible)
+    let base_url = if config.provider == "openai-compatible" {
+        config
+            .base_url
+            .clone()
+            .ok_or_else(|| "openai-compatible needs baseUrl".to_string())?
+    } else {
+        String::new() // sidecar 内置 provider 暂未实现
+    };
+
+    sidecar::run_prompt(
+        app,
+        sidecar::SidecarConfig {
+            provider: config.provider,
+            model: config.model,
+            base_url,
+            api_key,
+            thinking_level: config.thinking_level,
+        },
+        sidecar::PromptMsg {
+            session_id,
+            content,
+        },
+    );
+    Ok(())
+}
+
+// ====== Migration helper ======
+// Phase 3 bootstrap: 从 server/.env 读 SHANGTANG_KEY (或任何 *_KEY), 写到 keychain.
+// 一次性命令, 跑完可以删 server/.
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MigrationResult {
+    pub migrated: Vec<MigrationEntry>,
+    pub skipped: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MigrationEntry {
+    pub env_var: String,
+    pub provider_id: String,
+    pub preview: String,
+}
+
+#[tauri::command]
+async fn migrate_from_env(app: AppHandle, env_path: Option<String>) -> Result<MigrationResult, String> {
+    let path = env_path.unwrap_or_else(|| "../server/.env".to_string());
+    let abs_path = std::path::Path::new(&path)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(&path));
+    let result = match std::fs::read_to_string(&abs_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(MigrationResult {
+                migrated: vec![],
+                skipped: vec![],
+                error: Some(format!("read {path}: {e}")),
+            });
+        }
+    };
+    let mut migrated = Vec::new();
+    let mut skipped = Vec::new();
+    for line in result.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // 形如 KEY=value, value 可能带 # 注释
+        let Some((key, value_raw)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value_raw
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'');
+        if !key.ends_with("_KEY") || value.is_empty() {
+            continue;
+        }
+        // 推导 provider_id: SHANGTANG_KEY → prov-shangtang-N
+        // 简化: 全部映射成 prov-<lowercased-key-suffix>-1
+        let suffix = key.trim_end_matches("_KEY").to_lowercase();
+        let provider_id = format!("prov-{suffix}-1");
+        match keyring::save(&provider_id, value) {
+            Ok(()) => {
+                index_file::add(&app, &provider_id)?;
+                migrated.push(MigrationEntry {
+                    env_var: key.to_string(),
+                    provider_id: provider_id.clone(),
+                    preview: crate::keyring::mask(value),
+                });
+            }
+            Err(e) => {
+                skipped.push(format!("{key}: {e}"));
+            }
+        }
+    }
+    Ok(MigrationResult {
+        migrated,
+        skipped,
+        error: None,
+    })
+}
+
+// ====== App entry ======
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            if cfg!(debug_assertions) {
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Info)
+                        .build(),
+                )?;
+            }
+            // 确保 app data dir 存在 (index_file 用)
+            let _ = app
+                .path()
+                .app_data_dir()
+                .map(|p| std::fs::create_dir_all(p));
+            log::info!("Pi Agent Desktop started");
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            save_api_key,
+            delete_api_key,
+            list_api_keys,
+            has_api_key,
+            send_prompt,
+            migrate_from_env,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

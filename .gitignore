@@ -24,10 +24,11 @@ node_modules/
 .screenshots/*.png
 .screenshots/*.log
 .screenshots/*.out.log
-.screenshots/*.bak-*
 .screenshots/.test-*.cjs
 .screenshots/test-*.cjs
 .screenshots/snap-*.cjs.bak
+# 通用备份: .bak-v2 / .bak-v3 等
+*.bak-*
 
 # ---- build 产物 ----
 dist/
@@ -49,8 +50,10 @@ desktop.ini
 *.lnk
 
 # ---- Tauri (Phase 3) ----
-src-tauri/
+# Tauri 2 build artifacts — keep source committed
 src-tauri/target/
+src-tauri/gen/
+src-tauri/WixTools/
 *.app
 *.dmg
 *.exe

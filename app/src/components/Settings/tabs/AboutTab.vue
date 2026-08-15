@@ -3,7 +3,6 @@
  * AboutTab — 关于 / 版本信息
  * 显示 Pi Agent App 版本 + Pi SDK 版本 + 仓库链接
  */
-import { computed } from 'vue';
 import { Info, Github, ExternalLink } from 'lucide-vue-next';
 
 const version = '0.1.0';

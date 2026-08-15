@@ -4,7 +4,7 @@ import { fileURLToPath, URL } from 'node:url';
 
 // Pi Agent App — Vite 6 + Vue 3
 // 1:1 复刻 Minimal Dashboard (Pi-Agent-Design.design 包)
-// 后端预留: Vite dev 跨端口 API proxy, 解决 CORS 头缺失问题
+// Phase 3: 走 Tauri 2, 不再需要 localhost:3001 proxy (Rust host 直接 spawn sidecar)
 export default defineConfig({
   plugins: [vue()],
   resolve: {
@@ -15,15 +15,9 @@ export default defineConfig({
   server: {
     port: 5174,
     strictPort: false,
-    // Phase 2+: dev proxy 把 /api + /ws 转给本机 Pi SDK server (port 3001)
-    proxy: {
-      '/api': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
-        ws: true,  // WebSocket upgrade 也要 proxy
-      },
-    },
   },
+  // Tauri 2 dev: 固定端口 + 暴露给 Tauri WebView 访问
+  clearScreen: false,
   build: {
     target: 'es2022',
     sourcemap: true,

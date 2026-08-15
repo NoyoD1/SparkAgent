@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import type { ChatMessage, ThinkingBlock, ToolCallBlock } from '@/lib/mock/types';
 import { mockMessages, mockThinking, mockToolCalls } from '@/lib/mock/messages';
-import { piWs } from '@/lib/ws';
+import { piTauri } from '@/lib/tauri';
 import { useConfigStore } from './config';
 
 export type { ChatMessage, ThinkingBlock, ToolCallBlock };
@@ -82,7 +82,9 @@ export const useChatStore = defineStore('chat', () => {
     errorBySession.value[sessionId] = null;
 
     // 3. 临时 listener, message_end 收尾
-    const off = piWs.on((event) => {
+    const off = piTauri.on((event) => {
+      // Tauri 事件全局广播, 用 sessionId 过滤当前 prompt
+      if ('sessionId' in event && event.sessionId !== sessionId) return;
       const msgs = messagesBySession.value[sessionId];
       if (!msgs) return;
       const idx = msgs.findIndex((m) => m.id === assistantId);
@@ -105,7 +107,7 @@ export const useChatStore = defineStore('chat', () => {
           console.log('[chat] tool_start', event.toolName);
           break;
         case 'tool_end':
-          console.log('[chat] tool_end', event.toolName ?? event.toolCallId);
+          console.log('[chat] tool_end', event.toolCallId);
           break;
         case 'agent_end':
           streamingBySession.value[sessionId] = false;
@@ -121,9 +123,7 @@ export const useChatStore = defineStore('chat', () => {
       }
     });
 
-    // 4. 触发 prompt (自动带上 active provider/model config)
-    //    v0.2: 不传 apiKey, server 从 .env 读
-    //    v0.2+: openai-compatible 传 apiKeyEnv (env 变量名, 不是 key)
+    // 4. 触发 prompt (Tauri: apiKey 走 OS keychain, client 拿不到)
     try {
       const config = useConfigStore();
       const active = config.activeProvider;
@@ -131,11 +131,11 @@ export const useChatStore = defineStore('chat', () => {
       if (!active || !model) {
         throw new Error('请先在 Settings → Providers 添加并选一个 active provider + model');
       }
-      await piWs.sendPrompt(sessionId, content, () => ({
+      await piTauri.sendPrompt(sessionId, content, () => ({
+        providerId: active.id,
         provider: active.type,
         model: model.id,
         baseUrl: active.baseUrl,
-        apiKeyEnv: active.apiKeyEnv,
         thinkingLevel: config.thinkingLevel,
       }));
     } catch (e) {

@@ -14,13 +14,11 @@
  * - ⏸ openai-compatible 的 LLM 调 (Phase 3+, UI 标 "已发现, LLM 调 Phase 3+")
  */
 import { ref, computed } from 'vue';
-import { Plus, Trash2, RefreshCw, CheckCircle2, AlertCircle, Star, KeyRound, Sparkles, ExternalLink, Server } from 'lucide-vue-next';
+import { Plus, Trash2, RefreshCw, CheckCircle2, Star, KeyRound, Sparkles, Server } from 'lucide-vue-next';
 import { useConfigStore, PROVIDER_OPTIONS, THINKING_LEVELS, type ProviderConfig, type ProviderType, type ModelInfo } from '@/stores/config';
-import { useUiStore } from '@/stores/ui';
 import AddProviderForm from './AddProviderForm.vue';
 
 const config = useConfigStore();
-const ui = useUiStore();
 
 const selectedId = ref<string | null>(config.providers[0]?.id ?? null);
 /** viewMode: list (默认) | add (中间列显示 add form, 右侧列空) */
