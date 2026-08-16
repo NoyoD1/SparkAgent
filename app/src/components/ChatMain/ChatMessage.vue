@@ -28,6 +28,8 @@ interface Props {
   isStreaming?: boolean;
   /** v0.3.8.6: 该 message 关联的工具调用列表 (折叠提示) */
   toolCalls?: ToolCallBlock[];
+  /** v0.3.8.15: 错误信息 (sidecar 发 error event 时显示具体内容) */
+  errorMessage?: string | null;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -36,6 +38,7 @@ const props = withDefaults(defineProps<Props>(), {
   modelName: '',
   isStreaming: false,
   toolCalls: () => [],
+  errorMessage: null,
 });
 
 // v0.3.8.11: thinking 折叠状态由 store 的 thinking.collapsed 字段管理
@@ -174,12 +177,14 @@ async function copyMessage() {
       <MarkdownContent :content="message.content" />
     </div>
 
-    <!-- v0.3.8.9: stream 结束但 4 类内容都为空, 给个明确提示而不是静默 -->
+    <!-- v0.3.8.15: stream 结束但 4 类内容都为空时, 显示具体 error 信息
+     * (有 errorMessage 就显示 error, 否则 "AI 没有返回内容") -->
     <div
       v-else-if="!isStreaming && !message.content && !hasTools && (!thinking || !thinking.content)"
       class="pad-msg__empty"
     >
-      <span>AI 没有返回内容</span>
+      <span v-if="errorMessage">⚠ {{ errorMessage }}</span>
+      <span v-else>AI 没有返回内容</span>
     </div>
 
     <!-- Actions: 仅在非 streaming 且有内容时显示 -->

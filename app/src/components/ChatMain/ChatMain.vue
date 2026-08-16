@@ -257,6 +257,7 @@ function jumpToMessage(messageId: string) {
               :tool-calls="msg.role === 'assistant' ? (toolCallsByMessageId.get(msg.id) || []) : []"
               :model-name="activeModelName"
               :is-streaming="isMessageStreaming(idx)"
+              :error-message="isMessageStreaming(idx) ? null : chatStore.getError(activeSession?.id)"
             />
           </div>
         </div>
