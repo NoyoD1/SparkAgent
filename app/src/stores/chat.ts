@@ -207,6 +207,8 @@ export const useChatStore = defineStore('chat', () => {
           break;
         case 'turn_start':
           // v0.4.1 step 累加: 创建新 step group, 后续 message_update/tool_* 路由到这里
+          // v0.4.1 fix: collapsed 默认 true (用户反馈"默认展开太占地方"),
+          // 包括 current step — 当前 step 通过 isActive 标 accent 边 + spinner 提示, 不强制展开
           if (idx >= 0) {
             const assistant = d2.messages[idx];
             if (!assistant.steps) assistant.steps = [];
@@ -216,21 +218,20 @@ export const useChatStore = defineStore('chat', () => {
               toolCalls: [],
               stepText: '',
               isActive: true,
-              collapsed: false,  // 当前 step 默认展开
+              collapsed: true,  // 默认折叠, 包括 current step
             };
             assistant.steps.push(newStep);
             console.log('[chat] turn_start: created step', newStep.id, 'total=', assistant.steps.length);
           }
           break;
         case 'turn_end':
-          // 标最后一个 step.isActive = false, 自动折叠
+          // v0.4.1 fix: turn_end 不再设 collapsed (默认就是 true), 只标 isActive = false
           if (idx >= 0) {
             const assistant = d2.messages[idx];
             const steps = assistant.steps || [];
             const last = steps[steps.length - 1];
             if (last && last.isActive) {
               last.isActive = false;
-              last.collapsed = true;  // 历史 step 默认折叠
               console.log('[chat] turn_end: closed step', last.id);
             }
           }

@@ -33,13 +33,11 @@ const chatStore = useChatStore();
 
 const thinkingBlocks = computed(() => props.step.thinking);
 const toolCalls = computed(() => props.step.toolCalls);
-const stepText = computed(() => props.step.stepText);
 const isActive = computed(() => props.step.isActive);
 const collapsed = computed(() => props.step.collapsed);
 
 const thinkingCount = computed(() => thinkingBlocks.value.filter((t) => t.content).length);
 const toolCount = computed(() => toolCalls.value.length);
-const hasStepText = computed(() => stepText.value.trim().length > 0);
 
 // v0.4.1: 切换折叠走 store (props 是 readonly, 直接 mutate 会 warning)
 function toggleCollapsed() {
@@ -183,10 +181,8 @@ const stepSummary = computed(() => {
         </div>
       </div>
 
-      <!-- step 内的 text (本 turn 的文字输出, 不是 final reply) -->
-      <div v-if="hasStepText" class="pad-step__text">
-        <MarkdownContent :content="stepText" />
-      </div>
+      <!-- v0.4.1 fix: step 内不渲染 stepText, text 统一在 final body (message.content) 显示
+       * 避免 step 内 stepText 跟 final body 内容重复 (user 反馈"出现多次同样内容") -->
     </div>
   </div>
 </template>
