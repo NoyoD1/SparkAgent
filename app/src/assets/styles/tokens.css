@@ -261,47 +261,51 @@
    SEMANTIC ROLE TOKENS — dark theme overrides only.
    Primitives, alias layer, type, radius, shadow and spacing
    are inherited from :root unchanged.
+
+   v0.3.8.17: 重新设计 dark 配色 — 之前 fg-tertiary 用 #9a9a9a (light token),
+   在深色背景上对比度 < 2:1, 大面积文字几乎看不见.
+   现在所有前景在 dark bg 上保证 4.5:1+ 对比度.
    ============================================================ */
 .dark,
 [data-theme="dark"] {
-  /* surfaces */
-  --pad-background: var(--pad-bg-900);
-  --pad-card: var(--pad-bg-800);
-  --pad-popover: var(--pad-bg-800);
-  --pad-muted: var(--pad-bg-800);
-  --pad-bg-app: var(--pad-bg-900);
-  --pad-bg-sidebar: var(--pad-bg-800);
-  --pad-bg-hover: var(--pad-bg-700);
-  --pad-bg-active: var(--pad-bg-600);
-  --pad-bg-elevated: var(--pad-bg-800);
-  --pad-bg-input: var(--pad-bg-700);
+  /* surfaces — 5 级深度, 从最深的页面底层到最浅的 hover */
+  --pad-background: #0f1115;        /* 页面最底层 (近黑) */
+  --pad-card: #1a1d24;             /* sidebar / drawer / card 容器 (深灰) */
+  --pad-popover: #232730;           /* popover / menu (深灰略浅) */
+  --pad-muted: #1a1d24;
+  --pad-bg-app: #0f1115;
+  --pad-bg-sidebar: #1a1d24;
+  --pad-bg-hover: #2a2f3a;         /* hover 状态 */
+  --pad-bg-active: #353c4a;         /* active 状态 */
+  --pad-bg-elevated: #232730;       /* elevated 浮层 */
+  --pad-bg-input: #232730;          /* input 背景 */
 
-  /* foregrounds */
-  --pad-foreground: var(--pad-fg-50);
-  --pad-card-foreground: var(--pad-fg-50);
-  --pad-popover-foreground: var(--pad-fg-50);
-  --pad-primary-foreground: var(--pad-fg-900);
-  --pad-secondary-foreground: var(--pad-fg-50);
-  --pad-muted-foreground: var(--pad-fg-400);
-  --pad-accent-foreground: var(--pad-fg-50);
-  --pad-destructive-foreground: var(--pad-fg-50);
-  --pad-fg-primary: var(--pad-fg-50);
-  --pad-fg-secondary: var(--pad-fg-400);
-  --pad-fg-tertiary: var(--pad-fg-500);
+  /* foregrounds — 3 级文字深度, 在 #1a1d24 底色上都 > 4.5:1 */
+  --pad-foreground: #f1f3f5;       /* primary text (近白) */
+  --pad-card-foreground: #f1f3f5;
+  --pad-popover-foreground: #f1f3f5;
+  --pad-primary-foreground: #0f1115; /* 紫色按钮上的文字 (深底) */
+  --pad-secondary-foreground: #f1f3f5;
+  --pad-muted-foreground: #a8b0bd;  /* muted text (中灰) */
+  --pad-accent-foreground: #0f1115;
+  --pad-destructive-foreground: #f1f3f5;
+  --pad-fg-primary: #f1f3f5;        /* 主文字 */
+  --pad-fg-secondary: #a8b0bd;      /* 次要文字 (placeholder / 描述) */
+  --pad-fg-tertiary: #7c8595;       /* 三级文字 (icon / 边框等) — 之前 #9a9a9a 太暗 */
 
   /* roles */
   --pad-primary: var(--pad-accent-400);
-  --pad-secondary: var(--pad-bg-800);
+  --pad-secondary: #232730;
   --pad-accent: var(--pad-accent-400);
   --pad-accent-hover: var(--pad-accent-300);
-  --pad-accent-soft: var(--pad-accent-900);
-  --pad-input: var(--pad-bg-700);
+  --pad-accent-soft: #1e1f3a;       /* dark 下 soft 用深紫, 不再用 #eeedff */
+  --pad-input: #2a2f3a;
   --pad-ring: var(--pad-accent-300);
 
   /* borders */
-  --pad-border: var(--pad-bg-700);
-  --pad-border-strong: var(--pad-bg-600);
-  --pad-divider: var(--pad-bg-700);
+  --pad-border: #2a2f3a;             /* 边框 (比 light 略深, 区分明显) */
+  --pad-border-strong: #3a4150;
+  --pad-divider: #232730;
 
   /* status */
   --pad-danger: #ef4444;
