@@ -262,7 +262,8 @@
    Primitives, alias layer, type, radius, shadow and spacing
    are inherited from :root unchanged.
    ============================================================ */
-.dark {
+.dark,
+[data-theme="dark"] {
   /* surfaces */
   --pad-background: var(--pad-bg-900);
   --pad-card: var(--pad-bg-800);

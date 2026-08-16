@@ -6,6 +6,9 @@ export type SidebarTab = 'work' | 'code' | 'design';
 /** 主区域显示模式: chat (默认) / settings (设置面板铺满主区) */
 export type ViewMode = 'chat' | 'settings';
 
+/** 主题模式: 浅色 / 深色 / 跟随系统 (auto) */
+export type ThemeMode = 'light' | 'dark' | 'auto';
+
 /** 列宽 (px), localStorage 持久化, 拖动分隔条改 */
 export interface ColumnWidths {
   sidebar: number;
@@ -13,6 +16,7 @@ export interface ColumnWidths {
 }
 const DEFAULT_WIDTHS: ColumnWidths = { sidebar: 248, drawer: 340 };
 const WIDTHS_KEY = 'pi-agent:layout:v1';
+const THEME_KEY = 'pi-agent:theme:v1';
 
 function loadWidths(): ColumnWidths {
   try {
@@ -26,6 +30,13 @@ function loadWidths(): ColumnWidths {
   } catch {
     return { ...DEFAULT_WIDTHS };
   }
+}
+function loadTheme(): ThemeMode {
+  try {
+    const v = localStorage.getItem(THEME_KEY);
+    if (v === 'light' || v === 'dark' || v === 'auto') return v;
+  } catch {}
+  return 'light';
 }
 function clampWidth(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
@@ -48,6 +59,9 @@ export const useUiStore = defineStore('ui', () => {
   // Settings 内的当前 tab (string 是 tab id, e.g. 'provider', 'general')
   const settingsTab = ref<string>('provider');
 
+  // 主题模式 (light / dark / auto 跟随系统)
+  const themeMode = ref<ThemeMode>(loadTheme());
+
   // Active session — moved to session store (Phase 3 v0.3.2+)
 
   watch(
@@ -58,6 +72,17 @@ export const useUiStore = defineStore('ui', () => {
       } catch {}
     },
     { deep: true },
+  );
+
+  // theme 变化时持久化 + 同步到 <html data-theme="...">
+  watch(
+    themeMode,
+    (v) => {
+      try {
+        localStorage.setItem(THEME_KEY, v);
+      } catch {}
+      applyTheme(v);
+    },
   );
 
   function toggleSidebar() {
@@ -91,6 +116,25 @@ export const useUiStore = defineStore('ui', () => {
     settingsTab.value = tab;
     viewMode.value = 'settings';
   }
+
+  // v0.3.8.16: 主题切换 — light / dark / auto (跟系统 prefers-color-scheme)
+  // 应用方式: 在 <html> 上加 data-theme="light|dark" (让 tokens.css 的 .dark 选择器匹配)
+  // 'auto' 模式不加 attribute, 走 CSS @media (prefers-color-scheme: dark) 兜底
+  function applyTheme(mode: ThemeMode) {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    if (mode === 'light') {
+      root.setAttribute('data-theme', 'light');
+    } else if (mode === 'dark') {
+      root.setAttribute('data-theme', 'dark');
+    } else {
+      // auto: 不设 attribute, 让 OS 决定
+      root.removeAttribute('data-theme');
+    }
+  }
+  function setThemeMode(mode: ThemeMode) {
+    themeMode.value = mode;
+  }
   function closeSettings() {
     viewMode.value = 'chat';
   }
@@ -103,6 +147,7 @@ export const useUiStore = defineStore('ui', () => {
     widths,
     viewMode,
     settingsTab,
+    themeMode,
     // actions
     toggleSidebar,
     setSidebarCollapsed,
@@ -113,5 +158,7 @@ export const useUiStore = defineStore('ui', () => {
     setDrawerWidth,
     openSettings,
     closeSettings,
+    setThemeMode,
+    applyTheme,  // v0.3.8.16: 初始应用 (App.vue 调)
   };
 });

@@ -237,7 +237,7 @@ async function copyMessage() {
   word-wrap: break-word;
 }
 
-/* ===== thinking 块 (v0.3.8.12: 折叠时不漏边, 字号颜色更"非正文") ===== */
+/* ===== thinking 块 (v0.3.8.16: max-height 折叠, 之前 grid-template-rows 0fr 在某些浏览器漏边) ===== */
 .pad-msg__thinking { margin: 0; }
 .pad-msg__thinking-toggle {
   display: inline-flex;
@@ -260,15 +260,23 @@ async function copyMessage() {
 }
 .pad-msg__thinking-chev.is-collapsed { transform: rotate(-90deg); }
 .pad-msg__thinking-body {
-  display: grid;
-  grid-template-rows: 1fr;
-  transition: grid-template-rows var(--pad-dur-base) var(--pad-ease-out-soft);
+  /* v0.3.8.16: 用 max-height 替代 grid-template-rows: 0fr —
+   * 0fr 在部分 WebView 渲染下, content 的 padding/background 仍可见, 造成"漏边".
+   * max-height: 0 + overflow: hidden 才是最可靠的"内容完全裁掉"方案. */
+  max-height: 2000px;
+  overflow: hidden;
+  opacity: 1;
+  transition:
+    max-height var(--pad-dur-base) var(--pad-ease-out-soft),
+    opacity var(--pad-dur-fast) ease,
+    margin-top var(--pad-dur-base) var(--pad-ease-out-soft);
 }
-.pad-msg__thinking-body > div { overflow: hidden; }
-.pad-msg__thinking-body.is-collapsed { grid-template-rows: 0fr; }
+.pad-msg__thinking-body.is-collapsed {
+  max-height: 0;
+  opacity: 0;
+  margin-top: 0;
+}
 .pad-msg__thinking-content {
-  /* v0.3.8.12: 折叠时不漏边 — content 显式加 overflow:hidden 截掉 padding/background;
-   * 字号颜色都用更灰的 token 跟正文 (14px fg-primary) 区分 */
   margin-top: 4px;
   font-size: var(--pad-fs-12);
   font-style: italic;
@@ -277,7 +285,6 @@ async function copyMessage() {
   padding: 6px 10px;
   background: var(--pad-bg-100);
   border-radius: 6px;
-  overflow: hidden;
 }
 
 /* ===== tool calls 块 (v0.3.8.12: 字号颜色更"非正文") ===== */
@@ -304,13 +311,18 @@ async function copyMessage() {
 }
 .pad-msg__tools-chev.is-collapsed { transform: rotate(-90deg); }
 .pad-msg__tools-body {
-  display: grid;
-  grid-template-rows: 1fr;
-  transition: grid-template-rows var(--pad-dur-base) var(--pad-ease-out-soft);
+  /* v0.3.8.16: 同样用 max-height + overflow: hidden 替代 grid-template-rows: 0fr */
+  max-height: 800px;
+  overflow: hidden;
+  opacity: 1;
+  transition:
+    max-height var(--pad-dur-base) var(--pad-ease-out-soft),
+    opacity var(--pad-dur-fast) ease;
 }
-.pad-msg__tools-body > div,
-.pad-msg__tools-body > ul { overflow: hidden; }
-.pad-msg__tools-body.is-collapsed { grid-template-rows: 0fr; }
+.pad-msg__tools-body.is-collapsed {
+  max-height: 0;
+  opacity: 0;
+}
 .pad-msg__tools-list {
   list-style: none;
   padding: 0;

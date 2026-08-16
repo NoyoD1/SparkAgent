@@ -11,12 +11,16 @@
 import { onMounted, ref } from 'vue';
 import ChatView from '@/views/ChatView.vue';
 import { useConfigStore } from '@/stores/config';
+import { useUiStore } from '@/stores/ui';
 
 const config = useConfigStore();
+const ui = useUiStore();
 const ready = ref(false);
 const migrationNotice = ref<string>('');
 
 onMounted(async () => {
+  // v0.3.8.16: 启动时把保存的主题应用到 <html> 上, 避免初始闪烁
+  ui.applyTheme(ui.themeMode);
   try {
     await config.init();
     // v0.3.8.1 fix: providers 仍空时, 试从旧 v0.3.6 localStorage 迁
