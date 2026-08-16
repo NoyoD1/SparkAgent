@@ -26,20 +26,57 @@
 
 **为什么这个最重要**：没 tool call，Pi Agent 就是个 chat 客户端；有了 tool call，才是 agent 客户端。
 
-### 必做项
+**v0.4 计划变更（2026-08-16）**：原计划 10 项集成 Pi SDK 后降到 6 项。详见 [ADR-0012](04-adr/0012-pi-sdk-integration.md) — LLM 客户端层 + 协议层复用 pi-ai + pi-agent-core，7 个 tool + session 仍自写（core 不含业务能力）。
+
+### 必做项（v0.4 6 项）
 
 | # | 项 | spec | 验收 |
 |---|---|---|---|
-| 1 | Sidecar 集成 `pi-agent` SDK 替代直接 fetch | [tools.md](03-features/tools.md) | SDK 流式 API 接通，消息格式对齐 |
-| 2 | 内置 tool: `read_file` / `write_file` / `edit_file` | [tools.md](03-features/tools.md) | LLM 能读 / 写用户指定 workspace 内的文件 |
-| 3 | 内置 tool: `bash` / `run_command` | [tools.md](03-features/tools.md) | LLM 能跑命令，结果回传；workspace 外默认拒绝 |
-| 4 | 内置 tool: `list_dir` / `glob` / `grep` | [tools.md](03-features/tools.md) | LLM 能浏览 workspace |
-| 5 | **Tool permission system**（v0.4 最关键）| [tools.md](03-features/tools.md) + [security.md](03-features/security.md) | 每个 tool call 用户显式 confirm（至少第一次），白名单 / 黑名单 |
-| 6 | **Abort / Stop button** | [chat-core.md](03-features/chat-core.md) | 用户能中断生成 + tool call |
-| 7 | Tool result 持久化到 session | [tools.md](03-features/tools.md) | 重新打开 session 能看到 tool history |
-| 8 | Workspace 路径安全校验 | [security.md](03-features/security.md) | tool 拒绝 path traversal (`../` etc) |
-| 9 | Tauri fs / shell 权限加到 capabilities | [desktop.md](03-features/desktop.md) | `core:fs:allow-read-text-file` 等 |
-| 10 | Sidecar 错误恢复（v0.3.8.13 已有基础）| [observability.md](03-features/observability.md) | 401/403 / network error / sidecar crash 都能恢复 |
+| 1 | **Pi SDK 集成**（sidecar 用 pi-ai + pi-agent-core）| [ADR-0012](04-adr/0012-pi-sdk-integration.md) | 现有 JSON Lines 协议不变，LLM 调用底层切 Pi SDK；7 内置 + 自定义 provider 全通 |
+| 2 | **7 个 tool 自实现**（read / write / edit / bash / ls / find / grep）| [tools.md](03-features/tools.md) | LLM 能读 / 写 workspace 内文件 + 跑命令 + 浏览；走 pi-agent-core AgentTool 接口 |
+| 3 | **Tool permission system**（v0.4 最关键）| [tools.md](03-features/tools.md) + [security.md](03-features/security.md) | 每个 tool call 用户显式 confirm（至少第一次），白名单 / 黑名单 |
+| 4 | **Abort / Stop button** | [chat-core.md](03-features/chat-core.md) | 用户能中断生成 + tool call（kill sidecar 子进程）|
+| 5 | **Session 持久化**（基于 Pi Agent SessionEntry 协议）| [session.md](03-features/session.md) | 重新打开 session 能看到 messages + tool calls + tool results |
+| 6 | **Workspace 路径校验 + 危险命令黑名单** | [security.md](03-features/security.md) | tool 拒绝 path traversal (`../` etc)；`rm -rf /` `mkfs` 等拦截 |
+
+### Pi SDK 集成细节（item 1）
+
+```ts
+// sidecar/src/agent.mjs (新文件)
+import { Agent } from '@earendil-works/pi-agent-core';
+import { createModels, createProvider, openaiCompletionsApi,
+         anthropicProvider, openaiProvider, deepseekProvider,
+         moonshotaiProvider, groqProvider, googleProvider,
+         minimaxProvider } from '@earendil-works/pi-ai';
+
+// 内置 7 provider 工厂注册
+const models = createModels();
+models.setProvider(anthropicProvider());
+models.setProvider(openaiProvider());
+models.setProvider(deepseekProvider());
+models.setProvider(moonshotaiProvider());
+models.setProvider(groqProvider());
+models.setProvider(googleProvider());
+models.setProvider(minimaxProvider());
+
+// 任意自定义 (商汤/任意 endpoint)
+models.setProvider(createProvider({
+  id: 'user-custom',
+  baseUrl: userBaseUrl,
+  auth: { apiKey: userApiKey },
+  models: [{ id: userModelId, api: 'openai-completions', ... }],
+  api: openaiCompletionsApi,
+}));
+
+// Agent 实例
+const agent = new Agent({
+  initialState: { systemPrompt, model: models.getModel(providerId, modelId) },
+  streamFn: models.streamSimple.bind(models),
+});
+
+agent.subscribe(event => sendToFE(event));   // ⬅ 现有 JSON Lines 协议
+await agent.prompt(userContent);
+```
 
 ### 不做（推到后续 phase）
 
@@ -54,6 +91,7 @@
 - [ ] 发"在 src/foo.ts 加一个 hello 函数" → LLM 调用 `edit_file` → 实际写入文件 → diff 显示
 - [ ] 发"跑 npm test" → LLM 调用 `bash` → 输出在 UI → 用户中途点 Stop → 真的中断
 - [ ] session 重启后历史完整恢复（messages + tool calls + tool results）
+- [ ] 商汤 / 任意 OpenAI-compatible provider 配 key 后能跑（验证 createProvider 通用性）
 
 ---
 

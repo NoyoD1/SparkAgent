@@ -23,8 +23,9 @@
 | [0007](0007-no-ui-library.md) | 不引入 UI 组件库 | Accepted | 2026-08-14 | 🟡 |
 | [0008](0008-tauri-invoke-listen.md) | Tauri invoke/listen 替代 WS | Accepted | 2026-08-12 | 🟢 |
 | [0009](0009-sidecar-spawn-per-prompt.md) | Sidecar 一次一 spawn | Accepted | 2026-08-12 | 🟢 |
-| [0010](0010-sidecar-direct-fetch.md) | Sidecar 直接 fetch 不引 SDK | **Superseded（v0.4 计划推翻）** | 2026-08-12 | 🟢 |
+| [0010](0010-sidecar-direct-fetch.md) | Sidecar 直接 fetch 不引 SDK | **Superseded by 0012** | 2026-08-12 | 🟢 |
 | [0011](0011-decorations-false.md) | `decorations: false` 自定义 title bar | Accepted | 2026-08-16 | 🟡 |
+| [0012](0012-pi-sdk-integration.md) | 集成 pi-ai + pi-agent-core | Accepted | 2026-08-16 | 🟢 |
 
 > 🟢 = v0.4 实施时必参考 / 🟡 = 间接影响
 

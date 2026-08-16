@@ -68,6 +68,9 @@ src-tauri/WixTools/
 # ---- 其他仓库 / 临时目录 ----
 # pi/ 是另一份 git 仓库的 clone (不同的项目, 不要混)
 pi/
+# pi-sdk/ 是 earendil-works/pi 仓库的 clone (v0.4+ 集成 pi-ai + pi-agent-core 的来源)
+# 用 file: 引用, 不进 git
+pi-sdk/
 # 临时 inspect SDK 用的废纸篓
 tmp-inspect-pi-sdk/
 *.bak-*

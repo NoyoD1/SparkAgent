@@ -1,12 +1,17 @@
 {
   "name": "pi-agent-sidecar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Pi Agent Tauri 2 sidecar — Node.js script that runs LLM streaming IPC with Rust host.",
+  "description": "Pi Agent Tauri 2 sidecar — Node.js script that runs LLM streaming + agent loop via @earendil-works/pi-ai + @earendil-works/pi-agent-core.",
   "main": "src/index.mjs",
   "scripts": {
-    "start": "node src/index.mjs"
+    "start": "node src/index.mjs",
+    "build-pi-sdk": "cd ../pi-sdk && npm install && npm run build"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "file:../pi-sdk/packages/ai",
+    "@earendil-works/pi-agent-core": "file:../pi-sdk/packages/agent"
   },
   "engines": {
     "node": ">=20.19.0"
