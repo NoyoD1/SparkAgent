@@ -18,6 +18,7 @@
 | v0.7 | Subagent / Plan | 多 agent 切换 / Plan 模式 | ⚪ | TBD |
 | v0.8 | 协作 / 分享 | session 导出 / 团队空间 | ⚪ | TBD |
 | v0.9 | 跨平台 | macOS / Linux 适配 | ⚪ | TBD |
+| **Pre-release** | **打包 (release 前置)** | **sidecar 编译成独立 .exe + 单 binary 分发** | ⚪ | **v1.0 前必做** |
 | **v1.0** | **稳定版** | 自动更新 + 完整文档 + 用户指南 | ⚪ | TBD |
 
 ---
@@ -161,6 +162,17 @@ await agent.prompt(userContent);
 ---
 
 ## 🎯 v1.0 · 稳定版
+
+### ⚠️ Pre-release 必做项 (v1.0 feature 之前, **必须先做**)
+
+**为什么这一项独立**: 当前 `src-tauri/src/sidecar.rs:65` 用 `Command::new("node").arg("sidecar/src/index.mjs")` 直接读 .mjs 源码,有两个 release 阻塞问题:
+1. `CARGO_MANIFEST_DIR` 编译时嵌入开发路径 → 用户拷 `.exe` 单独跑会报 "Sidecar script not found"
+2. `.mjs` 是 plain text → 任何拿到 .exe 的人都能 cat 出 sidecar 源码
+
+| # | 项 | spec | 验收 |
+|---|---|---|---|
+| **P0** | **Sidecar 编译成独立 .exe** | bun build --compile | `bun build --compile sidecar/src/index.mjs --outfile pi-agent-sidecar.exe` 成功, .exe 自包含 node_modules, Tauri 改成 spawn 这个 .exe. 验证: 拷 .exe 到没装 Node.js 的机器单独跑,功能正常 |
+| **P1** | **ADR-0013**: 选 sidecar 编译方案 (bun vs pkg vs nexe vs Rust 重写) | [04-adr/](../04-adr/) | 记录决策 + 风险 + 验证 Pi SDK 兼容性 |
 
 ### 必做项
 
