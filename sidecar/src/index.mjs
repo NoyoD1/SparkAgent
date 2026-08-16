@@ -138,6 +138,12 @@ function buildModels(config) {
         api: 'openai-completions',
         baseUrl: config.baseUrl,         // v0.4.1 fix: 必须带 baseUrl, 否则 line 510 model.baseUrl = undefined → OpenAI SDK fallback 到 api.openai.com
         input: ['text'],                 // v0.4.2 fix: 必须带 input 数组, line 1021 model.input.includes("image") 假设 array
+        cost: {                          // v0.4.1.2 fix: 必须带 cost (ModelCost 必填, 没值就 0 模板), 否则 calculateCost() line 882 读 model.cost.tiers 抛 "Cannot read properties of undefined (reading 'tiers')"
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        },
         contextWindow: 128000,
         maxTokens: 8192,
       }],
