@@ -391,7 +391,7 @@ function jumpToMessage(messageId: string) {
   /* v0.3.8.1: chat 内容居中 + 最大宽 880px, 宽屏不拉伸
    * 左 40 留给 nav tick 横向移动空间, 右 24 是消息右边距 */
   padding: 0 24px 0 40px;
-  max-width: 880px;
+  max-width: 720px;  /* v0.4.1.3: 880 → 720, user 反馈"中间区域太宽, 适当收窄" */
   margin: 0 auto;
   width: 100%;
   box-sizing: border-box;
@@ -448,9 +448,9 @@ function jumpToMessage(messageId: string) {
   position: relative;
   flex-shrink: 0;
   z-index: 10;
-  /* v0.3.8.1: 跟 list-inner 一样居中 + 最大宽 880px, 宽屏下输入框不跟着拉 */
+  /* v0.4.1.3: 跟 list-inner 一样居中 + 最大宽 720px, 宽屏下输入框不跟着拉 (v0.3.8.1 之前 880px 太宽) */
   padding: 0 16px 12px;
-  max-width: 880px;
+  max-width: 720px;
   margin: 0 auto;
   width: 100%;
   box-sizing: border-box;

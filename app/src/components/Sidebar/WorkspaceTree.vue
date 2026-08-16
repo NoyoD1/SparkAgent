@@ -223,7 +223,10 @@ function removeSession(id: string) {
               v-for="s in sessionStore.getSessionsByWorkspace(ws.id)"
               :key="s.id"
               class="pad-wstree__session"
-              :class="{ 'is-active': activeSessionId === s.id }"
+              :class="{
+                'is-active': activeSessionId === s.id,
+                'is-streaming': chatStore.isStreamingSession(s.id),
+              }"
               @click="selectSession(s.id)"
               @mouseenter="(e) => onSessionEnter(e, s.id)"
               @mousemove="onSessionMove"
@@ -544,6 +547,37 @@ function removeSession(id: string) {
   font-weight: var(--pad-fw-medium);
   /* v0.3.8.3: 选中态左边加一条 3px 圆角 accent 高亮条, 不再是纯矩形背景 */
   box-shadow: inset 3px 0 0 var(--pad-accent);
+}
+/* v0.4.1.3: streaming 跑马灯底部条 — 经典 marching ants 效果,
+   session 在后台跑时, item 底部 2px accent gradient 横向循环移动,
+   user 一眼看出哪些 session 在跑 (不用看 dot)
+   不依赖 is-active (就算没选中也能看到 streaming 状态)
+.pad-wstree__session.is-streaming {
+  position: relative;
+  overflow: hidden;
+}
+.pad-wstree__session.is-streaming::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--pad-accent) 30%,
+    var(--pad-accent) 70%,
+    transparent 100%
+  );
+  background-size: 50% 100%;
+  background-repeat: repeat-x;
+  animation: pad-wstree-march 0.8s linear infinite;
+  pointer-events: none;
+}
+@keyframes pad-wstree-march {
+  from { background-position: 0% 0; }
+  to { background-position: 50% 0; }
 }
 .pad-wstree__session-dot {
   width: 6px;
