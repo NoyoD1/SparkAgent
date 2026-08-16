@@ -124,6 +124,8 @@ function buildModels(config) {
         provider: 'user-custom',        // v0.4 fix: 必须显式带 provider 字段, createProvider 工厂不自动注入
         name: config.model,
         api: 'openai-completions',
+        baseUrl: config.baseUrl,         // v0.4.1 fix: 必须带 baseUrl, 否则 line 510 model.baseUrl = undefined → OpenAI SDK fallback 到 api.openai.com
+        input: ['text'],                 // v0.4.2 fix: 必须带 input 数组, line 1021 model.input.includes("image") 假设 array
         contextWindow: 128000,
         maxTokens: 8192,
       }],

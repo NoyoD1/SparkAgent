@@ -122,4 +122,38 @@ v0.3 阶段 sidecar 完全裸跑（手写 fetch + SSE 解析，0 依赖）。问
 - pi-ai 主线 breaking change 频繁（依赖锁版本）
 - Pi SDK 出 v1.x 商业版要付费
 - 性能 / 启动速度问题（pi-ai 包大，启动慢）
-- **Pi SDK openai-completions 处理某些 OpenAI-compatible 端点（如商汤）响应时抛 "Cannot read properties of undefined (reading 'includes')" — 这是 SDK 内部 bug 还是端点响应不规范，待 vendor 上游确认**（2026-08-16 user 端商汤 deepseek-v4-flash 触发）
+
+## v0.4 集成踩坑 (2026-08-16)
+
+`createProvider` 工厂**不**自动给 model 注入以下必填字段，调用方**必须手动加**：
+
+1. **`provider: 'id'`** — line 631 `getAuth` 抛 "Unknown provider: undefined"
+2. **`baseUrl: '...'`** — line 510 `new OpenAI({ baseURL: model.baseUrl })`，否则 OpenAI SDK fallback 到 `https://api.openai.com/v1`
+3. **`input: ['text']` 或 `['text', 'image']`** — line 1021 `model.input.includes("image")` 假设 array，否则 `undefined.includes(...)` 抛错
+4. **`auth: { apiKey: { name, resolve } }`** — auth.apiKey 是对象（ApiKeyAuth）不是字符串
+5. **anthropic 工厂要 env var 或 keychain credential**，user-custom 工厂能注入 apiKey
+
+**user-custom provider 工厂** template（v0.4.2 完整版）：
+
+```javascript
+createProvider({
+  id: 'user-custom',
+  baseUrl: '...',
+  auth: {
+    apiKey: {
+      name: '...',
+      resolve: async () => ({ auth: { apiKey: config.apiKey } }),
+    },
+  },
+  models: [{
+    id: '...',
+    provider: 'user-custom',       // <-- 必填
+    api: 'openai-completions',
+    baseUrl: '...',               // <-- 必填 (line 510)
+    input: ['text'],              // <-- 必填 (line 1021)
+    contextWindow: 128000,
+    maxTokens: 8192,
+  }],
+  api: { stream, streamSimple },  // from @earendil-works/pi-ai/api/openai-completions
+});
+```
