@@ -35,8 +35,11 @@ const { sidebarCollapsed } = storeToRefs(uiStore);
 <style scoped>
 .pad-sidebar {
   width: var(--pad-sidebar-width);
-  background: var(--pad-bg-sidebar);
-  border-radius: var(--pad-radius-xl);
+  /* v0.3.8.23: 跟 body 同色, 不再用 --pad-bg-sidebar (#fafafa 浅灰),
+   * 整张界面同色, sidebar 跟 chat 跟 drawer 视觉上是同一张卡.
+   * border-radius 也去掉, 改用 1px right border 跟 chat 区分.
+   * (border 在父级 .pad-app__body 里靠 column-gap 中线体现) */
+  background: var(--pad-card);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;

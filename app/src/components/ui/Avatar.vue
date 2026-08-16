@@ -45,7 +45,9 @@ const hasSlot = computed(() => !!slots.default);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  /* v0.3.8.19: 之前用 #fff 硬编码, dark 模式下主按钮变成浅色背景,
+   * 白字看不清楚. 改用 --pad-primary-foreground (semantic role, 会反色) */
+  color: var(--pad-primary-foreground);
   font-weight: var(--pad-fw-semibold);
   flex-shrink: 0;
   user-select: none;

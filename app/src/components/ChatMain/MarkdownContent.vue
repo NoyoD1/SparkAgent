@@ -158,12 +158,16 @@ function onContentClick(e: MouseEvent) {
 }
 .pad-md a.pad-md-path:hover { background: var(--pad-accent); color: var(--pad-fg-inverse); }
 
-/* inline code: 红色高亮, 跟参考图 4 一致 */
+/* inline code: 红色高亮 (markdown 通用约定, code 区别于正文)
+ * v0.3.8.19: 之前用 #d63939 硬编码, dark 模式也保持红色, 实际在
+ * 深色背景上还能用 (红色普遍 #ef4444 在 dark 上反差更鲜).
+ * 改用 --pad-danger (semantic role, light=#dc2626 dark=#ef4444),
+ * 跟整套 monochrome 主题更协调, 也跟 status error 一致. */
 .pad-md code {
   font-family: var(--pad-font-mono);
   font-size: 13px;
   background: transparent;
-  color: #d63939;
+  color: var(--pad-danger);
   padding: 0;
 }
 /* 但 code 在 pre 里时, 重置 (走 hljs 自己的配色) */
@@ -174,12 +178,15 @@ function onContentClick(e: MouseEvent) {
   font-size: 13px;
 }
 
-/* code block: 浅灰底 + 右上角"复制"按钮 */
+/* code block: 浅灰底 + 右上角"复制"按钮
+ * v0.3.8.19: 之前用 #f6f8fa 硬编码, dark 模式没适配, 跟 light 一样是浅灰,
+ * 在暗色背景上刺眼. 改用 --pad-muted (semantic role),
+ * light = #fafafa, dark = #171717 跟 card 容器同色. */
 .pad-md pre {
   position: relative;
   margin: 8px 0;
   padding: 12px 14px;
-  background: #f6f8fa;
+  background: var(--pad-muted);
   border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-md);
   overflow-x: auto;

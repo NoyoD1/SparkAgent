@@ -61,15 +61,15 @@ function pickTheme(mode: ThemeMode) {
       </div>
     </section>
 
-    <!-- 强调色 (即将推出) -->
+    <!-- 强调色 (即将推出) — v0.3.8.19: 换成 monochrome 灰阶, 跟 minimalist 主题一致 -->
     <section class="pad-appearance__section is-disabled">
       <h4 class="pad-appearance__section-title">强调色 <span class="pad-appearance__badge">即将推出</span></h4>
       <div class="pad-appearance__swatches">
-        <div class="pad-appearance__swatch is-active" style="background: #5b5bff"></div>
-        <div class="pad-appearance__swatch" style="background: #2563eb"></div>
-        <div class="pad-appearance__swatch" style="background: #16a34a"></div>
-        <div class="pad-appearance__swatch" style="background: #ea580c"></div>
-        <div class="pad-appearance__swatch" style="background: #db2777"></div>
+        <div class="pad-appearance__swatch is-active" style="background: #18181b"></div>
+        <div class="pad-appearance__swatch" style="background: #52525b"></div>
+        <div class="pad-appearance__swatch" style="background: #a1a1aa"></div>
+        <div class="pad-appearance__swatch" style="background: #d4d4d8"></div>
+        <div class="pad-appearance__swatch" style="background: #f4f4f5"></div>
       </div>
     </section>
 

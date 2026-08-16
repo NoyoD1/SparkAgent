@@ -394,12 +394,15 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocClick));
   transition: background var(--pad-dur-fast) ease;
   font-family: inherit;
 }
-/* hover 跟 keyboard highlight: 浅一档灰, 不抢戏 */
+/* hover 跟 keyboard highlight: 浅一档灰, 不抢戏
+ * v0.3.8.18: 之前用 var(--pad-bg-200) 直接拿 primitive, dark 模式没覆盖
+ * (是 #f5f5f5 浅灰, 在 dark bg 上刺眼). 改用 --pad-bg-hover (semantic role),
+ * dark 下是 #2a2f3a 跟菜单/列表 hover 一致. */
 .pad-select__item:hover:not(.is-disabled):not(.is-active) {
-  background: var(--pad-bg-200);
+  background: var(--pad-bg-hover);
 }
 .pad-select__item.is-highlighted:not(.is-disabled):not(.is-active) {
-  background: var(--pad-bg-200);
+  background: var(--pad-bg-hover);
 }
 /* active (selected): 浅紫底 + 左侧 2px accent + 略重字 */
 .pad-select__item.is-active {

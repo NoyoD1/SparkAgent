@@ -220,13 +220,10 @@ onMounted(() => nextTick(autoResize));
     0 8px 24px rgba(0, 0, 0, 0.06),
     0 2px 6px rgba(0, 0, 0, 0.03),
     0 0 0 1px var(--pad-border);
-  transition: box-shadow var(--pad-dur-base) var(--pad-ease-out-soft);
-}
-.pad-composer:focus-within {
-  box-shadow:
-    0 12px 32px rgba(0, 0, 0, 0.08),
-    0 4px 8px rgba(0, 0, 0, 0.04),
-    0 0 0 1px var(--pad-accent);
+  /* v0.3.8.25: 去掉 :focus-within 状态变化, 选中/不选中看着一样.
+   * 用户反馈"输入框选中是也不要有边框高亮, 就保持正常状态".
+   * minimalist 风格下 focus 状态变化 = 视觉噪音, 不加. */
+  transition: none;
 }
 .pad-composer__input {
   display: block;
@@ -416,7 +413,8 @@ onMounted(() => nextTick(autoResize));
   color: var(--pad-fg-primary);
 }
 .pad-composer__model-menu-item:hover:not(.is-active) {
-  background: var(--pad-bg-200);
+  /* v0.3.8.18: bg-200 → bg-hover (semantic role, dark 模式有覆盖) */
+  background: var(--pad-bg-hover);
 }
 .pad-composer__model-menu-item.is-active {
   background: var(--pad-accent-soft);

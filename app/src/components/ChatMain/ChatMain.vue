@@ -380,8 +380,10 @@ function jumpToMessage(messageId: string) {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  /* v0.3.8.23: 跟 body 同色, border-radius 去掉, 改用 1px border 跟 sidebar 区分.
+   * 但 border 不能直接加这里 (会跟 column-gap 里的 ResizeHandle 撞),
+   * 视觉上 ResizeHandle 本身就是 1px line, 充当分割线. */
   background: var(--pad-card);
-  border-radius: var(--pad-radius-xl);
   overflow: hidden;
   position: relative;
 }
@@ -473,27 +475,23 @@ function jumpToMessage(messageId: string) {
   width: 100%;
   box-sizing: border-box;
 }
-.pad-chatmain__composer-area::before {
-  /* 浮层上方的渐变 fade: 让消息列表滚到底时自然消失在 composer 后
-   * v0.3.8.1.2: 加 border-radius 倒角 (16px top) + 跟 composer 同宽 (left/right 16px, 跟 area padding 对齐),
-   * 倒角位置跟 composer 顶角弧度对应, 避免穿帮 */
-  content: '';
-  position: absolute;
-  top: -48px;
-  /* left/right 跟 area padding 16px 对齐, 跟 composer card 同宽 */
-  left: 16px;
-  right: 16px;
-  height: 48px;
-  background: linear-gradient(
-    to top,
-    var(--pad-card) 0%,
-    var(--pad-card) 40%,
-    transparent 100%
-  );
-  border-radius: 16px 16px 0 0;
-  pointer-events: none;
-  z-index: 1;
-}
+/* v0.3.8.27 移除 composer 上方的 ::before 渐变 fade mask.
+ * 之前的设计意图: 让消息列表滚到底时自然"消失"在 composer 后.
+ * 实际效果 (亮色/暗色都试过):
+ * - 亮色 mode: ::before 跟 body 颜色差异明显, 像一块"硬膏药"贴在 composer 顶部
+ * - 暗色 mode: ::before 在深色背景上同样有"硬膏药"感, 反而遮住 list 内容让用户看不见
+ * - solid 区紧贴 composer (v0.3.8.26.1) 后, "消息消失" 的视觉反而更"硬"
+ *
+ * 用户决定: 直接去掉 mask, 让 list 跟 composer 自然衔接.
+ * - list padding-bottom 120px 仍然保留, 最后消息不会被 composer 盖住
+ * - list 自身 .pad-scroll 滚到顶/底行为不变
+ * - composer 顶边 1px border 现在完全可见 (之前 mask 渐变可能微弱影响)
+ *
+ * 如果后续想要"消息消失在 composer 后" 的视觉, 替代方案:
+ * - 在 .pad-chatmain__list 加 mask-image: linear-gradient(to bottom, transparent 0, black 30px, black calc(100% - 80px), transparent 100%)
+ * - 这样 list 自己的顶部/底部各 30/80px 渐变透明, 不依赖 ::before 浮层
+ *   (但 list mask 在某些 WebView 跟 overflow: auto 兼容性差, 谨慎测试)
+ * 现在先删 ::before, 走简洁方案. */
 
 /* ===== initial hero 布局 (跟之前一致) ===== */
 .pad-hero {

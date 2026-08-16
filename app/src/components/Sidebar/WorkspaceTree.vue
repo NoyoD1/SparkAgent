@@ -368,6 +368,14 @@ function removeSession(id: string) {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  /* v0.3.8.20: 隐藏原生滚动条 (用户反馈 sidebar 这边滑动条太丑, 跟 minimalist 不搭)
+   * 保留 overflow-y: auto + 滚轮/触屏可以滚, 只是不显示条.
+   * 跟 ChatMessageNav 一样的方案, 兼容 Firefox + WebKit/Edge. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.pad-wstree__list::-webkit-scrollbar {
+  display: none;
 }
 .pad-wstree__empty {
   display: flex;

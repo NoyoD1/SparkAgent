@@ -1,53 +1,54 @@
 /* @light-only */
-/* Source: structured-spec */
-/* Pi Agent Design System — token spec for rounded-panel, borderless desktop-agent UI */
-/* @group-priority: accent, surface, text, status, border */
+/* Source: structured-spec — Pi Agent Design System
+   基于 Pi-Agent-Design.design/assets/Minimalist Copy 改造
+   原版: 6 族 (brand / background / text / icon 10-step + state-success / state-error) 的极简风
+   关键: monochrome (黑/白/灰), border 驱动 (不靠 shadow), 12px radius
+   ============================================================== */
 
 /* ============================================================
    PRIMITIVES (theme-independent)
-   Four ramps: accent, background, foreground, status.
-   Never consume primitives directly in product code — use the
-   semantic role tokens or the --color-* alias layer below.
+   5 个 ramp: accent (cool-neutral gray) / background / text / icon / status.
+   不要在 product code 直接用 primitive, 用下面 semantic role 或 --color-* alias.
    ============================================================ */
 :root {
-  /* Accent ramp */
-  --pad-accent-50: #eeeeff;
-  --pad-accent-100: #dedeff;
-  --pad-accent-200: #b8b8ff;
-  --pad-accent-300: #9292ff;
-  --pad-accent-400: #6b6bff;
-  --pad-accent-500: #5b5bff; /* @primary */
-  --pad-accent-600: #4747e0;
-  --pad-accent-700: #3838b8;
-  --pad-accent-800: #2a2a8a;
-  --pad-accent-900: #1c1c5c;
+  /* === Accent ramp: 冷中性灰 (替代紫色 brand, 整套 monochrome 风格) === */
+  --pad-accent-50: #fafafa;
+  --pad-accent-100: #f4f4f5;
+  --pad-accent-200: #e4e4e7;
+  --pad-accent-300: #d4d4d8;
+  --pad-accent-400: #a1a1aa;
+  --pad-accent-500: #71717a;  /* mid gray */
+  --pad-accent-600: #52525b;
+  --pad-accent-700: #3f3f46;
+  --pad-accent-800: #27272a;
+  --pad-accent-900: #18181b; /* @primary  — 深近黑, 作为 primary identity stop */
 
-  /* Background ramp (surfaces) */
-  --pad-bg-50: #ffffff;
-  --pad-bg-100: #fafafa;
-  --pad-bg-200: #f5f5f5;
-  --pad-bg-300: #f0f0f0;
-  --pad-bg-400: #ebebeb;
-  --pad-bg-500: #e5e5e5;
-  --pad-bg-600: #d4d4d4;
-  --pad-bg-700: #a3a3a3;
-  --pad-bg-800: #737373;
-  --pad-bg-900: #404040;
+  /* === Background ramp: 纯中性 surface === */
+  --pad-bg-50: #ffffff;      /* @primary — 页面/卡片 主体 */
+  --pad-bg-100: #fafafa;     /* 极淡灰, 跟 page 几乎一样, 微差 */
+  --pad-bg-200: #f5f5f5;     /* 浅灰 — sidebar / muted 容器 */
+  --pad-bg-300: #e5e5e5;     /* 边框/分割 */
+  --pad-bg-400: #d4d4d4;     /* hover 边界 */
+  --pad-bg-500: #a3a3a3;     /* 占位/禁灰 */
+  --pad-bg-600: #404040;     /* dark surface 起点 */
+  --pad-bg-700: #262626;
+  --pad-bg-800: #171717;
+  --pad-bg-900: #0a0a0a;     /* dark 页面最底层 */
 
-  /* Foreground ramp (text / icons) */
-  --pad-fg-50: #ffffff;
-  --pad-fg-100: #f5f5f5;
-  --pad-fg-200: #e5e5e5;
-  --pad-fg-300: #d4d4d4;
-  --pad-fg-400: #a3a3a3;
-  --pad-fg-500: #9a9a9a;
-  --pad-fg-600: #5c5c5c;
+  /* === Foreground ramp: 纯中性 ink === */
+  --pad-fg-50: #fafafa;      /* 极浅, 用在深色按钮上的文字 */
+  --pad-fg-100: #ededed;
+  --pad-fg-200: #d4d4d4;
+  --pad-fg-300: #a1a1a1;
+  --pad-fg-400: #858585;     /* muted 文字 */
+  --pad-fg-500: #6e6e6e;
+  --pad-fg-600: #525252;     /* secondary 文字 */
   --pad-fg-700: #404040;
-  --pad-fg-800: #262626;
-  --pad-fg-900: #1a1a1a;
+  --pad-fg-800: #171717;
+  --pad-fg-900: #0a0a0a;     /* @primary — 最深, 主文字 */
 
   /* ============================================================
-     SEMANTIC ROLE TOKENS — light theme
+     SEMANTIC ROLE TOKENS — light theme (Minimalist)
      ============================================================ */
 
   /* surfaces */
@@ -56,9 +57,9 @@
   --pad-popover: var(--pad-bg-50);
   --pad-muted: var(--pad-bg-100);
   --pad-bg-app: var(--pad-bg-50);
-  --pad-bg-sidebar: var(--pad-bg-200);
-  --pad-bg-hover: var(--pad-bg-300);
-  --pad-bg-active: var(--pad-bg-400);
+  --pad-bg-sidebar: var(--pad-bg-100);
+  --pad-bg-hover: var(--pad-bg-200);
+  --pad-bg-active: var(--pad-bg-300);
   --pad-bg-elevated: var(--pad-bg-50);
   --pad-bg-input: var(--pad-bg-100);
 
@@ -73,40 +74,39 @@
   --pad-destructive-foreground: var(--pad-bg-50);
   --pad-fg-primary: var(--pad-fg-900);
   --pad-fg-secondary: var(--pad-fg-600);
-  --pad-fg-tertiary: var(--pad-fg-500);
+  --pad-fg-tertiary: var(--pad-fg-400);
   --pad-fg-inverse: var(--pad-bg-50);
 
-  /* roles */
-  --pad-primary: var(--pad-accent-500);
-  --pad-secondary: var(--pad-bg-200);
-  --pad-accent: var(--pad-accent-500);
-  --pad-accent-hover: var(--pad-accent-600);
-  --pad-accent-soft: var(--pad-accent-50);
+  /* roles — monochrome, 紫色 brand 全部去掉 */
+  --pad-primary: var(--pad-accent-900);
+  --pad-secondary: var(--pad-accent-100);
+  --pad-accent: var(--pad-accent-900);
+  --pad-accent-hover: var(--pad-accent-800);
+  --pad-accent-soft: var(--pad-accent-100);   /* 替代之前浅紫, 现在是淡灰底 */
   --pad-input: var(--pad-bg-200);
-  --pad-ring: var(--pad-accent-500);
+  --pad-ring: var(--pad-accent-900);
 
-  /* borders */
-  --pad-border: #e8e8e8;
-  --pad-border-strong: #d4d4d4;
+  /* borders — 比之前略深, 给边线存在感 (minimalist 风格靠 border 驱动) */
+  --pad-border: var(--pad-accent-200);         /* #e4e4e7 */
+  --pad-border-strong: var(--pad-accent-300);  /* #d4d4d8 */
   --pad-divider: var(--pad-bg-300);
 
-  /* status */
-  --pad-danger: #e5484d;
+  /* status (跟 minimalist 一致) */
+  --pad-danger: #dc2626;
   --pad-danger-subtle: #fef2f2;
   --pad-danger-border: #fecaca;
   --pad-danger-text: #b91c1c;
-  --pad-success: #30a46c;
+  --pad-success: #16a34a;
   --pad-success-subtle: #f0fdf4;
   --pad-success-border: #bbf7d0;
   --pad-success-text: #15803d;
-  --pad-warning: #f5a524;
+  --pad-warning: #f59e0b;
   --pad-warning-subtle: #fffbeb;
   --pad-warning-border: #fde68a;
   --pad-warning-text: #b45309;
 
   /* ============================================================
-     ALIAS LAYER — preferred names for component authoring.
-     Resolves lazily, so it inherits the .dark overrides below.
+     ALIAS LAYER — 组件代码的优先命名, 跟之前一致, 颜色随主题变.
      ============================================================ */
   --color-background: var(--pad-background);
   --color-surface: var(--pad-card);
@@ -133,10 +133,10 @@
   --color-divider: var(--pad-divider);
 
   /* ============================================================
-     TYPOGRAPHY
+     TYPOGRAPHY (Geist / Geist Mono, minimalist 默认)
      ============================================================ */
-  --pad-font-sans: "PingFang SC", "HarmonyOS Sans", "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  --pad-font-mono: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Menlo, Consolas, monospace;
+  --pad-font-sans: Geist, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "HarmonyOS Sans", system-ui, sans-serif;
+  --pad-font-mono: Geist Mono, "JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --font-family-base: var(--pad-font-sans);
   --font-family-mono: var(--pad-font-mono);
 
@@ -176,7 +176,7 @@
   --line-height-loose: var(--pad-lh-loose);
 
   /* ============================================================
-     SPACING (4px grid)
+     SPACING (4px base — minimalist 紧凑)
      ============================================================ */
   --pad-sp-1: 4px;
   --pad-sp-2: 8px;
@@ -199,12 +199,12 @@
   --space-12: var(--pad-sp-12);
 
   /* ============================================================
-     BORDER RADIUS
+     BORDER RADIUS (minimalist: 12px 默认, 一致倒角)
      ============================================================ */
-  --pad-radius-sm: 4px;
-  --pad-radius-md: 6px;
-  --pad-radius-lg: 8px;
-  --pad-radius-xl: 12px;
+  --pad-radius-sm: 6px;
+  --pad-radius-md: 10px;
+  --pad-radius-lg: 12px;
+  --pad-radius-xl: 16px;
   --pad-radius-pill: 9999px;
 
   --radius-sm: var(--pad-radius-sm);
@@ -214,11 +214,11 @@
   --radius-full: var(--pad-radius-pill);
 
   /* ============================================================
-     SHADOWS (soft, used sparingly — panels rely on background contrast)
+     SHADOWS — minimalist 风格 shadow 几乎不依赖, 偶尔用极淡的
      ============================================================ */
   --pad-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --pad-shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.08);
-  --pad-shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.10);
+  --pad-shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.06);
+  --pad-shadow-modal: 0 8px 24px rgba(0, 0, 0, 0.08);
   --pad-shadow-drawer: var(--pad-shadow-modal);
 
   --shadow-1: var(--pad-shadow-button);
@@ -258,54 +258,71 @@
 }
 
 /* ============================================================
-   SEMANTIC ROLE TOKENS — dark theme overrides only.
-   Primitives, alias layer, type, radius, shadow and spacing
-   are inherited from :root unchanged.
-
-   v0.3.8.17: 重新设计 dark 配色 — 之前 fg-tertiary 用 #9a9a9a (light token),
-   在深色背景上对比度 < 2:1, 大面积文字几乎看不见.
-   现在所有前景在 dark bg 上保证 4.5:1+ 对比度.
+   DARK THEME — primitive ramp 全部反序覆盖 + semantic role 重映射.
+   Minimalist dark: deep gray (#0a0a0a page) → #171717 card → #262626 popover
    ============================================================ */
 .dark,
 [data-theme="dark"] {
-  /* surfaces — 5 级深度, 从最深的页面底层到最浅的 hover */
-  --pad-background: #0f1115;        /* 页面最底层 (近黑) */
-  --pad-card: #1a1d24;             /* sidebar / drawer / card 容器 (深灰) */
-  --pad-popover: #232730;           /* popover / menu (深灰略浅) */
-  --pad-muted: #1a1d24;
-  --pad-bg-app: #0f1115;
-  --pad-bg-sidebar: #1a1d24;
-  --pad-bg-hover: #2a2f3a;         /* hover 状态 */
-  --pad-bg-active: #353c4a;         /* active 状态 */
-  --pad-bg-elevated: #232730;       /* elevated 浮层 */
-  --pad-bg-input: #232730;          /* input 背景 */
+  /* === Primitive ramp 反序 (跟 light 对调) === */
+  --pad-bg-50: #0a0a0a;   /* 原来 #ffffff, 现在最深 (页面底层) */
+  --pad-bg-100: #171717;  /* 卡片 */
+  --pad-bg-200: #1c1c1c;
+  --pad-bg-300: #262626;  /* 浮层/popover */
+  --pad-bg-400: #2e2e2e;
+  --pad-bg-500: #404040;
+  --pad-bg-600: #525252;
+  --pad-bg-700: #a3a3a3;
+  --pad-bg-800: #d4d4d4;
+  --pad-bg-900: #fafafa;  /* 原来 #0a0a0a, 现在最浅 */
 
-  /* foregrounds — 3 级文字深度, 在 #1a1d24 底色上都 > 4.5:1 */
-  --pad-foreground: #f1f3f5;       /* primary text (近白) */
-  --pad-card-foreground: #f1f3f5;
-  --pad-popover-foreground: #f1f3f5;
-  --pad-primary-foreground: #0f1115; /* 紫色按钮上的文字 (深底) */
-  --pad-secondary-foreground: #f1f3f5;
-  --pad-muted-foreground: #a8b0bd;  /* muted text (中灰) */
-  --pad-accent-foreground: #0f1115;
-  --pad-destructive-foreground: #f1f3f5;
-  --pad-fg-primary: #f1f3f5;        /* 主文字 */
-  --pad-fg-secondary: #a8b0bd;      /* 次要文字 (placeholder / 描述) */
-  --pad-fg-tertiary: #7c8595;       /* 三级文字 (icon / 边框等) — 之前 #9a9a9a 太暗 */
+  --pad-fg-50: #0a0a0a;   /* 原来 #fafafa, 现在最深 */
+  --pad-fg-100: #171717;
+  --pad-fg-200: #262626;
+  --pad-fg-300: #404040;
+  --pad-fg-400: #858585;  /* muted 文字, 在 #171717 上 > 4.5:1 */
+  --pad-fg-500: #a3a3a3;
+  --pad-fg-600: #c4c4c4;
+  --pad-fg-700: #d4d4d4;
+  --pad-fg-800: #ededed;
+  --pad-fg-900: #fafafa;  /* 原来 #0a0a0a, 现在最浅 (主文字) */
 
-  /* roles */
-  --pad-primary: var(--pad-accent-400);
-  --pad-secondary: #232730;
-  --pad-accent: var(--pad-accent-400);
-  --pad-accent-hover: var(--pad-accent-300);
-  --pad-accent-soft: #1e1f3a;       /* dark 下 soft 用深紫, 不再用 #eeedff */
-  --pad-input: #2a2f3a;
-  --pad-ring: var(--pad-accent-300);
+  /* === Semantic role === */
+  --pad-background: #0a0a0a;
+  --pad-card: #171717;
+  --pad-popover: #262626;
+  --pad-muted: #171717;
+  --pad-bg-app: #0a0a0a;
+  --pad-bg-sidebar: #171717;
+  --pad-bg-hover: #262626;
+  --pad-bg-active: #2e2e2e;
+  --pad-bg-elevated: #262626;
+  --pad-bg-input: #1c1c1c;
 
-  /* borders */
-  --pad-border: #2a2f3a;             /* 边框 (比 light 略深, 区分明显) */
-  --pad-border-strong: #3a4150;
-  --pad-divider: #232730;
+  --pad-foreground: #fafafa;
+  --pad-card-foreground: #fafafa;
+  --pad-popover-foreground: #fafafa;
+  --pad-primary-foreground: #0a0a0a;        /* 按钮上的文字 (深色, 因为按钮变浅) */
+  --pad-secondary-foreground: #fafafa;
+  --pad-muted-foreground: #a3a1aa;          /* 在 #171717 上 4.5:1+ */
+  --pad-accent-foreground: #fafafa;
+  --pad-destructive-foreground: #fafafa;
+  --pad-fg-primary: #fafafa;
+  --pad-fg-secondary: #c4c4c4;
+  --pad-fg-tertiary: #858585;               /* 在 #171717 上 4.5:1+ */
+  --pad-fg-inverse: #0a0a0a;
+
+  /* roles — dark 模式下 primary 反转: 浅色按钮 */
+  --pad-primary: #fafafa;
+  --pad-secondary: #262626;
+  --pad-accent: #fafafa;
+  --pad-accent-hover: #ededed;
+  --pad-accent-soft: #262626;               /* dark 下 soft 用深灰, 不用 light purple */
+  --pad-input: #262626;
+  --pad-ring: #d4d4d8;
+
+  --pad-border: #262626;
+  --pad-border-strong: #404040;
+  --pad-divider: #262626;
 
   /* status */
   --pad-danger: #ef4444;

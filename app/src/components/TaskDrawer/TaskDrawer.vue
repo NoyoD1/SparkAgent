@@ -95,11 +95,16 @@ function toggleContext() {
 <style scoped>
 .pad-drawer {
   width: var(--pad-drawer-width);
-  background: var(--pad-bg-sidebar);
-  border-radius: var(--pad-radius-xl);
+  /* v0.3.8.23: 跟 body 同色, border-radius 去掉, 视觉上跟 sidebar/chat 一体 */
+  background: var(--pad-card);
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
+  /* v0.3.8.26 修右侧栏折叠不能完全收起:
+   * 之前 flex-shrink: 0 让 flex item 不收缩, 即使 width: 0 也保持 var(--pad-drawer-width) (≈300px),
+   * 视觉上"留一部分在外面" (≈80-100px min-content 撑开).
+   * 现在 min-width: 0 + 删 flex-shrink: 0, 让 flex item 能真正收缩到 0. */
+  flex-shrink: 1;
+  min-width: 0;
   overflow: hidden;
   transition:
     width var(--pad-dur-base) var(--pad-ease-out-soft),
@@ -107,8 +112,12 @@ function toggleContext() {
 }
 .pad-drawer.is-collapsed {
   width: 0;
+  min-width: 0;
   opacity: 0;
   pointer-events: none;
+  /* 防止内部 children (header 40px + body flex 1 + section padding) 突破父级 0 宽度,
+   * 让视觉完全收起到 0. */
+  overflow: hidden;
 }
 .pad-drawer__header {
   display: flex;
@@ -134,11 +143,19 @@ function toggleContext() {
   padding: 0 var(--pad-sp-3) var(--pad-sp-3);
   display: flex;
   flex-direction: column;
+  /* v0.3.8.25: gap 回到 8px, sections 之间用 8px 间距, 视觉上是独立的 card.
+   * v0.3.8.24 用 border 替代 gap 走过头了, 用户反馈"不要纯线" */
   gap: var(--pad-sp-2);
 }
 .pad-drawer__section {
-  background: var(--pad-bg-active);
-  border-radius: var(--pad-radius-xl);
+  /* v0.3.8.25: 回到"轻量 card"风格 — 1px border + 圆角 + 极轻底色.
+   * v0.3.8.19-22 用 --pad-bg-active (重灰) 太重被否,
+   * v0.3.8.24 全 transparent 走过头被否,
+   * 现在用 --pad-muted (#fafafa 极淡灰) — 比 body 略深 1 档, 视觉是 card.
+   * + 1px border + 圆角 = 真正"区域"感. */
+  background: var(--pad-muted);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-lg);
   overflow: hidden;
 }
 .pad-drawer__section-toggle {
@@ -154,10 +171,10 @@ function toggleContext() {
   background: transparent;
   border: none;
   cursor: pointer;
-  transition: background var(--pad-dur-fast) ease;
+  transition: color var(--pad-dur-fast) ease;
 }
 .pad-drawer__section-toggle:hover {
-  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
 }
 .pad-drawer__section-toggle-left {
   display: flex;
@@ -169,6 +186,7 @@ function toggleContext() {
 }
 .pad-drawer__chev {
   transition: transform var(--pad-dur-base) var(--pad-ease-in-out);
+  color: var(--pad-fg-tertiary);
 }
 .pad-drawer__chev.is-collapsed {
   transform: rotate(-90deg);
@@ -181,22 +199,34 @@ function toggleContext() {
 .pad-drawer__section-body > div {
   overflow: hidden;
 }
-.pad-drawer__section-body.is-collapsed {
-  grid-template-rows: 0fr;
+/* v0.3.8.26.1 修折叠后底部漏出: grid-template-rows: 0fr 折叠的是 grid row 高度,
+ * 但 row 内直接子 div (.pad-drawer__empty / .pad-drawer__context) 自带 padding
+ * 16px+20px = 32px. padding 是 box model 的一部分, 不受 grid 0fr 限制,
+ * 仍撑出 32px 高度 → 折叠后底部漏出 icon / 进度条 / 按钮.
+ *
+ * 修法: 折叠状态下把直接子 div 的 padding/margin/border/height 全归零,
+ * 让 grid item 真正收缩到 0. (跟 thinking body 折叠一样的 belt-and-suspenders) */
+.pad-drawer__section-body.is-collapsed > div {
+  padding: 0;
+  margin: 0;
+  border: 0;
+  height: 0;
+  min-height: 0;
 }
 .pad-drawer__empty {
   display: flex;
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: var(--pad-sp-4);
-  padding-bottom: 20px;
+  padding: var(--pad-sp-4) var(--pad-sp-4) 20px;
 }
 .pad-drawer__empty-icon {
-  width: 40px;
-  height: 40px;
+  /* v0.3.8.24: 去掉圆形灰底, 改成纯线条 icon, 跟 minimalist 一致 */
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--pad-border);
   border-radius: 50%;
-  background: var(--pad-bg-hover);
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -204,49 +234,58 @@ function toggleContext() {
   color: var(--pad-fg-tertiary);
 }
 .pad-drawer__empty-title {
-  font-size: var(--pad-fs-13);
+  font-size: var(--pad-fs-12);
   color: var(--pad-fg-secondary);
-  letter-spacing: 0.1em;
+  letter-spacing: 0.04em;
 }
 .pad-drawer__empty-desc {
-  font-size: var(--pad-fs-12);
+  font-size: var(--pad-fs-11);
   color: var(--pad-fg-tertiary);
   margin-top: 4px;
+  line-height: 1.5;
 }
 .pad-drawer__context {
-  padding: var(--pad-sp-1) var(--pad-sp-4) 20px var(--pad-sp-4);
+  padding: var(--pad-sp-2) var(--pad-sp-4) 20px;
 }
 .pad-drawer__context-bar {
   display: flex;
   align-items: center;
   gap: var(--pad-sp-3);
-  margin-bottom: var(--pad-sp-2);
+  margin-bottom: var(--pad-sp-3);
 }
+/* v0.3.8.24: 进度条改成 1px 细线 + 1px 填线, 不要 pill 大块彩色 */
 .pad-drawer__context-track {
   flex: 1;
-  height: 6px;
-  background: var(--pad-bg-hover);
-  border-radius: 9999px;
-  overflow: hidden;
+  height: 1px;
+  background: var(--pad-border);
+  border-radius: 0;
+  overflow: visible;
+  position: relative;
 }
 .pad-drawer__context-fill {
-  height: 100%;
-  background: var(--pad-warning);
-  border-radius: 9999px;
+  position: absolute;
+  left: 0;
+  top: -1px;
+  height: 3px;
+  background: var(--pad-fg-primary);
+  border-radius: 0;
+  transition: width var(--pad-dur-base) var(--pad-ease-out-soft);
 }
+/* v0.3.8.24: "压缩" 按钮去掉灰底, 改成纯文字 + underline-on-hover */
 .pad-drawer__context-btn {
-  height: 24px;
-  padding: 0 var(--pad-sp-2);
-  border-radius: var(--pad-radius-md);
-  background: var(--pad-bg-hover);
-  color: var(--pad-fg-secondary);
+  height: auto;
+  padding: 0;
+  background: transparent;
+  color: var(--pad-fg-tertiary);
   font-size: var(--pad-fs-12);
   border: none;
   cursor: pointer;
-  transition: background var(--pad-dur-fast) ease;
+  transition: color var(--pad-dur-fast) ease;
+  text-decoration: none;
 }
 .pad-drawer__context-btn:hover {
-  background: var(--pad-bg-active);
   color: var(--pad-fg-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 </style>

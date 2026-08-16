@@ -272,9 +272,16 @@ async function copyMessage() {
     margin-top var(--pad-dur-base) var(--pad-ease-out-soft);
 }
 .pad-msg__thinking-body.is-collapsed {
+  /* v0.3.8.18 fix: 单纯 max-height: 0 在部分 WebView 仍漏 padding/background,
+   * 补 height/padding/margin/border 全归零, 保证 0 高度 + 0 占位, 不留任何像素 */
   max-height: 0;
+  height: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
   opacity: 0;
   margin-top: 0;
+  overflow: hidden;
 }
 .pad-msg__thinking-content {
   margin-top: 4px;
@@ -283,8 +290,32 @@ async function copyMessage() {
   color: var(--pad-fg-tertiary);
   line-height: var(--pad-lh-base);
   padding: 6px 10px;
-  background: var(--pad-bg-100);
+  /* v0.3.8.18: 之前用 var(--pad-bg-100) 直接拿 primitive, dark 模式没覆盖,
+   * 结果是 #fafafa 白色方块. 改用 --pad-muted (semantic role), dark 下是 #1a1d24
+   * 跟 card 容器同色, 视觉上 thinking 块是 card 里的小色块, 不抢戏. */
+  background: var(--pad-muted);
   border-radius: 6px;
+  transition: padding var(--pad-dur-base) ease;
+}
+/* v0.3.8.26 修 thinking 内的 markdown 颜色跟正文一样深:
+ * 父级 .pad-msg__thinking-content color: var(--pad-fg-tertiary) 被 MarkdownContent
+ * 内部 .pad-md 的 color: var(--pad-fg-primary) 覆盖 → thinking 文字跟 assistant body
+ * 一样深, 视觉上"thinking 是元数据"的提示丢失.
+ *
+ * :deep() 让 scoped 样式穿透到 v-html 渲染的子元素 (无 data-v-xxx 属性). */
+.pad-msg__thinking-content :deep(.pad-md),
+.pad-msg__thinking-content :deep(.pad-md h1),
+.pad-msg__thinking-content :deep(.pad-md h2),
+.pad-msg__thinking-content :deep(.pad-md h3),
+.pad-msg__thinking-content :deep(.pad-md h4) {
+  color: var(--pad-fg-tertiary);
+}
+.pad-msg__thinking-body.is-collapsed .pad-msg__thinking-content {
+  /* v0.3.8.18: 折叠时 content 自身的 padding/margin 也要清零, 避免父级 height: 0
+   * 仍受 content 内部 padding 影响, 出现 1-2px 漏边 */
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 /* ===== tool calls 块 (v0.3.8.12: 字号颜色更"非正文") ===== */
@@ -320,8 +351,14 @@ async function copyMessage() {
     opacity var(--pad-dur-fast) ease;
 }
 .pad-msg__tools-body.is-collapsed {
+  /* v0.3.8.18: 跟 thinking body 一样的兜底, 折叠时彻底归零 */
   max-height: 0;
+  height: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
   opacity: 0;
+  overflow: hidden;
 }
 .pad-msg__tools-list {
   list-style: none;
@@ -349,14 +386,18 @@ async function copyMessage() {
 .pad-msg__tools-name {
   font-family: var(--pad-font-mono);
   font-weight: var(--pad-fw-medium);
-  color: var(--pad-fg-primary);
+  /* v0.3.8.26: 之前 fg-primary 跟 assistant body 颜色一样, 跟正文混淆. 改 fg-secondary
+   * 让 tool name 跟正文 (primary) 视觉区分, 但又比 args/status (tertiary) 略强
+   * —— 跟 thinking-content 的 "灰一点" 原则一致. */
+  color: var(--pad-fg-secondary);
 }
 .pad-msg__tools-status {
   font-size: var(--pad-fs-11);
   color: var(--pad-fg-tertiary);
   padding: 1px 6px;
   border-radius: 999px;
-  background: var(--pad-bg-100);
+  /* v0.3.8.18: bg-100 → muted (semantic role, dark 模式有覆盖) */
+  background: var(--pad-muted);
 }
 .pad-msg__tools-item.is-running .pad-msg__tools-status {
   color: var(--pad-accent);
@@ -378,7 +419,8 @@ async function copyMessage() {
 .pad-msg__tools-result {
   margin: 4px 0 0;
   padding: 6px 8px;
-  background: var(--pad-bg-100);
+  /* v0.3.8.18: bg-100 → muted (semantic role, dark 模式有覆盖) */
+  background: var(--pad-muted);
   border-radius: 4px;
   font-family: var(--pad-font-mono);
   font-size: var(--pad-fs-11);

@@ -91,9 +91,14 @@ function onDrawerResize(w: number) {
   flex-direction: column;
   width: 100%;
   height: 100%;
-  padding: var(--pad-sp-2);
-  gap: var(--pad-sp-2);
-  background: var(--pad-bg-active);
+  /* v0.3.8.23: 用户反馈"几块膏药贴界面上".
+   * 之前 3 种底色: pad-app 用 --pad-bg-active (灰色 gap) / title-bar 用 --pad-bg-app (白) /
+   * 内部 cards 用 --pad-card (白). 三者拼接像贴膏药.
+   * 现在统一: 全部用 --pad-card (白), gap / 标题栏 / body 一起融合成一张大白卡.
+   * 视觉分层靠 1px border, 不靠底色差. */
+  padding: 0;
+  gap: 0;
+  background: var(--pad-card);
   overflow: hidden;
 }
 
@@ -103,8 +108,10 @@ function onDrawerResize(w: number) {
   min-height: 0;
   overflow: hidden;
   /* v0.3.8.10: 5px column gap, ResizeHandle 5px 容器正中, 拖拽手柄 "||" 显示在中心.
-   * 之前 8px 还是嫌宽, 5px 紧凑, "||" 拖拽手柄本身提供视觉锚点 */
+   * v0.3.8.23: gap 颜色跟 body 同色 (var(--pad-card) 而不是 --pad-bg-active),
+   * 视觉上 sections 之间没有"色差", 只有 1px border line 分割 (在子组件里加). */
   column-gap: 5px;
+  background: var(--pad-card);
 }
 
 .pad-app__settings {
@@ -112,7 +119,6 @@ function onDrawerResize(w: number) {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* 跟外面 #app 的圆角面板不一致, 全屏面板用更方正的边 */
   border-radius: var(--pad-radius-xl);
   overflow: hidden;
 }
