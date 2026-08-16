@@ -103,13 +103,25 @@ function buildModels(config) {
   // 自定义: config.baseUrl 存在时, 走 createProvider 通用 OpenAI-compatible
   // (v0.3 阶段叫 "openai-platform", 现在改成 user-custom, FE 端通过 baseUrl 字段判断)
   if (config.baseUrl) {
+    // v0.4 fix: auth 字段不是 { apiKey: 'string' }, 是 { apiKey: { name, resolve } } 对象
+    // resolve 总是返回 config.apiKey (从 stdin 传进来, 来自 Tauri keychain)
+    const customApiKey = config.apiKey || '';
     models.setProvider(createProvider({
       id: 'user-custom',
       name: config.providerLabel || 'Custom',
       baseUrl: config.baseUrl,
-      auth: { apiKey: config.apiKey },
+      auth: {
+        apiKey: {
+          name: 'Custom OpenAI-compatible API key',
+          resolve: async () => ({
+            auth: { apiKey: customApiKey },
+            source: 'sidecar config',
+          }),
+        },
+      },
       models: [{
         id: config.model,
+        provider: 'user-custom',        // v0.4 fix: 必须显式带 provider 字段, createProvider 工厂不自动注入
         name: config.model,
         api: 'openai-completions',
         contextWindow: 128000,
@@ -200,14 +212,33 @@ function mapAgentEventToIPC(event, sessionId) {
         sessionId,
       });
       return;
-    case 'message_end':
-      // 由 finishUp 统一发, 这里忽略避免重复
+    case 'message_end': {
+      // v0.4 fix: 检查 message.stopReason === 'error' && message.errorMessage
+      // Pi SDK Agent 把 streamSimple 的 error 写到 assistant message 的 errorMessage 字段
+      // (不 emit 顶层 'error' event) — 我们在 message_end 时主动 emit 错误
+      if (event.message?.stopReason === 'error' && event.message?.errorMessage) {
+        send({
+          type: 'error',
+          message: sanitizeErrBody(String(event.message.errorMessage)),
+          sessionId,
+        });
+      }
+      // 由 finishUp 统一发 message_end, 这里不重复
       return;
+    }
     case 'agent_end':
       // 由 finishUp 统一发
       return;
     case 'error':
-      send({ type: 'error', message: sanitizeErrBody(event.error?.message || String(event.error)), sessionId });
+      // v0.4 fix: Pi SDK error event 结构是 { type, reason, error: AssistantMessage }
+      // 错误信息在 event.error.errorMessage (不是 event.error.message)
+      {
+        const assistantMessage = event.error;  // AssistantMessage 对象 (含 errorMessage, stopReason, content)
+        const errorMessage = assistantMessage?.errorMessage
+          || event.reason
+          || 'Unknown error from Pi SDK';
+        send({ type: 'error', message: sanitizeErrBody(String(errorMessage)), sessionId });
+      }
       return;
     default:
       // 未知事件 — log 后忽略 (避免污染协议)

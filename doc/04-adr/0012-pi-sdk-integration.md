@@ -122,3 +122,4 @@ v0.3 阶段 sidecar 完全裸跑（手写 fetch + SSE 解析，0 依赖）。问
 - pi-ai 主线 breaking change 频繁（依赖锁版本）
 - Pi SDK 出 v1.x 商业版要付费
 - 性能 / 启动速度问题（pi-ai 包大，启动慢）
+- **Pi SDK openai-completions 处理某些 OpenAI-compatible 端点（如商汤）响应时抛 "Cannot read properties of undefined (reading 'includes')" — 这是 SDK 内部 bug 还是端点响应不规范，待 vendor 上游确认**（2026-08-16 user 端商汤 deepseek-v4-flash 触发）
