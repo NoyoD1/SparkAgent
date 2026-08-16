@@ -75,5 +75,8 @@ pi-sdk/
 tmp-inspect-pi-sdk/
 *.bak-*
 
+# ---- sidecar 烟测日志 (test-smoke-faux.mjs 跑出来的) ----
+sidecar/smoke-*.log
+
 .tauri-*.log
 .tauri-*.log.bak

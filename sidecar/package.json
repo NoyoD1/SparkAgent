@@ -6,12 +6,11 @@
   "description": "Pi Agent Tauri 2 sidecar — Node.js script that runs LLM streaming + agent loop via @earendil-works/pi-ai + @earendil-works/pi-agent-core.",
   "main": "src/index.mjs",
   "scripts": {
-    "start": "node src/index.mjs",
-    "build-pi-sdk": "cd ../pi-sdk && npm install && npm run build"
+    "start": "node src/index.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "file:../pi-sdk/packages/ai",
-    "@earendil-works/pi-agent-core": "file:../pi-sdk/packages/agent"
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-agent-core": "0.84.2"
   },
   "engines": {
     "node": ">=20.19.0"
