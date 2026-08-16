@@ -103,15 +103,15 @@ function onPointerUp(e: PointerEvent) {
   >
     <!-- 中心 1px 基线 (永远显示, 很淡) -->
     <div class="pad-resize__line" />
-    <!-- 鼠标跟随光柱: 透明度由 hover/drag 状态决定, 中心位置由 --handle-mouse-y 决定 -->
-    <div class="pad-resize__beam" />
+    <!-- v0.3.8.10: 居中 "||" 拖拽手柄 (hover/drag 时显现, 提供明确视觉锚点) -->
+    <div class="pad-resize__handle" />
   </div>
 </template>
 
 <style scoped>
 .pad-resize {
   position: relative;
-  width: 8px;              /* v0.3.8.9: 8px 容器填满 8px column gap, 1px 中心线两侧各 3.5px */
+  width: 5px;              /* v0.3.8.10: 5px 容器填满 5px column gap, 1px 中心线两侧各 2px */
   background: transparent;
   cursor: col-resize;
   flex-shrink: 0;
@@ -137,29 +137,36 @@ function onPointerUp(e: PointerEvent) {
   opacity: 0.6;
 }
 
-/* 鼠标跟随光柱: 8px 宽, 跟着 --handle-mouse-y 移动 */
-.pad-resize__beam {
+/* v0.3.8.10: "||" 拖拽手柄 — 居中两个 1×12px 短竖线,
+ * hover 时 fg-tertiary 灰, drag 时 accent 紫.
+ * 平时 opacity:0 不显示, 鼠标进入容器才显出 */
+.pad-resize__handle {
   position: absolute;
-  top: 0;
-  bottom: 0;
+  top: 50%;
   left: 50%;
-  transform: translateX(-50%);
-  width: 8px;
+  transform: translate(-50%, -50%);
+  width: 3px;
+  height: 14px;
+  display: flex;
+  justify-content: space-between;
   pointer-events: none;
-  /* 上下两端完全透明, 中心 (鼠标位置) 最亮 */
-  background: radial-gradient(
-    ellipse 8px 80px at 50% var(--handle-mouse-y, 50%),
-    var(--pad-accent) 0%,
-    transparent 100%
-  );
   opacity: 0;
   transition: opacity var(--pad-dur-fast) ease;
-  mix-blend-mode: multiply;  /* 暗色背景下也能看清 */
 }
-.pad-resize.is-hovering .pad-resize__beam {
-  opacity: 0.12;  /* 平时很淡 */
+.pad-resize.is-hovering .pad-resize__handle,
+.pad-resize.is-dragging .pad-resize__handle {
+  opacity: 1;
 }
-.pad-resize.is-dragging .pad-resize__beam {
-  opacity: 0.25;  /* 拖拽时明显 */
+.pad-resize__handle::before,
+.pad-resize__handle::after {
+  content: '';
+  width: 1px;
+  background: var(--pad-fg-tertiary);
+  border-radius: 1px;
+  transition: background var(--pad-dur-fast) ease;
+}
+.pad-resize.is-dragging .pad-resize__handle::before,
+.pad-resize.is-dragging .pad-resize__handle::after {
+  background: var(--pad-accent);
 }
 </style>

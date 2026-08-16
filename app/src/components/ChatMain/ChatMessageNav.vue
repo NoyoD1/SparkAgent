@@ -322,22 +322,30 @@ const visible = computed(() => props.turns.length >= 1);
     aria-label="消息导航"
     @wheel="onWheel"
   >
+    <!-- v0.3.8.10: row 是 hit area (固定 24px × 22px), 内部 tick 是视觉元素 (动态 width)
+     * 用户从图 2 参考图看出来: tick 视觉上伸缩, 但 hit area 统一按展开宽度 24px 算.
+     * 这样鼠标在 tick 旁边 24px 内都能点中, 不需要精确瞄准短 tick. -->
     <button
       v-for="(turn, idx) in turns"
       :key="turn.id"
       :ref="(el) => setTickRef(el as HTMLButtonElement | null, idx)"
       type="button"
-      class="pad-msgnav__tick"
+      class="pad-msgnav__row"
       :title="`第 ${idx + 1} 轮`"
-      :style="{
-        width: tickWidth(idx) + 'px',
-        opacity: tickOpacity(idx),
-        backgroundColor: tickColor(idx),
-      }"
       @mouseenter="onHoverEnter(idx)"
       @mouseleave="onHoverLeave"
       @click="onClick(turn, idx)"
-    />
+    >
+      <span
+        class="pad-msgnav__tick"
+        :class="{ 'is-active': activeIdx === idx, 'is-hovered': hoveredIdx === idx }"
+        :style="{
+          width: tickWidth(idx) + 'px',
+          opacity: tickOpacity(idx),
+          backgroundColor: tickColor(idx),
+        }"
+      />
+    </button>
 
     <Teleport to="body">
       <div
@@ -380,8 +388,8 @@ const visible = computed(() => props.turns.length >= 1);
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  /* v0.3.8.9: gap 7 → 8, 视觉节奏更稳 */
-  gap: 8px;
+  /* v0.3.8.10: gap 8 → 4, 视觉密度更大, row 之间紧凑 */
+  gap: 4px;
   padding: 10px 0;
   max-height: calc(100% - 64px);
   overflow-y: auto;
@@ -398,25 +406,31 @@ const visible = computed(() => props.turns.length >= 1);
   display: none;
 }
 
-.pad-msgnav__tick {
-  /* v0.3.8.2 游标卡尺刻度
-   * - height 2px (极细)
-   * - padding 上下 4px 扩 hit area (容易 hover)
-   * - 默认 background 由 :style 注入 (tertiary + opacity 0.4)
-   * - width 由 :style 动态计算 (8 → 24, 跟距离联动)
-   * - transition 180ms 让 lens 效果丝滑
-   * - transform-origin left center (向右长, 不让 layout 抖)
-   * - border-radius 999px (pill 形, 两端完美半圆, 不再是矩形)
-   * - height 3px 让圆角明显可见
-   * - padding 8px 上下扩 hit area (鼠标好抓, hover 不会断触, 整条垂直线像游标卡尺一样好点) */
+/* v0.3.8.10: row = 整行 hit area (固定 24px × 22px), 接所有 mouse/click 事件 */
+.pad-msgnav__row {
   position: relative;
-  height: 3px;
-  padding: 8px 0;
+  display: flex;
+  align-items: center;
+  width: 24px;            /* 固定展开宽度 = hit area 统一标准 */
+  height: 22px;           /* 固定高度, 跨 tick 上下 hit area */
+  padding: 0;
+  background: transparent;
   border: none;
-  border-radius: 999px;
   cursor: pointer;
   flex-shrink: 0;
-  transform-origin: left center;
+}
+
+.pad-msgnav__tick {
+  /* v0.3.8.10: tick 是绝对定位的视觉元素, 不接 pointer event
+   * (整个 row 接收), 动态 width 8-24px 由 :style 注入
+   * - 视觉 3px 高 pill, 跟 row 居中 */
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 3px;
+  border-radius: 999px;
+  pointer-events: none;
   transition:
     width 180ms var(--pad-ease-out-soft, cubic-bezier(0.16, 1, 0.3, 1)),
     background-color 180ms ease,

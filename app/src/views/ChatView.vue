@@ -102,9 +102,9 @@ function onDrawerResize(w: number) {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  /* v0.3.8.9: 8px column gap, ResizeHandle 8px 容器正好填满 (1px 中心线两侧各 3.5px).
-   * 之前 12px 太开了, 整个界面被稀释, 收回 8px 既保持视觉留白又不喧宾夺主 */
-  column-gap: 8px;
+  /* v0.3.8.10: 5px column gap, ResizeHandle 5px 容器正中, 拖拽手柄 "||" 显示在中心.
+   * 之前 8px 还是嫌宽, 5px 紧凑, "||" 拖拽手柄本身提供视觉锚点 */
+  column-gap: 5px;
 }
 
 .pad-app__settings {
