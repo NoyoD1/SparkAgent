@@ -4,11 +4,12 @@
  *
  * 1 turn = 1 step = (thinking 1+ → tool_call 0+ → step text 可选)
  *
- * 视觉 (参考 Cursor 风格):
- * - 标题行: "🧠 思考 N 次 · 🔧 调用 M 工具 · 状态: 运行中/完成" 折叠
- * - 展开后: thinking 块 + tool_call 列表 + step text
- * - 当前 step (isActive=true) 默认展开 + 左边高亮
- * - 历史 step 默认折叠
+ * 视觉 (v0.4.1.2 美化, 参考 Cursor 风格):
+ * - 标题行: "步骤 N · 思考 X 次 · 调用 M 工具" 极简, 12px fg-tertiary 跟正文 14px 区分
+ * - 当前 step: 左边 2px accent 边 + 小 spinner 提示"运行中", 不强制展开
+ * - 展开后: thinking 块 (fs-11 italic fg-tertiary) + tool_call 列表 (fs-11 mono)
+ * - step 内的 text **不渲染**, 统一在 final body 显示 (避免重复)
+ * - 默认全折叠, 用户点开才看
  */
 import { computed, ref } from 'vue';
 import { ChevronDown, Wrench, Brain, Loader2 } from 'lucide-vue-next';
@@ -19,16 +20,12 @@ import MarkdownContent from './MarkdownContent.vue';
 interface Props {
   step: Step;
   sessionId: string;
-  /** 所属 message id (v0.4.1: 切换 step 折叠走 store API, 需要 messageId) */
   messageId: string;
-  /** 1-based step 序号 (从 1 开始), 用于标题 "步骤 N" */
   index: number;
-  /** 是否最后一个 step (渲染时方便标 "current" badge) */
   isLast: boolean;
 }
 
 const props = defineProps<Props>();
-
 const chatStore = useChatStore();
 
 const thinkingBlocks = computed(() => props.step.thinking);
@@ -38,8 +35,8 @@ const collapsed = computed(() => props.step.collapsed);
 
 const thinkingCount = computed(() => thinkingBlocks.value.filter((t) => t.content).length);
 const toolCount = computed(() => toolCalls.value.length);
+const runningCount = computed(() => toolCalls.value.filter((t) => t.status === 'running').length);
 
-// v0.4.1: 切换折叠走 store (props 是 readonly, 直接 mutate 会 warning)
 function toggleCollapsed() {
   chatStore.setStepCollapsed(props.sessionId, props.messageId, props.step.id, !collapsed.value);
 }
@@ -59,7 +56,7 @@ function toggleToolsCollapsed() {
 }
 
 function toolStatusLabel(t: ToolCallBlock): string {
-  if (t.status === 'running' || t.status === 'pending') return '运行中…';
+  if (t.status === 'running' || t.status === 'pending') return '运行中';
   if (t.status === 'success') return '完成';
   return '失败';
 }
@@ -70,16 +67,19 @@ function toolArgsSummary(t: ToolCallBlock): string {
   const first = keys[0];
   const v = t.args[first];
   const s = typeof v === 'string' ? v : JSON.stringify(v);
-  const preview = s.length > 60 ? s.slice(0, 60) + '…' : s;
+  const preview = s.length > 50 ? s.slice(0, 50) + '…' : s;
   return `${first}: ${preview}`;
 }
 
-// 标题汇总文字: "思考 N 次 · 调用 M 工具 · 状态: ..."
+/* // 标题: "步骤 N · 思考 X 次 · 调用 M 工具" (无 emoji, 简约) */
 const stepSummary = computed(() => {
   const parts: string[] = [];
   if (thinkingCount.value > 0) parts.push(`思考 ${thinkingCount.value} 次`);
-  if (toolCount.value > 0) parts.push(`调用 ${toolCount.value} 个工具`);
-  if (parts.length === 0) return '步骤 ' + props.index;
+  if (toolCount.value > 0) {
+    const txt = `调用 ${toolCount.value} 个工具`;
+    parts.push(runningCount.value > 0 ? `${txt} (${runningCount.value} 运行中)` : txt);
+  }
+  if (parts.length === 0) return `步骤 ${props.index}`;
   return parts.join(' · ');
 });
 </script>
@@ -93,24 +93,20 @@ const stepSummary = computed(() => {
       'is-last': isLast,
     }"
   >
-    <!-- 标题行: 始终可见, 折叠/展开 -->
-    <button
-      class="pad-step__title"
-      type="button"
-      @click="toggleCollapsed"
-    >
+    <!-- 标题行: 始终可见, 灰色 12px, 跟正文 14px 区分 -->
+    <button class="pad-step__title" type="button" @click="toggleCollapsed">
       <span class="pad-step__title-prefix">
-        <span v-if="isActive" class="pad-step__pulse">
-          <Loader2 :size="11" :stroke-width="2" class="pad-step__spinner" />
-        </span>
+        <Loader2 v-if="isActive" :size="11" :stroke-width="2" class="pad-step__spinner" />
         <span v-else class="pad-step__num">{{ index }}</span>
       </span>
       <span class="pad-step__title-text">
-        <span v-if="isActive">步骤 {{ index }} · {{ stepSummary }} · 运行中…</span>
-        <span v-else>步骤 {{ index }} · {{ stepSummary }}</span>
+        <span>步骤 {{ index }}</span>
+        <span v-if="thinkingCount > 0 || toolCount > 0" class="pad-step__title-sep">·</span>
+        <span>{{ stepSummary }}</span>
+        <span v-if="isActive" class="pad-step__title-status">运行中</span>
       </span>
       <ChevronDown
-        :size="12"
+        :size="11"
         :stroke-width="1.75"
         :class="['pad-step__chev', { 'is-collapsed': collapsed }]"
       />
@@ -118,7 +114,7 @@ const stepSummary = computed(() => {
 
     <!-- 展开内容 -->
     <div :class="['pad-step__body', { 'is-collapsed': collapsed }]">
-      <!-- thinking blocks (按时间顺序) -->
+      <!-- thinking blocks (按时间顺序, fs-11 italic fg-tertiary) -->
       <div
         v-for="tb in thinkingBlocks"
         v-show="tb.content"
@@ -130,10 +126,10 @@ const stepSummary = computed(() => {
           type="button"
           @click="toggleThinkingCollapsed(tb)"
         >
-          <Brain :size="11" :stroke-width="1.75" />
+          <Brain :size="10" :stroke-width="1.75" />
           <span>思考</span>
           <ChevronDown
-            :size="11"
+            :size="10"
             :stroke-width="1.75"
             :class="['pad-step__chev', { 'is-collapsed': tb.collapsed }]"
           />
@@ -145,17 +141,17 @@ const stepSummary = computed(() => {
         </div>
       </div>
 
-      <!-- tool calls (按时间顺序) -->
+      <!-- tool calls (fs-11 mono) -->
       <div v-if="toolCalls.length > 0" class="pad-step__tools">
         <button
           class="pad-step__tools-toggle"
           type="button"
           @click="toggleToolsCollapsed"
         >
-          <Wrench :size="11" :stroke-width="1.75" />
+          <Wrench :size="10" :stroke-width="1.75" />
           <span>{{ toolCalls.length }} 个工具调用</span>
           <ChevronDown
-            :size="11"
+            :size="10"
             :stroke-width="1.75"
             :class="['pad-step__chev', { 'is-collapsed': toolsCollapsed }]"
           />
@@ -181,51 +177,52 @@ const stepSummary = computed(() => {
         </div>
       </div>
 
-      <!-- v0.4.1 fix: step 内不渲染 stepText, text 统一在 final body (message.content) 显示
+      <!-- v0.4.1.2 fix: step 内不渲染 stepText, text 统一在 final body (lastStep.stepText) 显示
        * 避免 step 内 stepText 跟 final body 内容重复 (user 反馈"出现多次同样内容") -->
     </div>
   </div>
 </template>
 
 <style scoped>
-/* ===== step group 容器 ===== */
+/* ===== step group 容器: 极简, 左边 2px accent 边仅当 isActive ===== */
 .pad-step {
-  border-left: 2px solid var(--pad-border);
-  margin: 4px 0;
+  margin: 2px 0;
   padding: 0;
   position: relative;
 }
 .pad-step.is-active {
-  border-left-color: var(--pad-accent);
+  border-left: 2px solid var(--pad-accent);
+  padding-left: 8px;
+  margin-left: -2px;
   background: var(--pad-muted);
   border-radius: 4px;
 }
-.pad-step.is-last {
-  margin-bottom: 8px;
-}
 
-/* ===== 标题行 ===== */
+/* ===== 标题行: 12px fg-tertiary, 跟正文 14px 区分明显 ===== */
 .pad-step__title {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 4px 8px;
+  padding: 4px 6px;
   background: transparent;
   border: none;
   cursor: pointer;
   font-family: inherit;
   text-align: left;
-  color: var(--pad-fg-secondary);
-  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
+  font-size: var(--pad-fs-12);
   font-weight: var(--pad-fw-medium);
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
   border-radius: 4px;
-  transition: background var(--pad-dur-fast) ease;
+  transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
 }
 .pad-step__title:hover {
   background: var(--pad-bg-hover);
-  color: var(--pad-fg-primary);
+  color: var(--pad-fg-secondary);
+}
+.pad-step.is-active .pad-step__title {
+  color: var(--pad-fg-secondary);
 }
 .pad-step__title-prefix {
   display: inline-flex;
@@ -233,20 +230,15 @@ const stepSummary = computed(() => {
   justify-content: center;
   width: 14px;
   height: 14px;
-  font-size: 10px;
+  font-size: var(--pad-fs-11);
   color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
+}
+.pad-step.is-active .pad-step__title-prefix {
+  color: var(--pad-accent);
 }
 .pad-step__num {
   font-family: var(--pad-font-mono);
-}
-.pad-step.is-active .pad-step__title {
-  color: var(--pad-accent);
-}
-.pad-step__title-text {
-  flex: 1;
-}
-.pad-step__pulse {
-  color: var(--pad-accent);
 }
 .pad-step__spinner {
   animation: pad-step-spin 1.4s linear infinite;
@@ -255,14 +247,31 @@ const stepSummary = computed(() => {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+.pad-step__title-text {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.pad-step__title-sep {
+  color: var(--pad-fg-tertiary);
+  opacity: 0.5;
+}
+.pad-step__title-status {
+  color: var(--pad-accent);
+  font-size: var(--pad-fs-11);
+  margin-left: 4px;
+}
 .pad-step__chev {
   transition: transform var(--pad-dur-base) var(--pad-ease-in-out);
+  flex-shrink: 0;
 }
 .pad-step__chev.is-collapsed { transform: rotate(-90deg); }
 
-/* ===== step body 折叠 ===== */
+/* ===== step body 折叠: 紧凑 ===== */
 .pad-step__body {
-  padding: 4px 0 4px 20px;
+  padding: 4px 0 4px 16px;
   max-height: 4000px;
   overflow: hidden;
   opacity: 1;
@@ -282,8 +291,8 @@ const stepSummary = computed(() => {
   overflow: hidden;
 }
 
-/* ===== thinking 块 (内嵌) ===== */
-.pad-step__thinking { margin: 0; padding: 0; }
+/* ===== thinking 块 (fs-11 italic fg-tertiary) ===== */
+.pad-step__thinking { margin: 4px 0; }
 .pad-step__thinking-toggle {
   display: inline-flex;
   align-items: center;
@@ -295,8 +304,9 @@ const stepSummary = computed(() => {
   border: none;
   padding: 2px 0;
   cursor: pointer;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
   font-family: inherit;
+  font-style: italic;
 }
 .pad-step__thinking-toggle:hover { color: var(--pad-fg-secondary); }
 .pad-step__thinking-body {
@@ -318,23 +328,26 @@ const stepSummary = computed(() => {
 }
 .pad-step__thinking-content {
   margin-top: 2px;
-  padding: 4px 8px;
-  font-size: var(--pad-fs-12);
+  padding: 6px 8px;
+  font-size: var(--pad-fs-11);
   font-style: italic;
   color: var(--pad-fg-tertiary);
   line-height: var(--pad-lh-base);
-  background: var(--pad-bg-app);
+  background: var(--pad-muted);
   border-radius: 4px;
 }
+/* 深穿透 MarkdownContent 内部, 保持 italic + fg-tertiary */
 .pad-step__thinking-content :deep(.pad-md),
 .pad-step__thinking-content :deep(.pad-md h1),
 .pad-step__thinking-content :deep(.pad-md h2),
-.pad-step__thinking-content :deep(.pad-md h3) {
+.pad-step__thinking-content :deep(.pad-md h3),
+.pad-step__thinking-content :deep(.pad-md p) {
+  font-style: italic;
   color: var(--pad-fg-tertiary);
 }
 
-/* ===== tool calls 块 (内嵌) ===== */
-.pad-step__tools { margin: 0; padding: 0; }
+/* ===== tool calls 块 (fs-11 mono) ===== */
+.pad-step__tools { margin: 4px 0; }
 .pad-step__tools-toggle {
   display: inline-flex;
   align-items: center;
@@ -346,7 +359,7 @@ const stepSummary = computed(() => {
   border: none;
   padding: 2px 0;
   cursor: pointer;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
   font-family: inherit;
 }
 .pad-step__tools-toggle:hover { color: var(--pad-fg-secondary); }
@@ -369,13 +382,13 @@ const stepSummary = computed(() => {
 }
 .pad-step__tools-list {
   list-style: none;
-  padding: 0 0 0 8px;
-  margin: 4px 0 0;
+  padding: 0 0 0 6px;
+  margin: 2px 0 0;
   border-left: 1px solid var(--pad-border);
 }
 .pad-step__tools-item {
   padding: 2px 0;
-  font-size: var(--pad-fs-12);
+  font-size: var(--pad-fs-11);
   color: var(--pad-fg-secondary);
 }
 .pad-step__tools-row {
@@ -405,7 +418,7 @@ const stepSummary = computed(() => {
   background: var(--pad-danger-subtle);
 }
 .pad-step__tools-args {
-  margin-top: 2px;
+  margin-top: 1px;
   color: var(--pad-fg-tertiary);
   font-family: var(--pad-font-mono);
   font-size: var(--pad-fs-11);
@@ -425,14 +438,5 @@ const stepSummary = computed(() => {
   word-wrap: break-word;
   max-height: 120px;
   overflow: auto;
-}
-
-/* ===== step text (本 turn 的文字输出) ===== */
-.pad-step__text {
-  font-size: var(--pad-fs-12);
-  line-height: var(--pad-lh-base);
-  color: var(--pad-fg-secondary);
-  padding: 4px 0;
-  word-wrap: break-word;
 }
 </style>

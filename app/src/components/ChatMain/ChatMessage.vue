@@ -43,12 +43,26 @@ const props = withDefaults(defineProps<Props>(), {
 const isUser = computed(() => props.message.role === 'user');
 
 const hasSteps = computed(() => (props.steps?.length ?? 0) > 0);
-const hasContent = computed(() => (props.message.content?.trim().length ?? 0) > 0);
+// v0.4.1.2 fix: final body 渲染 last step 的 stepText (last turn 的 text)
+// 而不是 message.content (跨 turn 累积所有 text, 会显示 turn 1 + turn 2 重复内容)
+const lastStep = computed(() => {
+  const steps = props.steps || [];
+  return steps.length > 0 ? steps[steps.length - 1] : undefined;
+});
+const finalBody = computed(() => {
+  // 优先 lastStep.stepText (per-turn 隔离, 不会跨 turn 重复)
+  if (lastStep.value && lastStep.value.stepText.trim().length > 0) {
+    return lastStep.value.stepText;
+  }
+  // fallback: message.content (单 turn 场景 / 兼容旧数据)
+  return props.message.content;
+});
+const hasContent = computed(() => (finalBody.value?.trim().length ?? 0) > 0);
 
 const copied = ref(false);
 async function copyMessage() {
   try {
-    await navigator.clipboard.writeText(props.message.content);
+    await navigator.clipboard.writeText(finalBody.value);
     copied.value = true;
     setTimeout(() => (copied.value = false), 1200);
   } catch (e) {
@@ -88,9 +102,9 @@ async function copyMessage() {
       <span class="pad-msg__loading-text">{{ message.content ? '继续生成中…' : '生成中…' }}</span>
     </div>
 
-    <!-- markdown body (final reply, 跨 turn 累积) -->
+    <!-- markdown body (final reply, 渲染 lastStep.stepText) -->
     <div v-else-if="hasContent" class="pad-msg__body">
-      <MarkdownContent :content="message.content" />
+      <MarkdownContent :content="finalBody" />
     </div>
 
     <!-- v0.3.8.15: stream 结束但 4 类内容都为空时, 显示具体 error 信息 -->
