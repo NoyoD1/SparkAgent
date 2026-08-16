@@ -43,6 +43,18 @@ import { minimaxProvider } from '@earendil-works/pi-ai/providers/minimax';
 // OpenAI-compatible API stream 函数 (用于 createProvider 通用 endpoint, 如商汤/任意 OpenAI-compatible)
 import { stream as openaiCompletionsStream, streamSimple as openaiCompletionsStreamSimple } from '@earendil-works/pi-ai/api/openai-completions';
 
+// v0.4.1: 用 pi-coding-agent 的 7 个 tool (read / bash / edit / write / grep / find / ls),
+// 不再自实现. cwd = workspace path, 各 tool 内部用 ExecutionEnv 抽象在 Node 跑文件系统.
+import {
+  createBashTool,
+  createEditTool,
+  createFindTool,
+  createGrepTool,
+  createLsTool,
+  createReadTool,
+  createWriteTool,
+} from '@earendil-works/pi-coding-agent';
+
 const REASONING_MAP = { low: 'low', medium: 'medium', high: 'high' };
 
 /** @type {any} 当前 config (从 stdin { type: 'config' } 写入) */
@@ -147,9 +159,9 @@ function buildModels(config) {
  *   AgentEvent.type:
  *     - 'message_start'                  -> { type: 'message_start' }
  *     - 'message_update'                 -> { type: 'message_update', kind, delta }
- *     - 'tool_call_start'                -> { type: 'tool_start', toolName, toolCallId, args }
- *     - 'tool_call_update'               -> { type: 'tool_update', toolCallId, delta }
- *     - 'tool_call_end'                  -> { type: 'tool_end', toolCallId, result, error }
+ *     - 'tool_execution_start'           -> { type: 'tool_start', toolName, toolCallId, args }   (v0.4.1 fix: 之前错写成 tool_call_*)
+ *     - 'tool_execution_update'          -> { type: 'tool_update', toolCallId, toolName, partialResult }
+ *     - 'tool_execution_end'             -> { type: 'tool_end', toolCallId, toolName, result, error } (result 来自 event.result, error 来自 isError)
  *     - 'message_end'                    -> { type: 'message_end' } (留到 finishUp)
  *     - 'agent_end'                      -> { type: 'agent_end' }
  *     - 'error'                          -> { type: 'error', message }
@@ -188,32 +200,45 @@ function mapAgentEventToIPC(event, sessionId) {
       // text_start / text_end / thinking_start / thinking_end 都不带 delta, 跳过
       return;
     }
-    case 'tool_call_start':
+    case 'tool_execution_start':
       send({
         type: 'tool_start',
-        toolName: event.toolCall?.name,
-        toolCallId: event.toolCall?.id,
-        args: event.toolCall?.arguments,
+        toolName: event.toolName,
+        toolCallId: event.toolCallId,
+        args: event.args,
         sessionId,
       });
       return;
-    case 'tool_call_update':
+    case 'tool_execution_update':
       send({
         type: 'tool_update',
         toolCallId: event.toolCallId,
-        delta: event.delta,
+        toolName: event.toolName,
+        partialResult: event.partialResult,
         sessionId,
       });
       return;
-    case 'tool_call_end':
+    case 'tool_execution_end': {
+      // v0.4.1: pi-agent-core 用 isError 布尔, 我们 v0.3 协议用 error 字符串.
+      // 把 AgentToolResult.content[0].text 当 error (tool 自己 throw 也走这里)
+      const isError = event.isError === true;
+      const result = event.result;
+      let errorText;
+      if (isError) {
+        // 错误时 result.content 是 text 数组, 提取第一条
+        const first = Array.isArray(result?.content) ? result.content[0] : null;
+        errorText = first?.text || 'Tool execution failed';
+      }
       send({
         type: 'tool_end',
         toolCallId: event.toolCallId,
-        result: event.result,
-        error: event.error,
+        toolName: event.toolName,
+        result: isError ? undefined : result,
+        error: errorText,
         sessionId,
       });
       return;
+    }
     case 'message_end': {
       // v0.4 fix: 检查 message.stopReason === 'error' && message.errorMessage
       // Pi SDK Agent 把 streamSimple 的 error 写到 assistant message 的 errorMessage 字段
@@ -280,7 +305,7 @@ async function runPrompt(config, userContent, sessionId) {
     : '你是 Pi Agent.';
 
   const agent = new Agent({
-    initialState: { systemPrompt, model },
+    initialState: { systemPrompt, model, tools: buildTools(config.workspacePath) },
     streamFn: models.streamSimple.bind(models),
   });
   currentAgent = agent;
@@ -324,6 +349,29 @@ async function runPrompt(config, userContent, sessionId) {
     if (currentAbortController === ac) currentAbortController = null;
     if (currentAgent === agent) currentAgent = null;
   }
+}
+
+/**
+ * 用 pi-coding-agent 的 7 个 tool 工厂构造 Agent 的 tool 数组.
+ * cwd 走 workspace path, tool 内部用 ExecutionEnv 抽象 (node 跑 fs).
+ *
+ * v0.4.1 phase 1 全部 7 个都注册, 不做 dangerous 拦截 (FE 端 v0.3.8.6+ 协议已支持 confirm UI).
+ * 工作目录外的路径保护由各 tool 的 ExecutionEnv (默认) + Tauri 端 fs capability 共同承担.
+ *
+ * @param {string} workspacePath
+ * @returns {import('@earendil-works/pi-agent-core').AgentTool[]}
+ */
+function buildTools(workspacePath) {
+  const cwd = workspacePath || process.cwd();
+  return [
+    createReadTool(cwd),
+    createWriteTool(cwd),
+    createEditTool(cwd),
+    createBashTool(cwd),
+    createLsTool(cwd),
+    createFindTool(cwd),
+    createGrepTool(cwd),
+  ];
 }
 
 // ===== IPC: stdin JSON Lines =====

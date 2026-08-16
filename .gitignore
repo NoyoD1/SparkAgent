@@ -75,8 +75,13 @@ pi-sdk/
 tmp-inspect-pi-sdk/
 *.bak-*
 
-# ---- sidecar 烟测日志 (test-smoke-faux.mjs 跑出来的) ----
+# ---- sidecar 烟测日志 + 临时测试脚本 ----
 sidecar/smoke-*.log
+# 临时测试/调试脚本 (test-smoke-*.mjs / test-format.mjs / test-401.mjs 等),
+# 跑完确认 PASS 就删, 不入 git
+sidecar/test-*.mjs
+sidecar/debug-*.jsonl
+sidecar/smoke-test.jsonl
 
 .tauri-*.log
 .tauri-*.log.bak
