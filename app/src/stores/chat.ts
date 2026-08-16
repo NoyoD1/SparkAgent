@@ -200,6 +200,11 @@ export const useChatStore = defineStore('chat', () => {
       // 现在改成: message_start 允许 idx<0 (它负责 push), 其他 case 必须 idx>=0.
       const idx = d2.messages.findIndex((m) => m.id === assistantId);
       switch (event.type) {
+        case 'agent_start':
+          // v0.3.8.14: agent_start 之前 v0.3.8.13 漏了, 走 default 警告
+          // agent_start 是 sidecar 启动信号, 不需要动 store, 仅日志
+          console.log('[chat] agent_start');
+          break;
         case 'message_start':
           // 第一次 message_start: 懒创建 assistant message
           if (idx < 0) {
@@ -298,6 +303,7 @@ export const useChatStore = defineStore('chat', () => {
             case 'error':
               errorBySession.value = { ...errorBySession.value, [sessionId]: event.message };
               streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
+              console.error('[chat] error event:', event.message);
               off();
               return;
           }
