@@ -23,22 +23,25 @@
 //   - 一次 prompt 进程结束即丢 (sidecar 一次 spawn 模型, ADR-0009)
 import readline from 'node:readline';
 
-import {
-  Agent,
-} from '@earendil-works/pi-agent-core';
+import { Agent } from '@earendil-works/pi-agent-core';
 
 import {
   createModels,
   createProvider,
-  openaiCompletionsApi,
-  anthropicProvider,
-  openaiProvider,
-  deepseekProvider,
-  moonshotaiProvider,
-  groqProvider,
-  googleProvider,
-  minimaxProvider,
 } from '@earendil-works/pi-ai';
+
+// v0.4: pi-ai 0.84.2 顶层不 re-export provider factory, 走 './providers/*' 子路径
+// (npm 包 package.json 声明了 './providers/*' -> 'dist/providers/*.js')
+import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
+import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
+import { deepseekProvider } from '@earendil-works/pi-ai/providers/deepseek';
+import { moonshotaiProvider } from '@earendil-works/pi-ai/providers/moonshotai';
+import { groqProvider } from '@earendil-works/pi-ai/providers/groq';
+import { googleProvider } from '@earendil-works/pi-ai/providers/google';
+import { minimaxProvider } from '@earendil-works/pi-ai/providers/minimax';
+
+// OpenAI-compatible API stream 函数 (用于 createProvider 通用 endpoint, 如商汤/任意 OpenAI-compatible)
+import { stream as openaiCompletionsStream, streamSimple as openaiCompletionsStreamSimple } from '@earendil-works/pi-ai/api/openai-completions';
 
 const REASONING_MAP = { low: 'low', medium: 'medium', high: 'high' };
 
@@ -112,7 +115,10 @@ function buildModels(config) {
         contextWindow: 128000,
         maxTokens: 8192,
       }],
-      api: openaiCompletionsApi,
+      api: {
+        stream: openaiCompletionsStream,
+        streamSimple: openaiCompletionsStreamSimple,
+      },
     }));
   }
 
@@ -143,8 +149,19 @@ function buildModels(config) {
  */
 function mapAgentEventToIPC(event, sessionId) {
   switch (event.type) {
+    case 'agent_start':
+      // agent.subscribe 收到 agent_start → emit 一次
+      // (之前手动 send agent_start 删了, 避免重复)
+      send({ type: 'agent_start', sessionId });
+      return;
+    case 'turn_start':
+    case 'turn_end':
+      // 内部事件, 不映射到 IPC 协议
+      return;
     case 'message_start':
-      send({ type: 'message_start', sessionId });
+      // agent.subscribe 收到 message_start (user + assistant 各一次), 全发
+      // FE 端 chat store 自己处理 user vs assistant (event.message.role)
+      send({ type: 'message_start', sessionId, role: event.message?.role });
       return;
     case 'message_update': {
       const inner = event.assistantMessageEvent;
@@ -154,6 +171,7 @@ function mapAgentEventToIPC(event, sessionId) {
       } else if (inner.type === 'thinking_delta') {
         send({ type: 'message_update', kind: 'thinking', delta: inner.delta, sessionId });
       }
+      // text_start / text_end / thinking_start / thinking_end 都不带 delta, 跳过
       return;
     }
     case 'tool_call_start':
@@ -255,8 +273,8 @@ async function runPrompt(config, userContent, sessionId) {
     }
   });
 
-  send({ type: 'agent_start', sessionId });
-  send({ type: 'message_start', sessionId });
+  // v0.4 fix: 不手动 send agent_start / message_start — agent.subscribe 收到
+  // 这些事件会自动 emit (带 role 字段), 避免重复
 
   try {
     // pi-agent-core Agent.prompt 不直接吃 AbortSignal — 走 ac.signal 通过 transport 注入
