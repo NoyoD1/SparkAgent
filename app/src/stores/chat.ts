@@ -195,13 +195,13 @@ export const useChatStore = defineStore('chat', () => {
       );
       if ('sessionId' in event && event.sessionId !== sessionId) return;
       const d2 = getSessionData(sessionId);
+      // v0.3.8.12 fix: 之前 `if (idx < 0) return` 在 switch 之前, 导致 message_start
+      // 事件永远到不了 case 块 (因为 message_start 时还没 push assistant message, idx=-1).
+      // 现在改成: message_start 允许 idx<0 (它负责 push), 其他 case 必须 idx>=0.
       const idx = d2.messages.findIndex((m) => m.id === assistantId);
-      if (idx < 0) return;
-      const assistant = d2.messages[idx];
       switch (event.type) {
         case 'message_start':
-          // v0.3.8.12: assistant message 之前在 sendPrompt 时立即 push (空 content),
-          // 现在改成 message_start 真的到了才 push — 避免 send 后立即出现空 placeholder
+          // 第一次 message_start: 懒创建 assistant message
           if (idx < 0) {
             d2.messages.push({
               id: assistantId,
@@ -209,92 +209,101 @@ export const useChatStore = defineStore('chat', () => {
               content: '',
               createdAt: new Date().toISOString(),
             });
-            chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
-            return;  // 这次没 idx, 重置 assistant.content 的逻辑跳过
+            // 同时重置 thinking
+            const tbNew = d2.thinking.find((t) => t.messageId === assistantId);
+            if (tbNew) tbNew.content = '';
+            break;
           }
-          assistant.content = '';
-          // 重置 thinking 内容
-          const tb = d2.thinking.find((t) => t.messageId === assistantId);
-          if (tb) tb.content = '';
+          // 后续 message_start (少见, 但有些 API 会重发): 重置内容
+          d2.messages[idx].content = '';
+          const tbRst = d2.thinking.find((t) => t.messageId === assistantId);
+          if (tbRst) tbRst.content = '';
           break;
         case 'message_update':
-          // v0.3.8.6: sidecar 现在发 kind: 'thinking' | 'content', 拆开写
-          if (event.kind === 'thinking') {
-            // v0.3.8.12: thinking 块按需创建 (之前 sendPrompt 时立即 push 空的, 现在等真来再 create)
-            // 避免 send 后立即出现空 "思考过程 >" 标签占位
-            let tb2 = d2.thinking.find((t) => t.messageId === assistantId);
-            if (!tb2) {
-              tb2 = {
-                id: `think-${assistantId}`,
-                messageId: assistantId,
-                content: '',
-                collapsed: true,  // 默认折叠, 用户主动展开
-              };
-              d2.thinking.push(tb2);
-            }
-            tb2.content += event.delta;
-            console.log('[chat] thinking_update len=', tb2?.content.length);
-          } else {
-            // 默认当 content (兼容没带 kind 的旧 sidecar)
-            assistant.content += event.delta;
-            console.log('[chat] content_update len=', assistant.content.length);
-          }
-          break;
         case 'message_end':
-          // v0.3.8.11: 不再自动收起 thinking, 用户自己决定何时折叠
-          break;
         case 'tool_start':
-          // v0.3.8.6: 工具调用折叠提示
-          d2.toolCalls.push({
-            id: event.toolCallId,
-            messageId: assistantId,
-            name: event.toolName,
-            args: event.args || {},
-            status: 'running',
-            startedAt: new Date().toISOString(),
-          });
-          console.log('[chat] tool_start', event.toolName);
-          break;
         case 'tool_update':
-          // 工具输出流式更新 (append 到 result)
-          {
-            const tc = d2.toolCalls.find((x) => x.id === event.toolCallId);
-            if (tc) {
-              tc.result = (tc.result || '') + event.delta;
-            }
-          }
-          break;
         case 'tool_end':
-          {
-            const tc = d2.toolCalls.find((x) => x.id === event.toolCallId);
-            if (tc) {
-              tc.status = event.error ? 'error' : 'success';
-              tc.endedAt = new Date().toISOString();
-              if (typeof event.result === 'string') {
-                tc.result = event.result;
-              } else if (event.result !== undefined) {
-                tc.result = JSON.stringify(event.result, null, 2);
+        case 'agent_end':
+        case 'error':
+          // 这些 case 都需要 idx >= 0 (message_start 之后才走)
+          if (idx < 0) {
+            console.warn(`[chat] ${event.type} before assistant message created, ignoring`);
+            return;
+          }
+          const assistant = d2.messages[idx];
+          // 走对应 case 处理
+          switch (event.type) {
+            case 'message_update':
+              if (event.kind === 'thinking') {
+                let tb2 = d2.thinking.find((t) => t.messageId === assistantId);
+                if (!tb2) {
+                  tb2 = {
+                    id: `think-${assistantId}`,
+                    messageId: assistantId,
+                    content: '',
+                    collapsed: true,
+                  };
+                  d2.thinking.push(tb2);
+                }
+                tb2.content += event.delta;
+                console.log('[chat] thinking_update len=', tb2?.content.length);
+              } else {
+                assistant.content += event.delta;
+                console.log('[chat] content_update len=', assistant.content.length);
               }
-            }
+              break;
+            case 'message_end':
+              break;
+            case 'tool_start':
+              d2.toolCalls.push({
+                id: event.toolCallId,
+                messageId: assistantId,
+                name: event.toolName,
+                args: event.args || {},
+                status: 'running',
+                startedAt: new Date().toISOString(),
+              });
+              console.log('[chat] tool_start', event.toolName);
+              break;
+            case 'tool_update':
+              {
+                const tc = d2.toolCalls.find((x) => x.id === event.toolCallId);
+                if (tc) tc.result = (tc.result || '') + event.delta;
+              }
+              break;
+            case 'tool_end':
+              {
+                const tc = d2.toolCalls.find((x) => x.id === event.toolCallId);
+                if (tc) {
+                  tc.status = event.error ? 'error' : 'success';
+                  tc.endedAt = new Date().toISOString();
+                  if (typeof event.result === 'string') tc.result = event.result;
+                  else if (event.result !== undefined) tc.result = JSON.stringify(event.result, null, 2);
+                }
+              }
+              break;
+            case 'agent_end':
+              streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
+              chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+              console.log(
+                '[chat] agent_end: assistant.content.length=',
+                assistant.content.length,
+                'preview=',
+                assistant.content.slice(0, 80),
+              );
+              off();
+              maybeAutoNameSession(sessionId, text);
+              return;  // agent_end 之后直接 return, 不再赋值 chatData
+            case 'error':
+              errorBySession.value = { ...errorBySession.value, [sessionId]: event.message };
+              streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
+              off();
+              return;
           }
           break;
-        case 'agent_end':
-          streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
-          chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
-          console.log(
-            '[chat] agent_end: assistant.content.length=',
-            assistant.content.length,
-            'preview=',
-            assistant.content.slice(0, 80),
-          );
-          off();
-          // 自动用首条消息给 session 命名 (仅在 title 仍是默认 "新任务" 时)
-          maybeAutoNameSession(sessionId, text);
-          break;
-        case 'error':
-          errorBySession.value = { ...errorBySession.value, [sessionId]: event.message };
-          streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
-          off();
+        default:
+          console.warn('[chat] unhandled event type:', (event as any).type);
           break;
       }
       chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
