@@ -26,7 +26,7 @@ export type ServerToClient =
   | { type: 'config_error'; message: string; sessionId?: string }
   | { type: 'agent_start'; sessionId: string }
   | { type: 'message_start'; sessionId: string }
-  | { type: 'message_update'; delta: string; sessionId: string }
+  | { type: 'message_update'; delta: string; kind?: 'thinking' | 'content'; sessionId: string }
   | { type: 'tool_start'; toolName: string; toolCallId: string; args: Record<string, unknown>; sessionId: string }
   | { type: 'tool_update'; toolCallId: string; delta: string; sessionId: string }
   | { type: 'tool_end'; toolCallId: string; result?: unknown; error?: string; sessionId: string }

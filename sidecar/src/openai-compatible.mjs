@@ -183,10 +183,18 @@ async function runOpenAICompatiblePrompt(config, userContent) {
           const parsed = JSON.parse(data);
           const choice = parsed.choices?.[0];
           if (!choice) continue;
-          const delta = choice.delta?.reasoning_content || choice.delta?.content;
-          if (delta) {
-            deltaChars += delta.length;
-            send({ type: 'message_update', delta });
+          const delta = choice.delta;
+          if (!delta) continue;
+          // v0.3.8.6: 拆开 reasoning_content (thinking) 和 content, 各自发
+          // kind: 'thinking' → 前端写入 ThinkingBlock (折叠灰字)
+          // kind: 'content'  → 前端追加到 assistant.content (主内容)
+          if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+            deltaChars += delta.reasoning_content.length;
+            send({ type: 'message_update', kind: 'thinking', delta: delta.reasoning_content });
+          }
+          if (typeof delta.content === 'string' && delta.content.length > 0) {
+            deltaChars += delta.content.length;
+            send({ type: 'message_update', kind: 'content', delta: delta.content });
           }
           if (choice.finish_reason === 'stop' || choice.finish_reason === 'length') {
             console.error(`[sidecar] <<< finish_reason=${choice.finish_reason} bytes=${totalBytes} dataLines=${dataLines} deltas=${deltaChars}`);

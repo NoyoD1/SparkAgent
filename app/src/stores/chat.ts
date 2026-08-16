@@ -185,6 +185,14 @@ export const useChatStore = defineStore('chat', () => {
       content: '',
       createdAt: new Date().toISOString(),
     });
+    // v0.3.8.6: 为这个 assistant message 准备 thinking 块 (默认 collapsed, 灰字)
+    const thinkingId = `think-${assistantId}`;
+    d.thinking.push({
+      id: thinkingId,
+      messageId: assistantId,
+      content: '',
+      collapsed: true,
+    });
     chatData.value = { ...chatData.value, [sessionId]: { ...d } };
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: true };
     errorBySession.value = { ...errorBySession.value, [sessionId]: null };
@@ -207,18 +215,69 @@ export const useChatStore = defineStore('chat', () => {
       switch (event.type) {
         case 'message_start':
           assistant.content = '';
+          // 重置 thinking 内容
+          const tb = d2.thinking.find((t) => t.messageId === assistantId);
+          if (tb) tb.content = '';
           break;
         case 'message_update':
-          assistant.content += event.delta;
-          console.log('[chat] message_update len=', assistant.content.length);
+          // v0.3.8.6: sidecar 现在发 kind: 'thinking' | 'content', 拆开写
+          if (event.kind === 'thinking') {
+            const tb2 = d2.thinking.find((t) => t.messageId === assistantId);
+            if (tb2) {
+              tb2.content += event.delta;
+              // 边流边展开, 流完后可手动收起
+              if (tb2.collapsed && tb2.content.length > 0) {
+                tb2.collapsed = false;
+              }
+            }
+            console.log('[chat] thinking_update len=', tb2?.content.length);
+          } else {
+            // 默认当 content (兼容没带 kind 的旧 sidecar)
+            assistant.content += event.delta;
+            console.log('[chat] content_update len=', assistant.content.length);
+          }
           break;
         case 'message_end':
+          // 流结束后 thinking 自动收起
+          const tb3 = d2.thinking.find((t) => t.messageId === assistantId);
+          if (tb3 && tb3.content.length > 0) {
+            tb3.collapsed = true;
+          }
           break;
         case 'tool_start':
+          // v0.3.8.6: 工具调用折叠提示
+          d2.toolCalls.push({
+            id: event.toolCallId,
+            messageId: assistantId,
+            name: event.toolName,
+            args: event.args || {},
+            status: 'running',
+            startedAt: new Date().toISOString(),
+          });
           console.log('[chat] tool_start', event.toolName);
           break;
+        case 'tool_update':
+          // 工具输出流式更新 (append 到 result)
+          {
+            const tc = d2.toolCalls.find((x) => x.id === event.toolCallId);
+            if (tc) {
+              tc.result = (tc.result || '') + event.delta;
+            }
+          }
+          break;
         case 'tool_end':
-          console.log('[chat] tool_end', event.toolCallId);
+          {
+            const tc = d2.toolCalls.find((x) => x.id === event.toolCallId);
+            if (tc) {
+              tc.status = event.error ? 'error' : 'success';
+              tc.endedAt = new Date().toISOString();
+              if (typeof event.result === 'string') {
+                tc.result = event.result;
+              } else if (event.result !== undefined) {
+                tc.result = JSON.stringify(event.result, null, 2);
+              }
+            }
+          }
           break;
         case 'agent_end':
           streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };

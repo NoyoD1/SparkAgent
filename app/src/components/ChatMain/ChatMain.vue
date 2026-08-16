@@ -63,6 +63,18 @@ const thinkingByMessageId = computed(() => {
   return map;
 });
 
+// v0.3.8.6: toolCalls -> messageId 映射 (per-message tools 列表)
+const toolCallsByMessageId = computed(() => {
+  const tcList = activeSession.value ? chatStore.getToolCalls(activeSession.value.id) : [];
+  const map = new Map<string, typeof tcList[number][]>();
+  for (const t of tcList) {
+    const arr = map.get(t.messageId) ?? [];
+    arr.push(t);
+    map.set(t.messageId, arr);
+  }
+  return map;
+});
+
 // ===== v0.3.7+ 轮次 (user 消息 + 紧跟的 assistant 消息) =====
 const turns = computed<ChatTurn[]>(() => {
   const out: ChatTurn[] = [];
@@ -241,6 +253,7 @@ function jumpToMessage(messageId: string) {
               :key="msg.id"
               :message="msg"
               :thinking="msg.role === 'assistant' ? thinkingByMessageId.get(msg.id) : undefined"
+              :tool-calls="msg.role === 'assistant' ? (toolCallsByMessageId.get(msg.id) || []) : []"
               :model-name="activeModelName"
               :is-streaming="isMessageStreaming(idx)"
             />
