@@ -162,11 +162,15 @@ onMounted(() => nextTick(autoResize));
                     class="pad-composer__model-menu-active-tag"
                   >active</span>
                 </div>
-                <div v-if="p.models.length === 0" class="pad-composer__model-menu-empty">
-                  (没拉模型)
+                <!-- v0.3.8.5: 过滤掉用户在 Settings 停用的 model (m.enabled === false) -->
+                <div
+                  v-if="configStore.enabledModels(p.id).length === 0"
+                  class="pad-composer__model-menu-empty"
+                >
+                  (无可用模型 — 去 Settings 启用)
                 </div>
                 <button
-                  v-for="m in p.models"
+                  v-for="m in configStore.enabledModels(p.id)"
                   :key="m.id"
                   class="pad-composer__model-menu-item"
                   :class="{ 'is-active': p.id === configStore.activeProviderId && p.activeModelId === m.id }"

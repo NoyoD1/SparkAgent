@@ -126,7 +126,22 @@ function positionPopover(tickEl: HTMLElement) {
   };
 }
 
-function onClick(turn: ChatTurn) {
+function onClick(turn: ChatTurn, idx: number) {
+  // v0.3.8.3 fix: 点击 tick 主动设 activeIdx, 不等 IO fire
+  // 之前底部/顶部 tick 跳到目标位置后, 因 rootMargin 太严, IO 不识别
+  // target message 为 visible, 导致 active 一直停在 idx 0 / count-1
+  activeIdx.value = idx;
+  // 同步把 nav 滚到让点击的 tick 居中
+  nextTick(() => {
+    const el = navEl.value;
+    const tickEl = tickRefs.value[idx];
+    if (el && tickEl) {
+      const tickTop = tickEl.offsetTop;
+      const tickH = tickEl.offsetHeight;
+      const navH = el.clientHeight;
+      el.scrollTop = tickTop - navH / 2 + tickH / 2;
+    }
+  });
   props.onJump?.(turn.id);
 }
 
@@ -252,7 +267,10 @@ function setupObserver() {
         }
       }
     },
-    { root, threshold: [0, 0.5, 1], rootMargin: '-20% 0px -50% 0px' },
+    // v0.3.8.3: rootMargin 放宽到 -10% top / -10% bottom
+    // 之前 -20% / -50% 太严, 底部/顶部 message 永远不算 visible, IO 不 fire,
+    // active 一直停在 idx 0 (顶部) / count-1 (底部)
+    { root, threshold: [0, 0.5, 1], rootMargin: '-10% 0px -10% 0px' },
   );
   for (const el of elements) {
     io.observe(el);
@@ -318,7 +336,7 @@ const visible = computed(() => props.turns.length >= 1);
       }"
       @mouseenter="onHoverEnter(idx)"
       @mouseleave="onHoverLeave"
-      @click="onClick(turn)"
+      @click="onClick(turn, idx)"
     />
 
     <Teleport to="body">
@@ -362,8 +380,9 @@ const visible = computed(() => props.turns.length >= 1);
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 3px;
-  padding: 8px 0;
+  /* v0.3.8.4: gap 3 → 7, 上下留白更多, 视觉呼吸感更强 */
+  gap: 7px;
+  padding: 10px 0;
   max-height: calc(100% - 64px);
   overflow-y: auto;
   overflow-x: hidden;
@@ -387,12 +406,14 @@ const visible = computed(() => props.turns.length >= 1);
    * - width 由 :style 动态计算 (8 → 24, 跟距离联动)
    * - transition 180ms 让 lens 效果丝滑
    * - transform-origin left center (向右长, 不让 layout 抖)
-   * - border-radius 1px (跟横线一样细) */
+   * - border-radius 999px (pill 形, 两端完美半圆, 不再是矩形)
+   * - height 3px 让圆角明显可见
+   * - padding 6px 上下扩 hit area (鼠标好抓, hover 不会断触) */
   position: relative;
-  height: 2px;
-  padding: 4px 0;
+  height: 3px;
+  padding: 6px 0;
   border: none;
-  border-radius: 1px;
+  border-radius: 999px;
   cursor: pointer;
   flex-shrink: 0;
   transform-origin: left center;

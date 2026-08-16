@@ -179,6 +179,29 @@ export const useConfigStore = defineStore('config', () => {
     () => !!activeProvider.value && !!activeProvider.value.activeModelId,
   );
 
+  // v0.3.8.5: 返回指定 provider 的 enabled models (过滤掉用户停用的)
+  // undefined / true = 启用, false = 停用
+  function enabledModels(providerId: string): ModelInfo[] {
+    const p = providers.value.find((x) => x.id === providerId);
+    if (!p) return [];
+    return p.models.filter((m) => m.enabled !== false);
+  }
+
+  // v0.3.8.5: 全部 enabled models (跨 provider), 给将来的 quick bar 等用
+  const allEnabledModels = computed<Array<{ provider: ProviderConfig; model: ModelInfo }>>(
+    () => {
+      const out: Array<{ provider: ProviderConfig; model: ModelInfo }> = [];
+      for (const p of providers.value) {
+        for (const m of p.models) {
+          if (m.enabled !== false) {
+            out.push({ provider: p, model: m });
+          }
+        }
+      }
+      return out;
+    },
+  );
+
   // ===== 改动自动保存到 Rust =====
   async function persist() {
     if (!loaded.value) return;  // init 没完不写, 避免覆盖文件
@@ -350,6 +373,9 @@ export const useConfigStore = defineStore('config', () => {
     activeProvider,
     activeModel,
     isConfigured,
+    allEnabledModels,
+    // functions
+    enabledModels,
     // actions
     init,
     addProvider,

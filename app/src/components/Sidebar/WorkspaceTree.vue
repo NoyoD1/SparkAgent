@@ -542,7 +542,7 @@ function removeSession(id: string) {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  border-radius: var(--pad-radius-sm);
+  border-radius: var(--pad-radius-lg);
   background: transparent;
   border: 1px solid transparent;
   cursor: pointer;
@@ -566,6 +566,8 @@ function removeSession(id: string) {
   background: var(--pad-accent-soft);
   color: var(--pad-accent);
   font-weight: var(--pad-fw-medium);
+  /* v0.3.8.3: 选中态左边加一条 3px 圆角 accent 高亮条, 不再是纯矩形背景 */
+  box-shadow: inset 3px 0 0 var(--pad-accent);
 }
 .pad-wstree__session-dot {
   width: 6px;
