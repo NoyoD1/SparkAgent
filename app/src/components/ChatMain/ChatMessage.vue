@@ -110,8 +110,8 @@ async function copyMessage() {
 
   <!-- ============== ASSISTANT MESSAGE: 连续流 (无气泡标题) ============== -->
   <div v-else class="pad-msg pad-msg--assistant" :data-message-id="message.id">
-    <!-- Thinking 块 (有数据时) -->
-    <div v-if="thinking" class="pad-msg__thinking">
+    <!-- v0.3.8.12: thinking 块只在有 content 时才显示 (避免空 "思考过程" 占位) -->
+    <div v-if="thinking && thinking.content" class="pad-msg__thinking">
       <button class="pad-msg__thinking-toggle" type="button" @click="toggleThinking">
         <span>思考过程</span>
         <ChevronDown
@@ -232,20 +232,22 @@ async function copyMessage() {
   word-wrap: break-word;
 }
 
-/* ===== thinking 块 (v0.3.8.11: 浅色背景替代 border-left, 避免折叠时"漏边") ===== */
+/* ===== thinking 块 (v0.3.8.12: 折叠时不漏边, 字号颜色更"非正文") ===== */
 .pad-msg__thinking { margin: 0; }
 .pad-msg__thinking-toggle {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: var(--pad-fs-12);
-  font-style: italic;
+  /* v0.3.8.12: 字号 12 → 11, 颜色 fg-tertiary (更灰), 明确跟正文 (14px / fg-primary) 区分 */
+  font-size: var(--pad-fs-11);
+  font-weight: var(--pad-fw-medium);
   color: var(--pad-fg-tertiary);
   background: transparent;
   border: none;
   padding: 0;
   cursor: pointer;
   transition: color var(--pad-dur-fast) ease;
+  letter-spacing: 0.02em;
 }
 .pad-msg__thinking-toggle:hover { color: var(--pad-fg-secondary); }
 .pad-msg__thinking-chev {
@@ -260,32 +262,35 @@ async function copyMessage() {
 .pad-msg__thinking-body > div { overflow: hidden; }
 .pad-msg__thinking-body.is-collapsed { grid-template-rows: 0fr; }
 .pad-msg__thinking-content {
-  /* v0.3.8.11: 去掉 border-left + padding, 改用浅色背景块包裹.
-   * 之前 border-left 距离 message body 文字左边 10px (padding-left:10px), 看起来"漏边".
-   * 现在背景块紧贴 thinking 容器左边 (padding 0), 跟 message body 文字起点对齐. */
+  /* v0.3.8.12: 折叠时不漏边 — content 显式加 overflow:hidden 截掉 padding/background;
+   * 字号颜色都用更灰的 token 跟正文 (14px fg-primary) 区分 */
   margin-top: 4px;
   font-size: var(--pad-fs-12);
   font-style: italic;
-  color: var(--pad-fg-secondary);
+  color: var(--pad-fg-tertiary);
   line-height: var(--pad-lh-base);
-  padding: 8px 12px;
+  padding: 6px 10px;
   background: var(--pad-bg-100);
   border-radius: 6px;
+  overflow: hidden;
 }
 
-/* ===== tool calls 块 (v0.3.8.6+) ===== */
+/* ===== tool calls 块 (v0.3.8.12: 字号颜色更"非正文") ===== */
 .pad-msg__tools { margin: 0; }
 .pad-msg__tools-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: var(--pad-fs-12);
+  /* v0.3.8.12: 字号 12 → 11, 跟正文 14px 区分; 字重 medium + letter-spacing 跟 thinking 一致 */
+  font-size: var(--pad-fs-11);
+  font-weight: var(--pad-fw-medium);
   color: var(--pad-fg-tertiary);
   background: transparent;
   border: none;
   padding: 0;
   cursor: pointer;
   transition: color var(--pad-dur-fast) ease;
+  letter-spacing: 0.02em;
 }
 .pad-msg__tools-toggle:hover { color: var(--pad-fg-secondary); }
 .pad-msg__tools-icon { opacity: 0.7; }

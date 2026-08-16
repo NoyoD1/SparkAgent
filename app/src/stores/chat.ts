@@ -175,29 +175,15 @@ export const useChatStore = defineStore('chat', () => {
       console.log('[chat] sendPrompt: created new session', sessionId);
     }
 
-    // 2. append user msg + assistant placeholder
+    // 2. append user msg + streaming marker (assistant placeholder 等 message_start 真的来再 push)
     appendUserMessage(sessionId, text);
-    const d = getSessionData(sessionId);
-    const assistantId = genMessageId('a');
-    d.messages.push({
-      id: assistantId,
-      role: 'assistant',
-      content: '',
-      createdAt: new Date().toISOString(),
-    });
-    // v0.3.8.6: 为这个 assistant message 准备 thinking 块 (默认 collapsed, 灰字)
-    const thinkingId = `think-${assistantId}`;
-    d.thinking.push({
-      id: thinkingId,
-      messageId: assistantId,
-      content: '',
-      collapsed: true,
-    });
-    chatData.value = { ...chatData.value, [sessionId]: { ...d } };
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: true };
     errorBySession.value = { ...errorBySession.value, [sessionId]: null };
     // touch session updated time
     sessionStore.touchSession(sessionId);
+
+    // assistantId 提前生成, message_start 事件到了再 push assistant message
+    const assistantId = genMessageId('a');
 
     // 3. 临时 listener (await 确保 listener 起来, 避免 sidecar 早早 emit 丢事件)
     const off = await piTauri.on((event) => {
@@ -214,6 +200,18 @@ export const useChatStore = defineStore('chat', () => {
       const assistant = d2.messages[idx];
       switch (event.type) {
         case 'message_start':
+          // v0.3.8.12: assistant message 之前在 sendPrompt 时立即 push (空 content),
+          // 现在改成 message_start 真的到了才 push — 避免 send 后立即出现空 placeholder
+          if (idx < 0) {
+            d2.messages.push({
+              id: assistantId,
+              role: 'assistant',
+              content: '',
+              createdAt: new Date().toISOString(),
+            });
+            chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+            return;  // 这次没 idx, 重置 assistant.content 的逻辑跳过
+          }
           assistant.content = '';
           // 重置 thinking 内容
           const tb = d2.thinking.find((t) => t.messageId === assistantId);
@@ -222,12 +220,19 @@ export const useChatStore = defineStore('chat', () => {
         case 'message_update':
           // v0.3.8.6: sidecar 现在发 kind: 'thinking' | 'content', 拆开写
           if (event.kind === 'thinking') {
-            const tb2 = d2.thinking.find((t) => t.messageId === assistantId);
-            if (tb2) {
-              tb2.content += event.delta;
-              // v0.3.8.11: thinking 折叠状态完全由用户控制, 不再被流事件覆盖
-              // (之前流式时自动展开, message_end 自动收起 — 跟用户预期矛盾)
+            // v0.3.8.12: thinking 块按需创建 (之前 sendPrompt 时立即 push 空的, 现在等真来再 create)
+            // 避免 send 后立即出现空 "思考过程 >" 标签占位
+            let tb2 = d2.thinking.find((t) => t.messageId === assistantId);
+            if (!tb2) {
+              tb2 = {
+                id: `think-${assistantId}`,
+                messageId: assistantId,
+                content: '',
+                collapsed: true,  // 默认折叠, 用户主动展开
+              };
+              d2.thinking.push(tb2);
             }
+            tb2.content += event.delta;
             console.log('[chat] thinking_update len=', tb2?.content.length);
           } else {
             // 默认当 content (兼容没带 kind 的旧 sidecar)
