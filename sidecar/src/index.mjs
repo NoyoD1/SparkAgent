@@ -163,6 +163,8 @@ function buildModels(config) {
  *
  * 事件映射 (待 pi-agent-core 实测 verify):
  *   AgentEvent.type:
+ *     - 'turn_start'                     -> { type: 'turn_start' }  (v0.4.1 step 边界, FE 用来切 step group)
+ *     - 'turn_end'                       -> { type: 'turn_end' }    (同上)
  *     - 'message_start'                  -> { type: 'message_start' }
  *     - 'message_update'                 -> { type: 'message_update', kind, delta }
  *     - 'tool_execution_start'           -> { type: 'tool_start', toolName, toolCallId, args }   (v0.4.1 fix: 之前错写成 tool_call_*)
@@ -187,8 +189,12 @@ function mapAgentEventToIPC(event, sessionId) {
       send({ type: 'agent_start', sessionId });
       return;
     case 'turn_start':
+      // v0.4.1 (step 累加): Pi SDK 一次 prompt 可能跑多个 turn (tool_call 链), 每个 turn = 1 step
+      // 透传给 FE, FE 用 turn_start/turn_end 标 step 边界
+      send({ type: 'turn_start', sessionId });
+      return;
     case 'turn_end':
-      // 内部事件, 不映射到 IPC 协议
+      send({ type: 'turn_end', sessionId });
       return;
     case 'message_start':
       // agent.subscribe 收到 message_start (user + assistant 各一次), 全发

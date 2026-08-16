@@ -25,6 +25,9 @@ export type ServerToClient =
   | { type: 'config_ok'; provider: string; model: string; sessionId?: string }
   | { type: 'config_error'; message: string; sessionId?: string }
   | { type: 'agent_start'; sessionId: string }
+  /** v0.4.1 step 累加: Pi SDK 一次 prompt 可能跑多个 turn (tool_call 链), turn_start/turn_end 标 step 边界 */
+  | { type: 'turn_start'; sessionId: string }
+  | { type: 'turn_end'; sessionId: string }
   | { type: 'message_start'; sessionId: string }
   | { type: 'message_update'; delta: string; kind?: 'thinking' | 'content'; sessionId: string }
   | { type: 'tool_start'; toolName: string; toolCallId: string; args: Record<string, unknown>; sessionId: string }

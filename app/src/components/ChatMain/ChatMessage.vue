@@ -1,95 +1,49 @@
 <script setup lang="ts">
 /**
- * ChatMessage — v0.3.7+ 重写
+ * ChatMessage — v0.3.7+ 重写, v0.4.1 step 累加重构
  *
- * 设计目标 (Trae 参考 image 4):
+ * 设计目标:
  * - **user 消息**: 右侧气泡 (保留)
- * - **assistant 消息**: **没有气泡标题**, 改成连贯 inline 流:
- *   - 可选 thinking 块 (collapsible, 灰字 + chevron, 跟参考 4 一样)
- *   - markdown 内容 (用 MarkdownContent 渲染)
+ * - **assistant 消息** (v0.4.1):
+ *   - **步骤列表** (StepGroup[]): 1 turn = 1 step, thinking + tool_calls 都归 step 内
+ *   - markdown final body (message.content, 跨 turn 累积)
  *   - 底部小 actions (复制 / 重新生成)
  *
  * 不再有 "deepseek-v4-flash" 头部卡片, 也不再硬编码 TraeWork
+ *
+ * v0.4.1 step 累加改造: 把 message 级别的 thinking + toolCalls 改到 step 级别
+ * 一次 prompt 可能跑 N turn, 每个 turn 是 1 step, 用户能展开/折叠看过程
  */
 import { computed, ref } from 'vue';
-import { ChevronDown, ThumbsUp, ThumbsDown, Copy, RefreshCw, Wrench } from 'lucide-vue-next';
-import type { ChatMessage, ThinkingBlock, ToolCallBlock } from '@/lib/mock/types';
-import { useChatStore } from '@/stores/chat';
+import { ThumbsUp, ThumbsDown, Copy, RefreshCw } from 'lucide-vue-next';
+import type { ChatMessage, Step } from '@/lib/mock/types';
 import MarkdownContent from './MarkdownContent.vue';
+import StepGroup from './StepGroup.vue';
 
 interface Props {
   message: ChatMessage;
-  /** v0.3.8.11: 所属 session id (用于 toggle thinking 时写回 store) */
   sessionId?: string;
-  thinking?: ThinkingBlock;
-  defaultThinkingCollapsed?: boolean;
-  /** 保留, 暂未用, 后续 thinking 块可显示"deepseek-v4-flash 思考 1 次" */
+  /** v0.4.1: 该 message 的 step 列表 (assistant 才有) */
+  steps?: Step[];
+  /** 保留: 模型名 (暂未用) */
   modelName?: string;
   isStreaming?: boolean;
-  /** v0.3.8.6: 该 message 关联的工具调用列表 (折叠提示) */
-  toolCalls?: ToolCallBlock[];
   /** v0.3.8.15: 错误信息 (sidecar 发 error event 时显示具体内容) */
   errorMessage?: string | null;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   sessionId: '',
-  defaultThinkingCollapsed: true, // v0.3.8.11: 默认折叠, 用户主动展开
   modelName: '',
   isStreaming: false,
-  toolCalls: () => [],
   errorMessage: null,
+  steps: () => [],
 });
-
-// v0.3.8.11: thinking 折叠状态由 store 的 thinking.collapsed 字段管理
-// ChatMessage 内部不维护 ref, 直接读 props.thinking.collapsed, toggle 时写回 store
-// 这样:
-// 1. thinking 默认 collapsed (store 初始化时 collapsed: true)
-// 2. 用户点 chev → toggleThinking 写回 store
-// 3. 流式过来时 store collapsed 不被覆盖 (旧逻辑删了)
-const thinkingCollapsed = computed(() => props.thinking?.collapsed ?? true);
-
-const chatStore = useChatStore();
-function toggleThinking() {
-  if (!props.thinking || !props.sessionId) return;
-  chatStore.setThinkingCollapsed(props.sessionId, props.thinking.id, !thinkingCollapsed.value);
-}
-
-// v0.3.8.6: tool_calls 折叠 (默认收起), 点 chev 展开看详情
-const toolsCollapsed = ref(true);
-function toggleTools() {
-  toolsCollapsed.value = !toolsCollapsed.value;
-}
 
 const isUser = computed(() => props.message.role === 'user');
 
-const hasTools = computed(() => (props.toolCalls?.length ?? 0) > 0);
-
-const toolsSummary = computed(() => {
-  const list = props.toolCalls ?? [];
-  if (list.length === 0) return '';
-  const running = list.filter((t) => t.status === 'running' || t.status === 'pending').length;
-  const error = list.filter((t) => t.status === 'error').length;
-  if (running > 0) return `${list.length} 个工具调用 (${running} 个运行中…)`;
-  if (error > 0) return `${list.length} 个工具调用 (${error} 个失败)`;
-  return `${list.length} 个工具调用`;
-});
-
-function toolStatusLabel(t: ToolCallBlock): string {
-  if (t.status === 'running' || t.status === 'pending') return '运行中…';
-  if (t.status === 'success') return '完成';
-  return '失败';
-}
-
-function toolArgsSummary(t: ToolCallBlock): string {
-  const keys = Object.keys(t.args || {});
-  if (keys.length === 0) return '';
-  const first = keys[0];
-  const v = t.args[first];
-  const s = typeof v === 'string' ? v : JSON.stringify(v);
-  const preview = s.length > 60 ? s.slice(0, 60) + '…' : s;
-  return `${first}: ${preview}`;
-}
+const hasSteps = computed(() => (props.steps?.length ?? 0) > 0);
+const hasContent = computed(() => (props.message.content?.trim().length ?? 0) > 0);
 
 const copied = ref(false);
 async function copyMessage() {
@@ -111,60 +65,22 @@ async function copyMessage() {
     </div>
   </div>
 
-  <!-- ============== ASSISTANT MESSAGE: 连续流 (无气泡标题) ============== -->
+  <!-- ============== ASSISTANT MESSAGE: step 累加 + final body ============== -->
   <div v-else class="pad-msg pad-msg--assistant" :data-message-id="message.id">
-    <!-- v0.3.8.12: thinking 块只在有 content 时才显示 (避免空 "思考过程" 占位) -->
-    <div v-if="thinking && thinking.content" class="pad-msg__thinking">
-      <button class="pad-msg__thinking-toggle" type="button" @click="toggleThinking">
-        <span>思考过程</span>
-        <ChevronDown
-          :size="12"
-          :stroke-width="1.75"
-          :class="['pad-msg__thinking-chev', { 'is-collapsed': thinkingCollapsed }]"
-        />
-      </button>
-      <div :class="['pad-msg__thinking-body', { 'is-collapsed': thinkingCollapsed }]">
-        <div class="pad-msg__thinking-content">
-          <MarkdownContent :content="thinking.content" />
-        </div>
-      </div>
+    <!-- v0.4.1: 步骤列表 (每个 step = 1 turn, thinking + tool_calls 都在 step 内) -->
+    <div v-if="hasSteps" class="pad-msg__steps">
+      <StepGroup
+        v-for="(step, i) in steps"
+        :key="step.id"
+        :step="step"
+        :session-id="sessionId"
+        :message-id="message.id"
+        :index="i + 1"
+        :is-last="i === steps.length - 1"
+      />
     </div>
 
-    <!-- v0.3.8.6: Tool calls 折叠 (默认收起, 流式更新时显示 "运行中…") -->
-    <div v-if="hasTools" class="pad-msg__tools">
-      <button class="pad-msg__tools-toggle" type="button" @click="toggleTools">
-        <Wrench :size="12" :stroke-width="1.75" class="pad-msg__tools-icon" />
-        <span>{{ toolsSummary }}</span>
-        <ChevronDown
-          :size="12"
-          :stroke-width="1.75"
-          :class="['pad-msg__tools-chev', { 'is-collapsed': toolsCollapsed }]"
-        />
-      </button>
-      <div :class="['pad-msg__tools-body', { 'is-collapsed': toolsCollapsed }]">
-        <ul class="pad-msg__tools-list">
-          <li
-            v-for="t in toolCalls"
-            :key="t.id"
-            class="pad-msg__tools-item"
-            :class="`is-${t.status}`"
-          >
-            <div class="pad-msg__tools-row">
-              <span class="pad-msg__tools-name">{{ t.name }}</span>
-              <span class="pad-msg__tools-status">{{ toolStatusLabel(t) }}</span>
-            </div>
-            <div v-if="toolArgsSummary(t)" class="pad-msg__tools-args">
-              {{ toolArgsSummary(t) }}
-            </div>
-            <pre v-if="t.result" class="pad-msg__tools-result">{{ t.result }}</pre>
-          </li>
-        </ul>
-      </div>
-    </div>
-
-    <!-- v0.3.8.9: Streaming loading — 整个 stream 期间一直显示,
-     * 不再要求 !message.content (之前 thinking 流完但 content 还没来时 loading 提前消失)
-     * 位置在 thinking/tools 之后, body 之前 -->
+    <!-- v0.3.8.9: Streaming loading — 整个 stream 期间一直显示 -->
     <div v-if="isStreaming" class="pad-msg__loading">
       <span class="pad-msg__loading-dot"></span>
       <span class="pad-msg__loading-dot"></span>
@@ -172,15 +88,14 @@ async function copyMessage() {
       <span class="pad-msg__loading-text">{{ message.content ? '继续生成中…' : '生成中…' }}</span>
     </div>
 
-    <!-- markdown body -->
-    <div v-else-if="message.content" class="pad-msg__body">
+    <!-- markdown body (final reply, 跨 turn 累积) -->
+    <div v-else-if="hasContent" class="pad-msg__body">
       <MarkdownContent :content="message.content" />
     </div>
 
-    <!-- v0.3.8.15: stream 结束但 4 类内容都为空时, 显示具体 error 信息
-     * (有 errorMessage 就显示 error, 否则 "AI 没有返回内容") -->
+    <!-- v0.3.8.15: stream 结束但 4 类内容都为空时, 显示具体 error 信息 -->
     <div
-      v-else-if="!isStreaming && !message.content && !hasTools && (!thinking || !thinking.content)"
+      v-else-if="!isStreaming && !hasContent && !hasSteps"
       class="pad-msg__empty"
     >
       <span v-if="errorMessage">⚠ {{ errorMessage }}</span>
@@ -188,7 +103,7 @@ async function copyMessage() {
     </div>
 
     <!-- Actions: 仅在非 streaming 且有内容时显示 -->
-    <div v-if="!isStreaming && message.content" class="pad-msg__actions">
+    <div v-if="!isStreaming && hasContent" class="pad-msg__actions">
       <button class="pad-msg__action" :title="copied ? '已复制' : '复制'" type="button" @click="copyMessage">
         <Copy v-if="!copied" :size="12" :stroke-width="1.75" />
         <span v-else class="pad-msg__copied">已复制</span>

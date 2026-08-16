@@ -40,9 +40,6 @@ const { activeSession, activeWorkspace, workspaces } = storeToRefs(sessionStore)
 const messages = computed(() =>
   activeSession.value ? chatStore.getMessages(activeSession.value.id) : []
 );
-const thinking = computed(() =>
-  activeSession.value ? chatStore.getThinking(activeSession.value.id) : []
-);
 
 // streaming 状态暴露给 ChatMessage
 const activeModelName = computed(() => configStore.activeModel?.id ?? '');
@@ -56,24 +53,8 @@ function isMessageStreaming(idx: number): boolean {
   return !!m && m.role === 'assistant' && !m.content;
 }
 
-// thinking -> messageId 映射
-const thinkingByMessageId = computed(() => {
-  const map = new Map<string, typeof thinking.value[number]>();
-  for (const t of thinking.value) map.set(t.messageId, t);
-  return map;
-});
-
-// v0.3.8.6: toolCalls -> messageId 映射 (per-message tools 列表)
-const toolCallsByMessageId = computed(() => {
-  const tcList = activeSession.value ? chatStore.getToolCalls(activeSession.value.id) : [];
-  const map = new Map<string, typeof tcList[number][]>();
-  for (const t of tcList) {
-    const arr = map.get(t.messageId) ?? [];
-    arr.push(t);
-    map.set(t.messageId, arr);
-  }
-  return map;
-});
+// v0.4.1 step 累加: steps 现在直接挂在 message.steps 上, 不需要 messageId 索引
+// 保留 thinking/toolCalls 索引代码以防未来 step 拆分到顶层 (legacy fallback)
 
 // ===== v0.3.7+ 轮次 (user 消息 + 紧跟的 assistant 消息) =====
 const turns = computed<ChatTurn[]>(() => {
@@ -253,8 +234,7 @@ function jumpToMessage(messageId: string) {
               :key="msg.id"
               :message="msg"
               :session-id="activeSession?.id"
-              :thinking="msg.role === 'assistant' ? thinkingByMessageId.get(msg.id) : undefined"
-              :tool-calls="msg.role === 'assistant' ? (toolCallsByMessageId.get(msg.id) || []) : []"
+              :steps="msg.role === 'assistant' ? (msg.steps || []) : []"
               :model-name="activeModelName"
               :is-streaming="isMessageStreaming(idx)"
               :error-message="isMessageStreaming(idx) ? null : chatStore.getError(activeSession?.id)"

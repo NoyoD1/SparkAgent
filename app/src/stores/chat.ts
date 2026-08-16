@@ -11,12 +11,12 @@
  */
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
-import type { ChatMessage, ThinkingBlock, ToolCallBlock } from '@/lib/mock/types';
+import type { ChatMessage, ThinkingBlock, ToolCallBlock, Step } from '@/lib/mock/types';
 import { piTauri } from '@/lib/tauri';
 import { useConfigStore } from './config';
 import { useSessionStore } from './session';
 
-export type { ChatMessage, ThinkingBlock, ToolCallBlock };
+export type { ChatMessage, ThinkingBlock, ToolCallBlock, Step };
 
 interface SessionChatData {
   messages: ChatMessage[];
@@ -205,6 +205,36 @@ export const useChatStore = defineStore('chat', () => {
           // agent_start 是 sidecar 启动信号, 不需要动 store, 仅日志
           console.log('[chat] agent_start');
           break;
+        case 'turn_start':
+          // v0.4.1 step 累加: 创建新 step group, 后续 message_update/tool_* 路由到这里
+          if (idx >= 0) {
+            const assistant = d2.messages[idx];
+            if (!assistant.steps) assistant.steps = [];
+            const newStep: Step = {
+              id: `step-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              thinking: [],
+              toolCalls: [],
+              stepText: '',
+              isActive: true,
+              collapsed: false,  // 当前 step 默认展开
+            };
+            assistant.steps.push(newStep);
+            console.log('[chat] turn_start: created step', newStep.id, 'total=', assistant.steps.length);
+          }
+          break;
+        case 'turn_end':
+          // 标最后一个 step.isActive = false, 自动折叠
+          if (idx >= 0) {
+            const assistant = d2.messages[idx];
+            const steps = assistant.steps || [];
+            const last = steps[steps.length - 1];
+            if (last && last.isActive) {
+              last.isActive = false;
+              last.collapsed = true;  // 历史 step 默认折叠
+              console.log('[chat] turn_end: closed step', last.id);
+            }
+          }
+          break;
         case 'message_start':
           // 第一次 message_start: 懒创建 assistant message
           if (idx < 0) {
@@ -214,7 +244,7 @@ export const useChatStore = defineStore('chat', () => {
               content: '',
               createdAt: new Date().toISOString(),
             });
-            // 同时重置 thinking
+            // 同时重置 thinking (legacy, v0.4.1+ 不再累积到顶层 thinking, 但兼容旧数据)
             const tbNew = d2.thinking.find((t) => t.messageId === assistantId);
             if (tbNew) tbNew.content = '';
             break;
@@ -237,49 +267,84 @@ export const useChatStore = defineStore('chat', () => {
             return;
           }
           const assistant = d2.messages[idx];
+          // v0.4.1 step 累加: 找当前 step (最后一个), 没 step 就 fallback 创建
+          const getCurrentStep = (): Step | undefined => {
+            const steps = assistant.steps || [];
+            if (steps.length === 0) return undefined;
+            return steps[steps.length - 1];
+          };
           // 走对应 case 处理
           switch (event.type) {
             case 'message_update':
               if (event.kind === 'thinking') {
-                let tb2 = d2.thinking.find((t) => t.messageId === assistantId);
-                if (!tb2) {
-                  tb2 = {
-                    id: `think-${assistantId}`,
-                    messageId: assistantId,
-                    content: '',
-                    collapsed: true,
-                  };
-                  d2.thinking.push(tb2);
+                // v0.4.1: thinking 路由到 currentStep (不再累积到顶层 d2.thinking)
+                const step = getCurrentStep();
+                if (step) {
+                  let tb2 = step.thinking[step.thinking.length - 1];
+                  if (!tb2) {
+                    tb2 = {
+                      id: `think-${step.id}`,
+                      messageId: assistantId,
+                      content: '',
+                      collapsed: false,  // step 内 thinking 默认展开
+                    };
+                    step.thinking.push(tb2);
+                  }
+                  tb2.content += event.delta;
+                } else {
+                  // fallback: 顶层 thinking (兼容无 step 数据)
+                  let tb2 = d2.thinking.find((t) => t.messageId === assistantId);
+                  if (!tb2) {
+                    tb2 = {
+                      id: `think-${assistantId}`,
+                      messageId: assistantId,
+                      content: '',
+                      collapsed: true,
+                    };
+                    d2.thinking.push(tb2);
+                  }
+                  tb2.content += event.delta;
                 }
-                tb2.content += event.delta;
-                console.log('[chat] thinking_update len=', tb2?.content.length);
+                console.log('[chat] thinking_update len=', (getCurrentStep()?.thinking[getCurrentStep()!.thinking.length - 1]?.content.length) ?? 0);
               } else {
+                // text_delta: 既累积到 message.content (final reply 兼容旧 UI), 也累积到 currentStep.stepText
                 assistant.content += event.delta;
+                const step = getCurrentStep();
+                if (step) step.stepText += event.delta;
                 console.log('[chat] content_update len=', assistant.content.length);
               }
               break;
             case 'message_end':
               break;
             case 'tool_start':
-              d2.toolCalls.push({
-                id: event.toolCallId,
-                messageId: assistantId,
-                name: event.toolName,
-                args: event.args || {},
-                status: 'running',
-                startedAt: new Date().toISOString(),
-              });
-              console.log('[chat] tool_start', event.toolName);
+              {
+                // v0.4.1: tool 路由到 currentStep
+                const step = getCurrentStep();
+                const target = step ? step.toolCalls : d2.toolCalls;
+                target.push({
+                  id: event.toolCallId,
+                  messageId: assistantId,
+                  name: event.toolName,
+                  args: event.args || {},
+                  status: 'running',
+                  startedAt: new Date().toISOString(),
+                });
+                console.log('[chat] tool_start', event.toolName, 'routed to', step ? 'step' : 'legacy');
+              }
               break;
             case 'tool_update':
               {
-                const tc = d2.toolCalls.find((x) => x.id === event.toolCallId);
+                const step = getCurrentStep();
+                const target = step ? step.toolCalls : d2.toolCalls;
+                const tc = target.find((x) => x.id === event.toolCallId);
                 if (tc) tc.result = (tc.result || '') + event.delta;
               }
               break;
             case 'tool_end':
               {
-                const tc = d2.toolCalls.find((x) => x.id === event.toolCallId);
+                const step = getCurrentStep();
+                const target = step ? step.toolCalls : d2.toolCalls;
+                const tc = target.find((x) => x.id === event.toolCallId);
                 if (tc) {
                   tc.status = event.error ? 'error' : 'success';
                   tc.endedAt = new Date().toISOString();
@@ -289,11 +354,21 @@ export const useChatStore = defineStore('chat', () => {
               }
               break;
             case 'agent_end':
+              // agent 跑完: 标最后一个 step 也 closed (兜底, 万一 turn_end 没 emit)
+              if (assistant.steps) {
+                const lastStep = assistant.steps[assistant.steps.length - 1];
+                if (lastStep && lastStep.isActive) {
+                  lastStep.isActive = false;
+                  lastStep.collapsed = true;
+                }
+              }
               streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
               chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
               console.log(
                 '[chat] agent_end: assistant.content.length=',
                 assistant.content.length,
+                'steps=',
+                assistant.steps?.length ?? 0,
                 'preview=',
                 assistant.content.slice(0, 80),
               );
@@ -364,6 +439,29 @@ export const useChatStore = defineStore('chat', () => {
     chatData.value = { ...chatData.value, [sessionId]: { ...d } };
   }
 
+  // v0.4.1 step 累加: 用户手动切换 step 折叠状态
+  function setStepCollapsed(sessionId: string, messageId: string, stepId: string, collapsed: boolean) {
+    const d = getSessionData(sessionId);
+    const msg = d.messages.find((m) => m.id === messageId);
+    if (!msg || !msg.steps) return;
+    const step = msg.steps.find((s) => s.id === stepId);
+    if (!step) return;
+    step.collapsed = collapsed;
+    chatData.value = { ...chatData.value, [sessionId]: { ...d } };
+  }
+
+  // v0.4.1 step 累加: 切换 step 内 thinking block 折叠
+  function setStepThinkingCollapsed(sessionId: string, messageId: string, stepId: string, collapsed: boolean) {
+    const d = getSessionData(sessionId);
+    const msg = d.messages.find((m) => m.id === messageId);
+    if (!msg || !msg.steps) return;
+    const step = msg.steps.find((s) => s.id === stepId);
+    if (!step || step.thinking.length === 0) return;
+    const tb = step.thinking[step.thinking.length - 1];
+    tb.collapsed = collapsed;
+    chatData.value = { ...chatData.value, [sessionId]: { ...d } };
+  }
+
   /** 如果 session 还是默认名 "新任务", 用首条消息前 30 字命名 */
   function maybeAutoNameSession(sessionId: string, firstMessage: string) {
     const s = sessionStore.sessions.find((x) => x.id === sessionId);
@@ -388,5 +486,7 @@ export const useChatStore = defineStore('chat', () => {
     sendPrompt,
     sendPromptViaWs, // deprecated, kept for backward compat
     setThinkingCollapsed,
+    setStepCollapsed, // v0.4.1 step 累加
+    setStepThinkingCollapsed,
   };
 });

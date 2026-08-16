@@ -31,6 +31,12 @@ export interface ChatMessage {
   role: ChatRole;
   content: string;
   createdAt: string;
+  /**
+   * v0.4.1 step 累加: 一次 LLM run 可能跑多个 turn (tool_call 链), 每个 turn = 1 step.
+   * assistant message 才有, 内部按时间顺序 push step group.
+   * UI 用 StepGroup 渲染, 默认折叠, 当前正在跑的那个 step 默认展开.
+   */
+  steps?: Step[];
 }
 
 export interface ThinkingBlock {
@@ -51,4 +57,30 @@ export interface ToolCallBlock {
   result?: string;
   startedAt: string;
   endedAt?: string;
+}
+
+/**
+ * v0.4.1 step 累加: 1 turn = 1 step group, 内含本 turn 的 thinking + toolCalls + text.
+ * - thinking / toolCalls 数组: 跟当前 message 共享 messageId 关联, 但只存本 turn 的事件
+ * - isActive: 当前 turn 跑没跑完 (true 时 UI 默认展开)
+ * - collapsed: 用户手动折叠状态
+ * - stepText: 本 turn 的 text_delta 累积 (跟 message.content 区分, message.content 是 final reply)
+ *
+ * 为什么 step 拆出来:
+ * - Pi SDK Agent.prompt 一次可能跑 N turn (tool_call 链)
+ * - 所有 turn 的 thinking 全累加到 1 个 block 没法看
+ * - 拆成 step 后: 用户能看到"思考 → 工具 → 结果 → 思考 → 工具 → 结果"的清晰链路
+ */
+export interface Step {
+  id: string;
+  /** 本 step 内的思考块 (1 turn 可能 emit 多次 thinking_delta, 合并到 1 个 block 即可) */
+  thinking: ThinkingBlock[];
+  /** 本 step 内的工具调用 (1 turn 内多个 tool_call) */
+  toolCalls: ToolCallBlock[];
+  /** 本 step 的 text_delta 累积 (assistant 在本 turn 输出的文字) */
+  stepText: string;
+  /** 当前 turn 还在跑 (true) 还是跑完了 (false) */
+  isActive: boolean;
+  /** 用户手动折叠状态 (true = 折叠) */
+  collapsed: boolean;
 }
