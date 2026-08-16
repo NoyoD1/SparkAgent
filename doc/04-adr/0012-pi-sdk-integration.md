@@ -5,6 +5,18 @@
 - **决策者**: 用户
 - **Supersedes**: [ADR-0010](0010-sidecar-direct-fetch.md)
 
+## 参考文档 (AI 查 SDK 行为必看)
+
+| 包 | 文档 | 必看原因 |
+|---|---|---|
+| `@earendil-works/pi-ai` | https://github.com/earendil-works/pi/tree/main/packages/ai | Model interface 必填字段 (`provider` / `baseUrl` / `input` / `cost` / `contextWindow` / `maxTokens` / `api`), createProvider 自定义模板, 内置 provider 工厂, agent event 协议 (`tool_execution_*` v0.84+) |
+| `@earendil-works/pi-agent-core` | https://github.com/earendil-works/pi/tree/main/packages/agent | `Agent` 类 (initialState / streamFn / beforeToolCall), `AgentTool` interface, `AgentEvent` 类型, `agentLoop` 行为 |
+| `@earendil-works/pi-coding-agent` | https://github.com/earendil-works/pi/tree/main/packages/coding-agent | 7 个内置 tool 工厂 (`createReadTool/createWriteTool/...`), `createAgentSession` / `SessionManager` / `compact` API |
+
+**用法规则 (2026-08-17 立)**: 涉及 Pi SDK 任何改动前, **必须先看上述文档** (README + 主要 .ts/.md), 再 grep `pi-sdk/packages/{ai,agent,coding-agent}/src/`. 不要等 user 跑出 bug 再回来抓瞎. 5 字段必填 + cost 必填 + event name (`tool_call_*` vs `tool_execution_*`) 这些坑, 文档里都有, 是 AI 没看就写导致的.
+
+**当前 npm 版本**: `@earendil-works/pi-ai@0.84.2` + `@earendil-works/pi-agent-core@0.84.2` + `@earendil-works/pi-coding-agent@0.84.2` (2026-08-17 装). 文档 main 分支可能跟 npm 同步也可能不, **遇到不一致以 npm 包内 dist/ 实际行为为准**, 但文档是 first stop.
+
 ## 背景
 
 v0.3 阶段 sidecar 完全裸跑（手写 fetch + SSE 解析，0 依赖）。问题：
