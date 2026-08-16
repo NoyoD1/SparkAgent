@@ -2,23 +2,130 @@
 /**
  * WorkspaceTree — 真实 workspace + session 管理 (Phase 3 v0.3.2+)
  *
- * 数据从 session store 读, 不再用 mock.
- * "+ 加 workspace" → 调 Tauri dialog 选文件夹 → addWorkspace(path)
- * "+ 加 session" → 在当前 workspace 加一个
- * 点击 session → 设为 active
+ * v0.3.6+ 重做:
+ * 1. 参考 Pi-Agent-Design.design/reference/3.png 的视觉: section labels + file icons + chevrons
+ * 2. Session hover 预览 popover 位置动态 (跟 hovered session bbox 对齐, 右边越界翻左边)
+ * 3. 顶部 "项目" section label (跟 sidebar 其他 label 风格统一)
+ * 4. 底部 "Agent 团队" placeholder section
  */
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import { storeToRefs } from 'pinia';
-import { ChevronRight, Plus, Folder, FolderPlus, MoreHorizontal, Trash2, MessageSquarePlus } from 'lucide-vue-next';
+import {
+  ChevronRight,
+  Folder,
+  MoreHorizontal,
+  Trash2,
+  MessageSquarePlus,
+  MessageCircle,
+  Sparkles,
+  Users,
+  Plus,
+} from 'lucide-vue-next';
 import { useSessionStore } from '@/stores/session';
+import { useChatStore } from '@/stores/chat';
 import { pickFolder } from '@/lib/dialog';
-import IconButton from '@/components/ui/IconButton.vue';
 
 const sessionStore = useSessionStore();
+const chatStore = useChatStore();
 const { workspaces, expandedWorkspaceIds, activeSessionId } = storeToRefs(sessionStore);
 
 const pickingFolder = ref(false);
-const menuFor = ref<string | null>(null); // workspace id showing menu
+const menuFor = ref<string | null>(null);
+
+// ===== session hover 预览 popover =====
+const hoverSessionId = ref<string | null>(null);
+const popoverLeft = ref(0);
+const popoverTop = ref(0);
+let hoverTimer: number | null = null;
+let hideTimer: number | null = null;
+
+interface SessionPreview {
+  title: string;
+  path: string;
+  firstUser: string;
+  messageCount: number;
+  updatedAt: string;
+}
+function getSessionPreview(sessionId: string): SessionPreview | null {
+  const s = sessionStore.sessions.find((x) => x.id === sessionId);
+  if (!s) return null;
+  const ws = sessionStore.workspaces.find((w) => w.id === s.workspaceId);
+  const msgs = chatStore.getMessages(sessionId);
+  const firstUser = msgs.find((m) => m.role === 'user');
+  return {
+    title: s.title || '新任务',
+    path: ws?.path ?? '(无工作区)',
+    firstUser: firstUser?.content ?? '',
+    messageCount: msgs.length,
+    updatedAt: s.updatedAt,
+  };
+}
+function formatRelative(ts: string): string {
+  const d = new Date(ts);
+  const now = Date.now();
+  const diffMs = now - d.getTime();
+  const min = Math.floor(diffMs / 60000);
+  if (min < 1) return '刚刚';
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day} 天前`;
+  return d.toLocaleDateString();
+}
+const hoverPreview = computed<SessionPreview | null>(() => {
+  if (!hoverSessionId.value) return null;
+  return getSessionPreview(hoverSessionId.value);
+});
+
+function onSessionEnter(e: MouseEvent, id: string) {
+  if (hideTimer) {
+    window.clearTimeout(hideTimer);
+    hideTimer = null;
+  }
+  if (hoverTimer) window.clearTimeout(hoverTimer);
+  hoverTimer = window.setTimeout(() => {
+    positionPopover(e.currentTarget as HTMLElement);
+    hoverSessionId.value = id;
+  }, 220);
+}
+function onSessionMove(e: MouseEvent) {
+  // 鼠标在 session 元素内移动时, popover 跟着 bbox 走 (避免 sticky 偏移)
+  if (!hoverSessionId.value) return;
+  positionPopover(e.currentTarget as HTMLElement);
+}
+function onSessionLeave() {
+  if (hoverTimer) {
+    window.clearTimeout(hoverTimer);
+    hoverTimer = null;
+  }
+  hideTimer = window.setTimeout(() => {
+    hoverSessionId.value = null;
+  }, 80);
+}
+function onPopoverEnter() {
+  // 用户从 session 元素 hover 进 popover 内, 取消关闭 timer
+  if (hideTimer) {
+    window.clearTimeout(hideTimer);
+    hideTimer = null;
+  }
+}
+function positionPopover(target: HTMLElement | null) {
+  if (!target) return;
+  const rect = target.getBoundingClientRect();
+  const POPOVER_W = 300;
+  const GAP = 8;
+  // 默认贴在右侧; 右边放不下就翻到左边
+  let left = rect.right + GAP;
+  if (left + POPOVER_W > window.innerWidth - 8) {
+    left = rect.left - POPOVER_W - GAP;
+  }
+  if (left < 8) left = 8;
+  // 垂直对齐到 session 中部
+  const top = rect.top + rect.height / 2;
+  popoverLeft.value = left;
+  popoverTop.value = top;
+}
 
 async function addWorkspace() {
   if (pickingFolder.value) return;
@@ -37,22 +144,18 @@ function addSessionInWorkspace(workspaceId: string) {
   sessionStore.addSession(workspaceId, '新任务');
   menuFor.value = null;
 }
-
 function selectSession(id: string) {
   sessionStore.selectSession(id);
   menuFor.value = null;
 }
-
 function toggle(id: string) {
   sessionStore.toggleWorkspaceExpanded(id);
 }
-
 function removeWorkspace(id: string) {
   if (!confirm('删除这个工作区? 所有 session 一并删.')) return;
   sessionStore.removeWorkspace(id);
   menuFor.value = null;
 }
-
 function removeSession(id: string) {
   if (!confirm('删除这个 session? 消息一并删.')) return;
   sessionStore.removeSession(id);
@@ -62,35 +165,34 @@ function removeSession(id: string) {
 
 <template>
   <div class="pad-wstree">
-    <!-- 顶部: 加 workspace 按钮 -->
-    <div class="pad-wstree__top">
-      <span class="pad-wstree__top-label">任务列表</span>
-      <div class="pad-wstree__top-actions">
-        <IconButton
-          :icon="FolderPlus"
-          size="sm"
-          :title="pickingFolder ? '打开文件夹选择...' : '加工作区 (选本地文件夹)'"
-          :disabled="pickingFolder"
-          @click="addWorkspace"
-        />
-      </div>
+    <!-- ====== 顶部: 任务列表 section label + 加 workspace 按钮 ====== -->
+    <div class="pad-wstree__head">
+      <span class="pad-wstree__section-label">
+        <Folder :size="12" :stroke-width="1.75" />
+        <span>项目</span>
+      </span>
+      <button
+        class="pad-wstree__head-add"
+        :disabled="pickingFolder"
+        :title="pickingFolder ? '打开文件夹选择...' : '加工作区'"
+        @click="addWorkspace"
+      >
+        <Plus :size="12" :stroke-width="2" />
+      </button>
     </div>
 
-    <!-- 列表 -->
+    <!-- ====== 项目 / workspace 列表 ====== -->
     <div class="pad-wstree__list">
-      <!-- 空状态 -->
+      <!-- 空状态: v0.3.5+ 引导去中间 tab strip -->
       <div v-if="workspaces.length === 0" class="pad-wstree__empty">
         <Folder :size="20" :stroke-width="1.5" />
         <p>没有工作区</p>
-        <button class="pad-wstree__add-btn" :disabled="pickingFolder" @click="addWorkspace">
-          <Plus :size="12" :stroke-width="2" />
-          <span>选文件夹新建</span>
-        </button>
+        <p class="pad-wstree__empty-hint">点中间"本地"下拉新建</p>
       </div>
 
       <!-- workspace 列表 -->
       <div v-for="ws in workspaces" :key="ws.id" class="pad-wstree__ws">
-        <button
+        <div
           class="pad-wstree__ws-head"
           :class="{ 'is-active': sessionStore.activeWorkspaceId === ws.id }"
           @click="toggle(ws.id)"
@@ -100,59 +202,130 @@ function removeSession(id: string) {
             :stroke-width="2"
             :class="['pad-wstree__chev', { 'is-open': expandedWorkspaceIds.has(ws.id) }]"
           />
-          <Folder :size="13" :stroke-width="1.75" />
+          <Folder :size="13" :stroke-width="1.75" class="pad-wstree__ws-icon" />
           <span class="pad-wstree__ws-name" :title="ws.path">{{ ws.name }}</span>
-          <span
+          <button
             class="pad-wstree__ws-menu"
             :class="{ 'is-shown': menuFor === ws.id }"
+            title="工作区菜单"
             @click.stop="menuFor = menuFor === ws.id ? null : ws.id"
           >
             <MoreHorizontal :size="12" :stroke-width="1.75" />
-          </span>
-        </button>
-        <!-- workspace 菜单 -->
-        <div v-if="menuFor === ws.id" class="pad-wstree__ws-menu-pop">
-          <button class="pad-wstree__menu-item" @click.stop="addSessionInWorkspace(ws.id)">
-            <MessageSquarePlus :size="12" :stroke-width="1.75" />
-            <span>新建 session</span>
           </button>
-          <button class="pad-wstree__menu-item is-danger" @click.stop="removeWorkspace(ws.id)">
-            <Trash2 :size="12" :stroke-width="1.75" />
-            <span>删工作区</span>
-          </button>
-          <div class="pad-wstree__ws-path" :title="ws.path">{{ ws.path }}</div>
         </div>
 
+        <!-- workspace 菜单 -->
+        <Transition name="pad-wsfade">
+          <div v-if="menuFor === ws.id" class="pad-wstree__ws-menu-pop">
+            <button class="pad-wstree__menu-item" @click.stop="addSessionInWorkspace(ws.id)">
+              <MessageSquarePlus :size="12" :stroke-width="1.75" />
+              <span>新建 session</span>
+            </button>
+            <button class="pad-wstree__menu-item is-danger" @click.stop="removeWorkspace(ws.id)">
+              <Trash2 :size="12" :stroke-width="1.75" />
+              <span>删工作区</span>
+            </button>
+            <div class="pad-wstree__ws-path" :title="ws.path">
+              <Folder :size="10" :stroke-width="1.75" />
+              <span>{{ ws.path }}</span>
+            </div>
+          </div>
+        </Transition>
+
         <!-- sessions 列表 -->
-        <div v-if="expandedWorkspaceIds.has(ws.id)" class="pad-wstree__sessions">
-          <button
-            v-for="s in sessionStore.getSessionsByWorkspace(ws.id)"
-            :key="s.id"
-            class="pad-wstree__session"
-            :class="{ 'is-active': activeSessionId === s.id }"
-            @click="selectSession(s.id)"
-          >
-            <span class="pad-wstree__session-dot" v-if="activeSessionId === s.id" />
-            <span class="pad-wstree__session-title">{{ s.title || '新任务' }}</span>
-            <span
-              class="pad-wstree__session-del"
-              :class="{ 'is-shown': activeSessionId === s.id }"
-              title="删 session"
-              @click.stop="removeSession(s.id)"
+        <Transition name="pad-wsexpand">
+          <div v-if="expandedWorkspaceIds.has(ws.id)" class="pad-wstree__sessions">
+            <div
+              v-for="s in sessionStore.getSessionsByWorkspace(ws.id)"
+              :key="s.id"
+              class="pad-wstree__session"
+              :class="{ 'is-active': activeSessionId === s.id }"
+              @click="selectSession(s.id)"
+              @mouseenter="(e) => onSessionEnter(e, s.id)"
+              @mousemove="onSessionMove"
+              @mouseleave="onSessionLeave"
             >
-              <Trash2 :size="11" :stroke-width="1.75" />
-            </span>
-          </button>
-          <button
-            v-if="sessionStore.getSessionsByWorkspace(ws.id).length === 0"
-            class="pad-wstree__session-empty"
-            disabled
-          >
-            暂无 session
-          </button>
+              <span class="pad-wstree__session-dot" v-if="activeSessionId === s.id" />
+              <MessageCircle v-else :size="11" :stroke-width="1.75" class="pad-wstree__session-icon" />
+              <span class="pad-wstree__session-title">{{ s.title || '新任务' }}</span>
+              <button
+                class="pad-wstree__session-del"
+                :class="{ 'is-shown': activeSessionId === s.id }"
+                title="删 session"
+                @click.stop="removeSession(s.id)"
+              >
+                <Trash2 :size="10" :stroke-width="1.75" />
+              </button>
+            </div>
+            <button
+              v-if="sessionStore.getSessionsByWorkspace(ws.id).length === 0"
+              class="pad-wstree__session-empty"
+              disabled
+            >
+              暂无 session
+            </button>
+          </div>
+        </Transition>
+      </div>
+    </div>
+
+    <!-- ====== 底部: Agent 团队 (placeholder) ====== -->
+    <div class="pad-wstree__bottom">
+      <span class="pad-wstree__section-label">
+        <Users :size="12" :stroke-width="1.75" />
+        <span>Agent 团队</span>
+      </span>
+      <div class="pad-wstree__agents">
+        <div class="pad-wstree__agent">
+          <Sparkles :size="11" :stroke-width="1.75" />
+          <span>Code Reviewer</span>
+        </div>
+        <div class="pad-wstree__agent">
+          <Sparkles :size="11" :stroke-width="1.75" />
+          <span>Refactor</span>
+        </div>
+        <div class="pad-wstree__agent is-soon">
+          <span>+ 更多即将推出</span>
         </div>
       </div>
     </div>
+
+    <!-- ====== Session hover 预览 popover (Teleport 到 body) ====== -->
+    <Teleport to="body">
+      <Transition name="pad-preview">
+        <div
+          v-if="hoverPreview"
+          class="pad-session-preview"
+          role="tooltip"
+          :style="{
+            left: popoverLeft + 'px',
+            top: popoverTop + 'px',
+            transform: 'translateY(-50%)',
+          }"
+          @mouseenter="onPopoverEnter"
+          @mouseleave="onSessionLeave"
+        >
+          <div class="pad-session-preview__title">{{ hoverPreview.title }}</div>
+          <div class="pad-session-preview__path" :title="hoverPreview.path">
+            <Folder :size="11" :stroke-width="1.75" />
+            <span>{{ hoverPreview.path }}</span>
+          </div>
+          <div v-if="hoverPreview.firstUser" class="pad-session-preview__msg">
+            <MessageCircle :size="11" :stroke-width="1.75" />
+            <span>{{ hoverPreview.firstUser }}</span>
+          </div>
+          <div v-else class="pad-session-preview__msg is-empty">
+            <MessageCircle :size="11" :stroke-width="1.75" />
+            <span>暂无消息</span>
+          </div>
+          <div class="pad-session-preview__meta">
+            <span>{{ hoverPreview.messageCount }} 条消息</span>
+            <span class="pad-session-preview__dot">·</span>
+            <span>{{ formatRelative(hoverPreview.updatedAt) }}</span>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -161,29 +334,52 @@ function removeSession(id: string) {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: var(--pad-sp-1) var(--pad-sp-2);
+  padding: var(--pad-sp-1) var(--pad-sp-2) 0;
   height: 100%;
   min-height: 0;
 }
-.pad-wstree__top {
+
+/* ====== 顶部 section label ====== */
+.pad-wstree__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: var(--pad-sp-2) var(--pad-sp-2) var(--pad-sp-1);
-  border-bottom: 1px solid var(--pad-divider);
-  margin-bottom: var(--pad-sp-1);
 }
-.pad-wstree__top-label {
+.pad-wstree__section-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: var(--pad-fs-11);
   color: var(--pad-fg-tertiary);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   font-weight: var(--pad-fw-medium);
+  user-select: none;
 }
-.pad-wstree__top-actions {
-  display: flex;
-  gap: 2px;
+.pad-wstree__head-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--pad-radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--pad-fg-tertiary);
+  cursor: pointer;
+  transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
 }
+.pad-wstree__head-add:hover:not(:disabled) {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
+}
+.pad-wstree__head-add:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ====== 列表 ====== */
 .pad-wstree__list {
   flex: 1;
   overflow-y: auto;
@@ -194,36 +390,19 @@ function removeSession(id: string) {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 4px;
   padding: var(--pad-sp-6) var(--pad-sp-3);
   color: var(--pad-fg-tertiary);
   font-size: var(--pad-fs-12);
 }
-.pad-wstree__empty p {
-  margin: 0;
+.pad-wstree__empty p { margin: 0; }
+.pad-wstree__empty-hint {
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
+  opacity: 0.7;
 }
-.pad-wstree__add-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 26px;
-  padding: 0 var(--pad-sp-2);
-  background: var(--pad-accent);
-  color: var(--pad-fg-inverse);
-  border: 1px solid transparent;
-  border-radius: var(--pad-radius-sm);
-  font-size: var(--pad-fs-12);
-  font-weight: var(--pad-fw-medium);
-  cursor: pointer;
-  font-family: inherit;
-}
-.pad-wstree__add-btn:hover:not(:disabled) {
-  background: var(--pad-accent-hover);
-}
-.pad-wstree__add-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+
+/* ====== workspace 行 ====== */
 .pad-wstree__ws {
   margin-bottom: 2px;
 }
@@ -255,11 +434,15 @@ function removeSession(id: string) {
 .pad-wstree__chev.is-open {
   transform: rotate(90deg);
 }
+.pad-wstree__ws-icon {
+  color: var(--pad-fg-secondary);
+  flex-shrink: 0;
+}
 .pad-wstree__ws-name {
   flex: 1;
   font-size: var(--pad-fs-12);
   font-weight: var(--pad-fw-medium);
-  color: var(--pad-fg-secondary);
+  color: var(--pad-fg-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -273,10 +456,12 @@ function removeSession(id: string) {
   align-items: center;
   justify-content: center;
   color: var(--pad-fg-tertiary);
+  background: transparent;
+  border: none;
   border-radius: var(--pad-radius-sm);
   cursor: pointer;
   opacity: 0;
-  transition: opacity var(--pad-dur-fast) ease, background var(--pad-dur-fast) ease;
+  transition: opacity var(--pad-dur-fast) ease, background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
 }
 .pad-wstree__ws-head:hover .pad-wstree__ws-menu,
 .pad-wstree__ws-menu.is-shown {
@@ -286,6 +471,7 @@ function removeSession(id: string) {
   background: var(--pad-bg-elevated);
   color: var(--pad-fg-primary);
 }
+
 .pad-wstree__ws-menu-pop {
   margin: 2px 0 4px 20px;
   padding: 4px;
@@ -321,6 +507,9 @@ function removeSession(id: string) {
   background: var(--pad-danger-subtle);
 }
 .pad-wstree__ws-path {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   padding: 4px 6px;
   font-size: var(--pad-fs-10);
   color: var(--pad-fg-tertiary);
@@ -329,21 +518,30 @@ function removeSession(id: string) {
   border-top: 1px solid var(--pad-divider);
   margin-top: 2px;
 }
+.pad-wstree__ws-path span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ====== session 行 ====== */
 .pad-wstree__sessions {
-  margin-left: 18px;
-  padding-left: 4px;
+  margin-left: 14px;
+  padding-left: 8px;
   border-left: 1px solid var(--pad-divider);
   display: flex;
   flex-direction: column;
   gap: 1px;
   margin-top: 2px;
   margin-bottom: 4px;
+  overflow: hidden;
 }
 .pad-wstree__session {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 6px;
+  padding: 4px 8px;
   border-radius: var(--pad-radius-sm);
   background: transparent;
   border: 1px solid transparent;
@@ -353,10 +551,16 @@ function removeSession(id: string) {
   color: var(--pad-fg-secondary);
   font-family: inherit;
   position: relative;
+  width: 100%;
+  transition:
+    background var(--pad-dur-fast) ease,
+    color var(--pad-dur-fast) ease,
+    transform var(--pad-dur-fast) ease;
 }
 .pad-wstree__session:hover {
   background: var(--pad-bg-hover);
   color: var(--pad-fg-primary);
+  transform: translateX(2px); /* 轻微右移 hover 反馈 */
 }
 .pad-wstree__session.is-active {
   background: var(--pad-accent-soft);
@@ -364,10 +568,15 @@ function removeSession(id: string) {
   font-weight: var(--pad-fw-medium);
 }
 .pad-wstree__session-dot {
-  width: 4px;
-  height: 4px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--pad-accent);
+  flex-shrink: 0;
+  box-shadow: 0 0 0 3px var(--pad-accent-soft);
+}
+.pad-wstree__session-icon {
+  color: var(--pad-fg-tertiary);
   flex-shrink: 0;
 }
 .pad-wstree__session-title {
@@ -385,10 +594,12 @@ function removeSession(id: string) {
   align-items: center;
   justify-content: center;
   color: var(--pad-fg-tertiary);
+  background: transparent;
+  border: none;
   border-radius: var(--pad-radius-sm);
   cursor: pointer;
   opacity: 0;
-  transition: opacity var(--pad-dur-fast) ease;
+  transition: opacity var(--pad-dur-fast) ease, background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
 }
 .pad-wstree__session:hover .pad-wstree__session-del,
 .pad-wstree__session-del.is-shown {
@@ -399,7 +610,7 @@ function removeSession(id: string) {
   color: var(--pad-danger-text);
 }
 .pad-wstree__session-empty {
-  padding: 3px 6px;
+  padding: 4px 8px;
   font-size: var(--pad-fs-11);
   color: var(--pad-fg-tertiary);
   background: transparent;
@@ -407,5 +618,133 @@ function removeSession(id: string) {
   border-radius: var(--pad-radius-sm);
   cursor: default;
   text-align: center;
+}
+
+/* ====== 底部 Agent 团队 ====== */
+.pad-wstree__bottom {
+  border-top: 1px solid var(--pad-divider);
+  padding: var(--pad-sp-2) 0 var(--pad-sp-2);
+  margin-top: 4px;
+}
+.pad-wstree__bottom .pad-wstree__section-label {
+  padding: 0 var(--pad-sp-2) var(--pad-sp-2);
+}
+.pad-wstree__agents {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 var(--pad-sp-2);
+}
+.pad-wstree__agent {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-secondary);
+  border-radius: var(--pad-radius-sm);
+  cursor: default;
+}
+.pad-wstree__agent.is-soon {
+  color: var(--pad-fg-tertiary);
+  font-style: italic;
+  font-size: var(--pad-fs-11);
+  padding-left: 19px;
+}
+
+/* ====== 过渡 ====== */
+.pad-wsfade-enter-active,
+.pad-wsfade-leave-active {
+  transition: opacity var(--pad-dur-fast) ease, transform var(--pad-dur-fast) ease;
+}
+.pad-wsfade-enter-from,
+.pad-wsfade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+.pad-wsexpand-enter-active,
+.pad-wsexpand-leave-active {
+  transition: opacity var(--pad-dur-fast) ease, max-height var(--pad-dur-base) var(--pad-ease-out-soft);
+  overflow: hidden;
+  max-height: 600px;
+}
+.pad-wsexpand-enter-from,
+.pad-wsexpand-leave-to {
+  opacity: 0;
+  max-height: 0;
+}
+</style>
+
+<style>
+/* Session hover 预览 popover (Teleport 到 body, 不能 scoped) */
+.pad-session-preview {
+  position: fixed;
+  z-index: 9999;
+  width: 300px;
+  padding: 10px 12px;
+  background: var(--pad-popover);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-lg);
+  box-shadow: var(--pad-shadow-modal);
+  pointer-events: auto; /* 允许 hover 进去 (让用户有时间移到 popover 上) */
+  font-family: var(--pad-font-sans);
+}
+.pad-session-preview__title {
+  font-size: var(--pad-fs-14);
+  font-weight: var(--pad-fw-semibold);
+  color: var(--pad-fg-primary);
+  margin-bottom: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pad-session-preview__path,
+.pad-session-preview__msg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-secondary);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pad-session-preview__path span,
+.pad-session-preview__msg span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pad-session-preview__path {
+  font-family: var(--pad-font-mono);
+  color: var(--pad-fg-tertiary);
+}
+.pad-session-preview__msg.is-empty {
+  color: var(--pad-fg-tertiary);
+  font-style: italic;
+}
+.pad-session-preview__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--pad-divider);
+}
+.pad-session-preview__dot {
+  color: var(--pad-fg-tertiary);
+}
+.pad-preview-enter-active,
+.pad-preview-leave-active {
+  transition: opacity var(--pad-dur-fast) ease, transform var(--pad-dur-fast) ease;
+}
+.pad-preview-enter-from,
+.pad-preview-leave-to {
+  opacity: 0;
+  transform: translateY(-50%) translateX(-4px);
 }
 </style>

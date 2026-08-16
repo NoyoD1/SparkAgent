@@ -2,10 +2,15 @@
 /**
  * SidebarTabBar — Work / Code / Design 3 tabs at top of sidebar.
  * 1:1 mirrors chat.html's `<button>Work</button><button>Code</button><button>Design</button>`.
+ *
+ * v0.3.5+ 加 `noActive` prop: 在 ChatMain 的 initial 状态下传 true,
+ * 所有 tab 都不点亮, 等用户主动 click 才激活.
  */
 import { Briefcase, Code2, PenTool } from 'lucide-vue-next';
 import { useUiStore, type SidebarTab } from '@/stores/ui';
 import { storeToRefs } from 'pinia';
+
+defineProps<{ noActive?: boolean }>();
 
 const uiStore = useUiStore();
 const { activeTab } = storeToRefs(uiStore);
@@ -27,7 +32,7 @@ function select(t: SidebarTab) {
       v-for="t in tabs"
       :key="t.id"
       class="pad-tab"
-      :class="{ 'is-active': activeTab === t.id }"
+      :class="{ 'is-active': !noActive && activeTab === t.id }"
       :title="t.label"
       @click="select(t.id)"
     >
@@ -56,7 +61,7 @@ function select(t: SidebarTab) {
   font-weight: var(--pad-fw-medium);
   color: var(--pad-fg-secondary);
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
   cursor: pointer;
   transition:
     background var(--pad-dur-fast) ease,
@@ -67,8 +72,13 @@ function select(t: SidebarTab) {
   color: var(--pad-fg-primary);
 }
 .pad-tab.is-active {
-  background: var(--pad-bg-active);
+  /* 跟 reference 0.png 一致: active 是 elevated card, bg-card + 细边 + 微阴影 */
+  background: var(--pad-card);
   color: var(--pad-fg-primary);
+  box-shadow: var(--pad-shadow-button);
+  border: 1px solid var(--pad-border);
+  /* 让 padding 跟边框对齐 (active 比 inactive 多 1px border) */
+  padding: 0 calc(var(--pad-sp-2) - 1px);
 }
 /* Collapsed sidebar — hide label */
 :global(.pad-sidebar.is-collapsed) .pad-tab__label {

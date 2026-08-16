@@ -34,7 +34,8 @@ function clampWidth(n: number, min: number, max: number) {
 export const useUiStore = defineStore('ui', () => {
   // Sidebar (left)
   const sidebarCollapsed = ref(false);
-  const activeTab = ref<SidebarTab>('work');
+  // 默认 code — 跟 Pi-Agent-Design.design reference/0.png..13.png 一致 (Work/Code/Design 中 Code 始终 active)
+  const activeTab = ref<SidebarTab>('code');
 
   // Task Drawer (right)
   const drawerCollapsed = ref(false);

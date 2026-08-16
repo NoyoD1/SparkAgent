@@ -1,16 +1,19 @@
 /**
  * Config store — 多 Provider 管理
  *
- * v0.2 设计 (apiKey 走 server .env):
- * - 用户加 N 个 Provider config (Anthropic / OpenAI / DeepSeek / 自定义 OpenAI 兼容)
- * - 每个 config 有自己的 models[] (拉取后缓存) + activeModelId
- * - activeProviderId 指向当前在 chat 里用的 provider
- * - localStorage 持久化: providers + activeProviderId + thinkingLevel (没 apiKey 字段)
- * - apiKey 完全在 server .env, client 协议层不传
+ * v0.3.8+: 持久化改走 Rust (load_app_config / save_app_config) → %APPDATA%\com.piagent.desktop\config.json
+ * - 之前用 WebView2 localStorage 会被清 WebView2 缓存时一起擦掉
+ * - 现在独立 OS 文件, 跟 keychain 一样安全 + 持久
+ * - apiKey 继续走 OS keychain (永不出前端)
+ *
+ * v0.3.8.1+: Pinia HMR 保护 (防止 Vite 热更时 store 状态被重置为 [] 触发 watch 写空)
+ * 初始化: 空状态起步, App.vue onMounted 调 init() 异步加载
+ * 改动: watch 自动调 piTauri.saveAppConfig 持久化
  */
 
-import { defineStore } from 'pinia';
+import { defineStore, acceptHMRUpdate } from 'pinia';
 import { ref, computed, watch } from 'vue';
+import { piTauri } from '@/lib/tauri';
 
 export type ProviderType =
   | 'anthropic'
@@ -40,16 +43,18 @@ export interface ProviderOption {
   label: string;
   hint?: string;
   needsBaseUrl?: boolean;
+  /** v0.3.8+: 内置 provider. 始终在 Settings 列表显示, 不需要"添加"步骤. */
+  builtin?: boolean;
 }
 
 export const PROVIDER_OPTIONS: ProviderOption[] = [
-  { id: 'anthropic',          label: 'Anthropic (Claude)' },
-  { id: 'openai',             label: 'OpenAI' },
-  { id: 'deepseek',           label: 'DeepSeek' },
-  { id: 'moonshotai',         label: 'Moonshot (Kimi)' },
-  { id: 'google',             label: 'Google Gemini' },
-  { id: 'groq',               label: 'Groq' },
-  { id: 'minimax',           label: 'MiniMax' },
+  { id: 'anthropic',          label: 'Anthropic (Claude)',  builtin: true },
+  { id: 'openai',             label: 'OpenAI',              builtin: true },
+  { id: 'deepseek',           label: 'DeepSeek',            builtin: true },
+  { id: 'moonshotai',         label: 'Moonshot (Kimi)',     builtin: true },
+  { id: 'google',             label: 'Google Gemini',       builtin: true },
+  { id: 'groq',               label: 'Groq',                builtin: true },
+  { id: 'minimax',            label: 'MiniMax',            builtin: true },
   { id: 'openai-compatible',  label: 'OpenAI 兼容 (自定义 baseUrl)', needsBaseUrl: true },
 ];
 
@@ -88,71 +93,76 @@ export interface ProviderConfig {
   updatedAt: string;
 }
 
-const STORAGE_KEY = 'pi-agent:config:v3';  // bump v2→v3: 删 apiKey 字段
-
-function genId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-}
-
-function loadFromStorage(): {
-  providers: ProviderConfig[];
-  activeProviderId: string | null;
-  thinkingLevel: 'off' | 'low' | 'medium' | 'high';
-} {
-  const fallback = {
+/** 跟 Rust 端 config_store::AppConfig 对齐 */
+function emptyAppConfig() {
+  return {
+    version: 1,
     providers: [] as ProviderConfig[],
     activeProviderId: null as string | null,
     thinkingLevel: 'medium' as 'off' | 'low' | 'medium' | 'high',
   };
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed.providers)) return fallback;
-    // v0.2: 强制 strip apiKey 字段, 即便旧 v2 数据带过来也不存
-    const providers = parsed.providers.map((p: ProviderConfig) => {
-      const { apiKey: _apiKey, ...rest } = p;
-      return rest as ProviderConfig;
-    });
-    return {
-      providers,
-      activeProviderId: parsed.activeProviderId ?? null,
-      thinkingLevel: parsed.thinkingLevel ?? 'medium',
-    };
-  } catch {
-    return fallback;
-  }
 }
 
-function saveToStorage(s: {
-  providers: ProviderConfig[];
-  activeProviderId: string | null;
-  thinkingLevel: 'off' | 'low' | 'medium' | 'high';
-}) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
-  } catch (e) {
-    console.warn('[config] localStorage save failed', e);
+/**
+ * v0.3.8+ 内置 provider 的常见 model 列表.
+ * 简化版 — 实际生产可走 provider 的 /v1/models 端点拉, 但 sidecar 现在只支持 openai-compatible.
+ * 用法: 内置 provider 配置 key 后, 用户从此列表选 active model, 也可手输自定义 id.
+ */
+export const BUILTIN_MODELS: Record<Exclude<ProviderType, 'openai-compatible'>, string[]> = {
+  anthropic:  ['claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest', 'claude-3-opus-latest'],
+  openai:     ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+  deepseek:   ['deepseek-chat', 'deepseek-reasoner', 'deepseek-coder'],
+  moonshotai: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
+  google:     ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash-exp'],
+  groq:       ['llama-3.1-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+  minimax:    ['MiniMax-M2', 'MiniMax-M1', 'abab6.5s-chat'],
+};
+
+// R2: provider id 改用 crypto.randomUUID() (128 bit 熵), 不再可猜
+// 老 id (timestamp 形式) 仍合法, 不会被破坏; 新 id 用 UUID v4
+function genId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
   }
+  // 极端 fallback: 旧实现, 不在现代浏览器/Tauri 走
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export const useConfigStore = defineStore('config', () => {
-  const initial = loadFromStorage();
+  // v0.3.8+: 初始为空, 等 App.vue onMounted 调 init() 异步加载
+  const initial = emptyAppConfig();
   const providers = ref<ProviderConfig[]>(initial.providers);
   const activeProviderId = ref<string | null>(initial.activeProviderId);
   const thinkingLevel = ref<'off' | 'low' | 'medium' | 'high'>(initial.thinkingLevel);
+  const loaded = ref(false);  // v0.3.8+: init() 完成后置 true
+  const saving = ref(false);  // 写入 Rust 中, UI 可以 disable input
 
-  watch(
-    [providers, activeProviderId, thinkingLevel],
-    () => {
-      saveToStorage({
-        providers: providers.value,
-        activeProviderId: activeProviderId.value,
-        thinkingLevel: thinkingLevel.value,
+  /** v0.3.8+: App.vue onMounted 调一次, 从 Rust 文件读 */
+  async function init() {
+    try {
+      const cfg = await piTauri.loadAppConfig();
+      // 强制 strip apiKey 字段 (防御性, 旧数据可能带过来)
+      const cleanProviders = (cfg.providers ?? []).map((p: any) => {
+        const { apiKey: _apiKey, ...rest } = p;
+        return rest as ProviderConfig;
       });
-    },
-    { deep: true },
-  );
+      providers.value = cleanProviders;
+      activeProviderId.value = cfg.activeProviderId ?? null;
+      // v0.3.8.1 fix: 旧 build 写过空串, 落盘后读出还是空. 用 || 替代 ?? 让 "" 也走 fallback
+      const tl = (cfg.thinkingLevel as any) || 'medium';
+      thinkingLevel.value = (tl === 'off' || tl === 'low' || tl === 'medium' || tl === 'high') ? tl : 'medium';
+      // 如果读出来的 thinkingLevel 跟默认不同, 主动落一次盘 (修旧数据)
+      if (tl !== thinkingLevel.value) {
+        console.log('[config] init: normalized thinkingLevel', JSON.stringify(tl), '->', thinkingLevel.value);
+        void persist();
+      }
+      console.log('[config] init loaded: providers=', providers.value.length, 'active=', activeProviderId.value);
+    } catch (e) {
+      console.warn('[config] init failed (use empty defaults)', e);
+    } finally {
+      loaded.value = true;
+    }
+  }
 
   // ===== Computed =====
   const activeProvider = computed<ProviderConfig | null>(
@@ -167,6 +177,33 @@ export const useConfigStore = defineStore('config', () => {
 
   const isConfigured = computed(
     () => !!activeProvider.value && !!activeProvider.value.activeModelId,
+  );
+
+  // ===== 改动自动保存到 Rust =====
+  async function persist() {
+    if (!loaded.value) return;  // init 没完不写, 避免覆盖文件
+    saving.value = true;
+    try {
+      await piTauri.saveAppConfig({
+        version: 1,
+        providers: providers.value,
+        activeProviderId: activeProviderId.value,
+        thinkingLevel: thinkingLevel.value,
+      });
+    } catch (e) {
+      console.error('[config] save failed', e);
+    } finally {
+      saving.value = false;
+    }
+  }
+
+  // deep watch: 任一字段变 → persist
+  watch(
+    [providers, activeProviderId, thinkingLevel],
+    () => {
+      void persist();
+    },
+    { deep: true },
   );
 
   // ===== Actions =====
@@ -261,16 +298,60 @@ export const useConfigStore = defineStore('config', () => {
     activeProviderId.value = null;
   }
 
+  /**
+   * v0.3.8.1+: 从 v0.3.6 老 localStorage (`pi-agent:config:v3`) 迁移 provider 配置.
+   *
+   * 场景: 之前在 v0.3.6 build 用过, 配置存在 localStorage.
+   * 切换到 v0.3.8+ build 后, Rust config.json 是空的, localStorage 数据孤儿化.
+   *
+   * 流程:
+   * 1. App.vue init() 完成后, 如果 providers 空, 调这个
+   * 2. 读 localStorage `pi-agent:config:v3`
+   * 3. 解析 providers, 写入 store (触发 watch → 持久化到 config.json)
+   * 4. 返回迁移了多少个, UI 可提示
+   */
+  function migrateFromLocalStorage(): { migrated: number; source: 'localStorage' | 'none' } {
+    if (typeof localStorage === 'undefined') return { migrated: 0, source: 'none' };
+    try {
+      const raw = localStorage.getItem('pi-agent:config:v3');
+      if (!raw) return { migrated: 0, source: 'none' };
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed.providers) || parsed.providers.length === 0) {
+        return { migrated: 0, source: 'none' };
+      }
+      // 强制 strip apiKey (旧 v2/v3 数据如果带过的话)
+      const cleanProviders: ProviderConfig[] = parsed.providers.map((p: any) => {
+        const { apiKey: _apiKey, ...rest } = p;
+        return rest as ProviderConfig;
+      });
+      providers.value = cleanProviders;
+      if (parsed.activeProviderId) activeProviderId.value = parsed.activeProviderId;
+      if (parsed.thinkingLevel && (parsed.thinkingLevel === 'off' || parsed.thinkingLevel === 'low' || parsed.thinkingLevel === 'medium' || parsed.thinkingLevel === 'high')) {
+        thinkingLevel.value = parsed.thinkingLevel;
+      }
+      console.log('[config] migrated', cleanProviders.length, 'providers from localStorage → config.json');
+      // 主动 persist 一次 (写盘), 之后 watch 也会触发
+      void persist();
+      return { migrated: cleanProviders.length, source: 'localStorage' };
+    } catch (e) {
+      console.warn('[config] migrateFromLocalStorage failed', e);
+      return { migrated: 0, source: 'none' };
+    }
+  }
+
   return {
     // state
     providers,
     activeProviderId,
     thinkingLevel,
+    loaded,
+    saving,
     // computed
     activeProvider,
     activeModel,
     isConfigured,
     // actions
+    init,
     addProvider,
     updateProvider,
     removeProvider,
@@ -280,5 +361,13 @@ export const useConfigStore = defineStore('config', () => {
     setActiveProvider,
     setThinkingLevel,
     clearAll,
+    migrateFromLocalStorage,
   };
 });
+
+// v0.3.8.1+: Pinia HMR 保护
+// 之前 Vite HMR 重新执行 config.ts 时, store 会被重置为初始 [], watch 触发写空到 config.json
+// 用户的 provider 配置就这样丢了. acceptHMRUpdate 让 Pinia 跨 HMR 保留 state.
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useConfigStore, import.meta.hot));
+}

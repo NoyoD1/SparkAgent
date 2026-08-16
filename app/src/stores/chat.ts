@@ -4,6 +4,10 @@
  * 数据: messagesBySession[sessionId] = { messages, thinking, toolCalls }
  * 持久化: localStorage `pi-agent:chat:v1`
  * 跟 session store 联动: session 删除时清 messages
+ *
+ * v0.3.5+ sendPrompt(content) — 不再要求调用方传 sessionId.
+ * - 有 active session → 直接发
+ * - 没 active session → 自动确保有 workspace (没就 picker), 新建 session, 再发
  */
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
@@ -138,15 +142,41 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 发 prompt + 接流. 走 Tauri invoke('send_prompt') → Rust 读 keychain + 启 sidecar.
-   * 监听 Tauri 事件累加 delta, message_end 收尾.
+   * 发 prompt. v0.3.5+ 自动确保 session 存在.
+   * - 有 active session → 直接发
+   * - 没 active session + 有 workspace → 新建 session, 再发
+   * - 没 workspace → 用 piTauri.ensureDefaultWorkspace() (<home>/PiAgent) 建 workspace + session, 再发
+   *   (用户可手动通过 sidebar / tab strip 的"本地"下拉选别的路径)
    */
-  async function sendPromptViaWs(sessionId: string, content: string) {
-    if (!content.trim()) return;
-    console.log('[chat] sendPromptViaWs: sessionId=', sessionId, 'contentLen=', content.length);
+  async function sendPrompt(content: string) {
+    const text = content.trim();
+    if (!text) return;
+    console.log('[chat] sendPrompt: contentLen=', text.length, 'activeSession=', sessionStore.activeSessionId);
 
-    // 1. append user msg + assistant placeholder
-    appendUserMessage(sessionId, content);
+    // 1. 确保有 active session
+    let sessionId = sessionStore.activeSessionId;
+    if (!sessionId) {
+      let wid = sessionStore.activeWorkspaceId;
+      if (!wid || sessionStore.workspaces.length === 0) {
+        // 没 workspace: 用默认 C: 盘路径 (e.g. C:\Users\<user>\PiAgent), 不弹 picker
+        try {
+          const path = await piTauri.ensureDefaultWorkspace();
+          console.log('[chat] sendPrompt: using default workspace', path);
+          const ws = sessionStore.addWorkspace({ path });
+          wid = ws.id;
+        } catch (e) {
+          console.error('[chat] sendPrompt: ensureDefaultWorkspace failed', e);
+          errorBySession.value = { ...errorBySession.value, ['']: `创建默认工作区失败: ${e}` };
+          return;
+        }
+      }
+      const sess = sessionStore.addSession(wid, text.slice(0, 30) || '新任务');
+      sessionId = sess.id;
+      console.log('[chat] sendPrompt: created new session', sessionId);
+    }
+
+    // 2. append user msg + assistant placeholder
+    appendUserMessage(sessionId, text);
     const d = getSessionData(sessionId);
     const assistantId = genMessageId('a');
     d.messages.push({
@@ -161,8 +191,14 @@ export const useChatStore = defineStore('chat', () => {
     // touch session updated time
     sessionStore.touchSession(sessionId);
 
-    // 2. 临时 listener
-    const off = piTauri.on((event) => {
+    // 3. 临时 listener (await 确保 listener 起来, 避免 sidecar 早早 emit 丢事件)
+    const off = await piTauri.on((event) => {
+      console.log(
+        '[chat] event:',
+        event.type,
+        'sessionMatch=',
+        !('sessionId' in event) || event.sessionId === sessionId,
+      );
       if ('sessionId' in event && event.sessionId !== sessionId) return;
       const d2 = getSessionData(sessionId);
       const idx = d2.messages.findIndex((m) => m.id === assistantId);
@@ -174,6 +210,7 @@ export const useChatStore = defineStore('chat', () => {
           break;
         case 'message_update':
           assistant.content += event.delta;
+          console.log('[chat] message_update len=', assistant.content.length);
           break;
         case 'message_end':
           break;
@@ -186,9 +223,15 @@ export const useChatStore = defineStore('chat', () => {
         case 'agent_end':
           streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
           chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+          console.log(
+            '[chat] agent_end: assistant.content.length=',
+            assistant.content.length,
+            'preview=',
+            assistant.content.slice(0, 80),
+          );
           off();
-          // 自动用首条消息给 session 命名
-          maybeAutoNameSession(sessionId, content);
+          // 自动用首条消息给 session 命名 (仅在 title 仍是默认 "新任务" 时)
+          maybeAutoNameSession(sessionId, text);
           break;
         case 'error':
           errorBySession.value = { ...errorBySession.value, [sessionId]: event.message };
@@ -198,30 +241,38 @@ export const useChatStore = defineStore('chat', () => {
       }
       chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
     });
+    console.log('[chat] listener ready, invoking send_prompt');
 
-    // 3. 触发 prompt
+    // 4. 触发 prompt
     try {
       const config = useConfigStore();
       const active = config.activeProvider;
       const model = config.activeModel;
-      console.log('[chat] sendPromptViaWs: active=', active?.label, 'model=', model?.id);
+      console.log('[chat] sendPrompt: active=', active?.label, 'model=', model?.id);
       if (!active || !model) {
         throw new Error('请先在 Settings → Providers 添加并选一个 active provider + model');
       }
-      await piTauri.sendPrompt(sessionId, content, () => ({
+      await piTauri.sendPrompt(sessionId, text, () => ({
         providerId: active.id,
         provider: active.type,
         model: model.id,
         baseUrl: active.baseUrl,
         thinkingLevel: config.thinkingLevel,
       }));
-      console.log('[chat] sendPromptViaWs: piTauri.sendPrompt resolved');
+      console.log('[chat] sendPrompt: piTauri.sendPrompt resolved');
     } catch (e) {
-      console.error('[chat] sendPromptViaWs FAILED', e);
+      console.error('[chat] sendPrompt FAILED', e);
       errorBySession.value = { ...errorBySession.value, [sessionId]: e instanceof Error ? e.message : String(e) };
       streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
       off();
     }
+  }
+
+  /** @deprecated 旧 API, 保留以防外部代码引用. 新代码请用 sendPrompt(content) */
+  async function sendPromptViaWs(sessionId: string, content: string) {
+    console.warn('[chat] sendPromptViaWs() is deprecated, use sendPrompt(content) instead');
+    if (sessionId) sessionStore.selectSession(sessionId);
+    return sendPrompt(content);
   }
 
   /** 如果 session 还是默认名 "新任务", 用首条消息前 30 字命名 */
@@ -245,6 +296,7 @@ export const useChatStore = defineStore('chat', () => {
     getError,
     appendUserMessage,
     clearSession,
-    sendPromptViaWs,
+    sendPrompt,
+    sendPromptViaWs, // deprecated, kept for backward compat
   };
 });

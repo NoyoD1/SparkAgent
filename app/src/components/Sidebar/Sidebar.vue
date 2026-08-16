@@ -3,6 +3,9 @@
  * Sidebar — 248px (collapsed 52px) container.
  * 1:1 mirrors chat.html's <aside id="sidebar">.
  * Composes: TabBar / FunctionList / WorkspaceTree / UserArea.
+ *
+ * v0.3.5+ 接收 noActiveTabBar prop: ChatMain initial 状态 (无 active session) 传 true,
+ * SidebarTabBar 不点亮任何 tab.
  */
 import { storeToRefs } from 'pinia';
 import { useUiStore } from '@/stores/ui';
@@ -10,6 +13,8 @@ import SidebarTabBar from './SidebarTabBar.vue';
 import SidebarFunctionList from './SidebarFunctionList.vue';
 import WorkspaceTree from './WorkspaceTree.vue';
 import SidebarUserArea from './SidebarUserArea.vue';
+
+defineProps<{ noActiveTabBar?: boolean }>();
 
 const uiStore = useUiStore();
 const { sidebarCollapsed } = storeToRefs(uiStore);
@@ -20,7 +25,7 @@ const { sidebarCollapsed } = storeToRefs(uiStore);
     class="pad-sidebar"
     :class="{ 'is-collapsed': sidebarCollapsed }"
   >
-    <SidebarTabBar />
+    <SidebarTabBar :no-active="noActiveTabBar" />
     <SidebarFunctionList />
     <WorkspaceTree />
     <SidebarUserArea />

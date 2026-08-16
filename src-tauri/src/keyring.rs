@@ -19,11 +19,13 @@ use keyring::Entry;
 
 const SERVICE: &str = "pi-agent";
 
+// R5: 严格化 mask — 只显示前 2 字符 (provider prefix, e.g. "sk") + "..." + 后 4 字符
+// 之前 4+4=8 字符对短 key 暴露比例偏高, 改为更保守
 pub fn mask(key: &str) -> String {
     if key.len() <= 8 {
         return "***".to_string();
     }
-    format!("{}***{}", &key[..4], &key[key.len() - 4..])
+    format!("{}...{}", &key[..2], &key[key.len() - 4..])
 }
 
 pub fn save(provider_id: &str, api_key: &str) -> Result<(), String> {

@@ -183,7 +183,17 @@ pub fn run_prompt(app: AppHandle, config: SidecarConfig, prompt: PromptMsg) {
             emit_error(&app, &session_id, &format!("write prompt: {e}"));
             return;
         }
-        drop(stdin); // 关闭 stdin, sidecar 收到 EOF
+        // v0.3.5+: 不要 drop(stdin) — 关 stdin 会让 sidecar 立即收到 EOF, 触发 close 事件
+        // 导致 readline 调 abort 把正在飞行的 fetch 掐死 (网络请求还没发出去).
+        //
+        // 正确做法: 保持 stdin 打开, sidecar 的 readline 继续等下一行.
+        // fetch 跑完正常 emit agent_end → Rust 这边 stdout reader 收到 → break 退出循环 →
+        // 后续 `drop(child)` 时 `kill_on_drop=true` 触发 TerminateProcess 杀 sidecar,
+        // 这时 OS 才把 stdin 关掉. 整个 fetch / stream 期间 stdin 都保持打开.
+        //
+        // `stdin` 这个变量在 task 结束时 (block 末尾) 会自动 drop, 但那时候 child 已经被杀,
+        // pipe 已经断了, 这里的 drop 只是清理 fd 而已, 不会再触发 sidecar 的 close 事件.
+        debug_log(&format!("run_prompt: wrote config + prompt, keeping stdin open until agent_end"));
 
         // 后台读 stderr → log
         tokio::spawn(async move {

@@ -2,31 +2,22 @@
 /**
  * SidebarFunctionList — 4 function rows: 插件市场/自动化/办公助理/模板库.
  * 1:1 mirrors chat.html's nav.function-list block.
+ *
+ * v0.3.5+ "新建任务" 不再自动拉 picker, 改跳回 ChatMain 的 initial hero:
+ *   用户在中间 area 的 "本地" tab 下拉里手动选文件夹 / 创建 workspace,
+ *   或直接在 composer 里发消息 (会触发 ensureDefaultWorkspace 自动建).
  */
 import { Plug, Zap, Briefcase, LayoutTemplate, Plus } from 'lucide-vue-next';
 import { useSessionStore } from '@/stores/session';
-import { pickFolder } from '@/lib/dialog';
 
 const sessionStore = useSessionStore();
 
 /**
- * 新建任务 — 触发流程:
- * 1. 选本地文件夹 (workspace)  [如果是新用户没 workspace]
- * 2. 在 workspace 下加一个 session "新任务"
- * 3. 切到 chat 区
+ * 新建任务 — v0.3.5+: 单纯跳回首页 (clear active session), 不弹 picker.
+ * 后续 workspace/session 创建走中间 hero 的"本地"下拉 或 composer 自动建.
  */
-async function createNewTask() {
-  if (sessionStore.workspaces.length === 0) {
-    // 没 workspace, 先选文件夹
-    const path = await pickFolder('选一个本地代码目录, 后面 session 都在这个目录下');
-    if (!path) return;
-    const ws = sessionStore.addWorkspace({ path });
-    sessionStore.addSession(ws.id, '新任务');
-  } else {
-    // 有 workspace, 在当前 active workspace 加 session
-    const wid = sessionStore.activeWorkspaceId ?? sessionStore.workspaces[0].id;
-    sessionStore.addSession(wid, '新任务');
-  }
+function createNewTask() {
+  sessionStore.clearActiveSession();
 }
 </script>
 

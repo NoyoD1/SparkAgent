@@ -5,6 +5,7 @@
  *   [Vue frontend] --invoke/listen--> [Tauri commands + events] --stdin/stdout--> [Node sidecar]
  *   keychain (keyring crate) 存 apiKey, 不进 localStorage / 不进 WS / 不进 .env
  */
+mod config_store;
 mod index_file;
 mod keyring;
 mod sidecar;
@@ -294,6 +295,40 @@ async fn migrate_from_env(app: AppHandle, env_path: Option<String>) -> Result<Mi
     })
 }
 
+// ====== Workspace default ======
+// v0.3.5+ 初始状态 (无 workspace) 发送消息时, 自动用 <home>/PiAgent 作默认工作区.
+// 不弹 picker 强迫用户选, 但用户仍可通过 sidebar/tab strip 的"本地"下拉手动选别的.
+
+#[tauri::command]
+async fn ensure_default_workspace(app: AppHandle) -> Result<String, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|e| format!("home_dir: {e}"))?;
+    // Windows: C:\Users\<user>\PiAgent; macOS: /Users/<user>/PiAgent; Linux: /home/<user>/PiAgent
+    let default_path = home.join("PiAgent");
+    std::fs::create_dir_all(&default_path)
+        .map_err(|e| format!("create_dir_all({}): {e}", default_path.display()))?;
+    Ok(default_path.to_string_lossy().to_string())
+}
+
+// ====== App config (provider list, active, thinking level) ======
+// v0.3.8+ 持久化到 <app_data_dir>/config.json, 替代 WebView2 localStorage.
+// 原因: 清 WebView2 缓存时 localStorage 也被擦, provider 配置就丢了.
+
+#[tauri::command]
+async fn load_app_config(app: AppHandle) -> Result<config_store::AppConfig, String> {
+    Ok(config_store::load(&app))
+}
+
+#[tauri::command]
+async fn save_app_config(
+    app: AppHandle,
+    config: config_store::AppConfig,
+) -> Result<(), String> {
+    config_store::save(&app, &config)
+}
+
 // ====== App entry ======
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -308,7 +343,7 @@ pub fn run() {
                         .build(),
                 )?;
             }
-            // 确保 app data dir 存在 (index_file 用)
+            // 确保 app data dir 存在 (index_file + config_store 用)
             let _ = app
                 .path()
                 .app_data_dir()
@@ -324,6 +359,9 @@ pub fn run() {
             send_prompt,
             fetch_provider_models,
             migrate_from_env,
+            ensure_default_workspace,
+            load_app_config,
+            save_app_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

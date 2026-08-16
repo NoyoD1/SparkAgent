@@ -232,6 +232,15 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  /**
+   * v0.3.5+ 清除 active session, 回到 ChatMain 的 initial hero.
+   * 不删任何 session 数据, 单纯 deselect (activeSessionId = null).
+   * 用法: sidebar "新建任务" 按钮, 跳回首页让用户走"本地"下拉流程.
+   */
+  function clearActiveSession() {
+    activeSessionId.value = null;
+  }
+
   function selectWorkspace(id: string) {
     activeWorkspaceId.value = id;
   }
@@ -259,6 +268,7 @@ export const useSessionStore = defineStore('session', () => {
     renameSession,
     touchSession,
     selectSession,
+    clearActiveSession,
     selectWorkspace,
   };
 });

@@ -1,16 +1,19 @@
 <script setup lang="ts">
 /**
- * ChatHeader — chat title bar: "你好" title + timestamp + "在中打开" dropdown + bell.
- * 1:1 mirrors chat.html's chat header (h-12 px-4).
+ * ChatHeader — chat title bar: "你好" title + timestamp + "在中打开" dropdown + bell + 右侧 panel toggle.
+ * v2: 加 PanelRight / PanelRightClose 按钮 (从 TitleBar 下移过来) 控右侧任务摘要抽屉
  */
 import { ref, computed } from 'vue';
 import { storeToRefs } from 'pinia';
-import { MoreHorizontal, Code2, ChevronDown, Folder, ExternalLink, Bell } from 'lucide-vue-next';
+import { MoreHorizontal, Code2, ChevronDown, Folder, ExternalLink, Bell, PanelRight, PanelRightClose } from 'lucide-vue-next';
 import { useSessionStore } from '@/stores/session';
+import { useUiStore } from '@/stores/ui';
 import IconButton from '@/components/ui/IconButton.vue';
 
 const sessionStore = useSessionStore();
+const uiStore = useUiStore();
 const { activeSession } = storeToRefs(sessionStore);
+const { drawerCollapsed } = storeToRefs(uiStore);
 
 const showDropdown = ref(false);
 
@@ -65,6 +68,12 @@ const formattedTime = computed(() => {
         </button>
       </div>
       <IconButton :icon="Bell" size="sm" title="通知" />
+      <IconButton
+        :icon="drawerCollapsed ? PanelRight : PanelRightClose"
+        size="sm"
+        :title="drawerCollapsed ? '展开任务摘要' : '收起任务摘要'"
+        @click="uiStore.toggleDrawer"
+      />
     </div>
   </div>
 </template>

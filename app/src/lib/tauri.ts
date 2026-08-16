@@ -39,31 +39,45 @@ type Handler = (event: ServerToClient) => void;
 class PiTauriClient {
   private handlers = new Set<Handler>();
   private listenerStarted = false;
+  private listenerReadyPromise: Promise<void> | null = null;
 
-  private async ensureListener(): Promise<void> {
-    if (this.listenerStarted) return;
-    this.listenerStarted = true;
-    try {
-      await listen<ServerToClient>('chat:event', (e) => {
-        for (const h of this.handlers) {
-          try {
-            h(e.payload);
-          } catch (err) {
-            console.error('[pi-tauri] handler threw', err);
+  private ensureListener(): Promise<void> {
+    if (this.listenerReadyPromise) return this.listenerReadyPromise;
+    this.listenerReadyPromise = (async () => {
+      if (this.listenerStarted) return;
+      this.listenerStarted = true;
+      try {
+        await listen<ServerToClient>('chat:event', (e) => {
+          for (const h of this.handlers) {
+            try {
+              h(e.payload);
+            } catch (err) {
+              console.error('[pi-tauri] handler threw', err);
+            }
           }
-        }
-      });
-      console.log('[pi-tauri] listening on chat:event');
-    } catch (err) {
-      console.error('[pi-tauri] listen failed', err);
-      this.listenerStarted = false;
-    }
+        });
+        console.log('[pi-tauri] listening on chat:event');
+      } catch (err) {
+        console.error('[pi-tauri] listen failed', err);
+        this.listenerStarted = false;
+        this.listenerReadyPromise = null; // 允许下次重试
+      }
+    })();
+    return this.listenerReadyPromise;
   }
 
-  /** 注册事件 listener, 返回 unsubscribe */
-  on(h: Handler): () => void {
+  /**
+   * v0.3.5+ 等待 listener 注册完成再返回.
+   * 调用 sendPrompt 之前 await 一下, 避免 sidecar 早早 emit 但 JS 还没 ready 丢事件.
+   */
+  async waitForListener(): Promise<void> {
+    return this.ensureListener();
+  }
+
+  /** 注册事件 handler, **async** 因为内部要 await listener 注册. */
+  async on(h: Handler): Promise<() => void> {
     this.handlers.add(h);
-    void this.ensureListener();
+    await this.ensureListener();
     return () => this.handlers.delete(h);
   }
 
@@ -151,13 +165,60 @@ class PiTauriClient {
       label: string | null;
     }>;
   }
+
+  /**
+   * v0.3.5+ 默认工作区: 在 home dir 下创建 PiAgent/ 目录 (e.g. C:\Users\<user>\PiAgent).
+   * 初始状态发消息时无 workspace → 调这个拿一个默认地址, 不弹 picker.
+   * 用户仍可通过 sidebar / tab strip 的"本地"下拉手动选别处.
+   */
+  async ensureDefaultWorkspace(): Promise<string> {
+    return (await invoke('ensure_default_workspace')) as string;
+  }
+
+  // ====== App config (v0.3.8+: 持久化到 Rust 文件, 替代 localStorage) ======
+  // 走 Rust 持久化是因为 WebView2 缓存被清时 localStorage 也被擦, provider 配置会丢.
+  // 文件位置: %APPDATA%\com.piagent.desktop\config.json
+  async loadAppConfig(): Promise<AppConfig> {
+    return (await invoke('load_app_config')) as AppConfig;
+  }
+  async saveAppConfig(config: AppConfig): Promise<void> {
+    await invoke('save_app_config', { config });
+  }
+}
+
+// ====== App config 类型 (跟 Rust 端 config_store::AppConfig 对齐) ======
+export interface AppConfig {
+  version: number;
+  providers: AppProviderConfig[];
+  activeProviderId: string | null;
+  thinkingLevel: 'off' | 'low' | 'medium' | 'high';
+}
+export interface AppProviderConfig {
+  id: string;
+  type: string;
+  label: string;
+  baseUrl?: string;
+  apiKeyEnv?: string;
+  models: AppModelInfo[];
+  activeModelId?: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface AppModelInfo {
+  id: string;
+  label?: string;
+  enabled?: boolean;
+  fetchedAt?: string;
 }
 
 export const piTauri = new PiTauriClient();
-void piTauri['ensureListener']();
+// 模块加载时立即启动 listener (fire-and-forget), 加速首次 sendPrompt
+void piTauri.waitForListener();
 
 // 调试用: 把 piTauri 暴露到 window, 方便 F12 console 直接调
-if (typeof window !== 'undefined') {
+// R1: dev-only 守卫 — 生产构建不带这个, 防止注入脚本/扩展调 listApiKeys 等命令
+if (typeof window !== 'undefined' && import.meta.env.DEV) {
   (window as any).__piTauri = piTauri;
-  console.log('[pi-tauri] window.__piTauri exposed for console debugging');
+  console.log('[pi-tauri] window.__piTauri exposed for dev console debugging');
 }

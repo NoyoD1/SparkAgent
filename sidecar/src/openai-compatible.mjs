@@ -30,6 +30,28 @@ function send(event) {
   process.stdout.write(JSON.stringify(event) + '\n');
 }
 
+// R4: 401/403 错误体可能回显 apiKey 字面量 (e.g. "Invalid API key sk-AB***"),
+// 原样转给前端会泄露 key 片段. sanitize 掉常见 key 模式 + bearer 头痕迹.
+const KEY_PATTERNS = [
+  /\bsk-[A-Za-z0-9_\-]{4,}/g,         // OpenAI / 多数 openai-compatible
+  /\bsk-proj-[A-Za-z0-9_\-]{4,}/g,
+  /\bAKIA[0-9A-Z]{4,}/g,               // AWS
+  /\bghp_[A-Za-z0-9]{4,}/g,            // GitHub
+  /\bxai-[A-Za-z0-9]{4,}/g,            // xAI
+  /\bAIza[0-9A-Za-z_\-]{4,}/g,         // Google
+  /Bearer\s+[A-Za-z0-9_\-\.]{8,}/gi,   // 任何 "Bearer xxx" 头
+];
+function sanitizeErrBody(text) {
+  let out = text;
+  for (const re of KEY_PATTERNS) {
+    out = out.replace(re, (m) => {
+      // 保留前 2 字符 + "***" (跟 Rust mask 一致)
+      return m.length > 4 ? `${m.slice(0, 2)}***` : '***';
+    });
+  }
+  return out.slice(0, 300);  // 截断防日志爆炸
+}
+
 async function runOpenAICompatiblePrompt(config, userContent) {
   const cleanBase = config.baseUrl.replace(/\/+$/, '');
   const url = `${cleanBase}/chat/completions`;
@@ -49,6 +71,16 @@ async function runOpenAICompatiblePrompt(config, userContent) {
   const ac = new AbortController();
   currentAbortController = ac;
 
+  // 30s fetch 超时: 避免 host 端 network 死 / DNS hang 时静默卡死
+  const FETCH_TIMEOUT_MS = 30000;
+  const timeoutId = setTimeout(() => {
+    console.error(`[sidecar] !!! fetch timeout ${FETCH_TIMEOUT_MS}ms, aborting`);
+    ac.abort(new Error(`fetch timeout ${FETCH_TIMEOUT_MS}ms`));
+  }, FETCH_TIMEOUT_MS);
+
+  console.error(`[sidecar] >>> POST ${url} model=${config.model} stream=true`);
+  console.error(`[sidecar] >>> body keys: ${JSON.stringify(Object.keys(body))}, contentLen=${userContent.length}`);
+
   send({ type: 'agent_start' });
   send({ type: 'message_start' });
 
@@ -62,6 +94,14 @@ async function runOpenAICompatiblePrompt(config, userContent) {
     }
   };
 
+  // 5s 心跳: 区分"网络慢" vs "卡死"
+  let heartbeat = 0;
+  const heartbeatInterval = setInterval(() => {
+    heartbeat += 5;
+    console.error(`[sidecar] ... waiting ${heartbeat}s (fetch + stream)`);
+    if (heartbeat >= 25) clearInterval(heartbeatInterval); // 30s 之前都打, 超时后让 timeout 接管
+  }, 5000);
+
   let resp;
   try {
     resp = await fetch(url, {
@@ -74,14 +114,24 @@ async function runOpenAICompatiblePrompt(config, userContent) {
       signal: ac.signal,
     });
   } catch (e) {
+    clearTimeout(timeoutId);
+    clearInterval(heartbeatInterval);
+    console.error(`[sidecar] <<< fetch threw: ${e instanceof Error ? e.message : String(e)}`);
     send({ type: 'error', message: `Network error: ${e instanceof Error ? e.message : String(e)}` });
     finishUp();
     return;
   }
+  clearTimeout(timeoutId);
+  clearInterval(heartbeatInterval);
+
+  console.error(`[sidecar] <<< HTTP ${resp.status} content-type=${resp.headers.get('content-type')}`);
 
   if (!resp.ok || !resp.body) {
     const errText = await resp.text().catch(() => '(no body)');
-    send({ type: 'error', message: `HTTP ${resp.status}: ${errText.slice(0, 500)}` });
+    // R4: 不直接 dump 错误体, 先 sanitize 掉可能含 apiKey 字面量的模式
+    const safeErr = sanitizeErrBody(errText);
+    console.error(`[sidecar] <<< errBody (sanitized, first 300): ${safeErr}`);
+    send({ type: 'error', message: `HTTP ${resp.status}: ${safeErr}` });
     finishUp();
     return;
   }
@@ -89,21 +139,43 @@ async function runOpenAICompatiblePrompt(config, userContent) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  let totalBytes = 0;
+  let totalLines = 0;
+  let dataLines = 0;
+  let deltaChars = 0;
+  const logFirstChunks = 3; // 头 3 个 chunk 原样 dump 出来
+  let chunksLogged = 0;
+  let streamHeartbeat = 0;
+  const streamHeartbeatInterval = setInterval(() => {
+    streamHeartbeat += 5;
+    console.error(`[sidecar] ... streaming ${streamHeartbeat}s, deltas=${deltaChars} bytes=${totalBytes}`);
+    if (streamHeartbeat >= 60) clearInterval(streamHeartbeatInterval); // 60s 上限
+  }, 5000);
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      totalBytes += value.byteLength;
       buffer += decoder.decode(value, { stream: true });
+
+      if (chunksLogged < logFirstChunks) {
+        const raw = decoder.decode(value, { stream: false });
+        console.error(`[sidecar] <<< chunk#${chunksLogged + 1} ${value.byteLength}B: ${raw.slice(0, 600)}`);
+        chunksLogged += 1;
+      }
 
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
 
       for (const line of lines) {
+        totalLines += 1;
         const trimmed = line.trim();
         if (!trimmed || !trimmed.startsWith('data:')) continue;
+        dataLines += 1;
         const data = trimmed.slice(5).trim();
         if (data === '[DONE]') {
+          console.error(`[sidecar] <<< [DONE] total bytes=${totalBytes} lines=${totalLines} dataLines=${dataLines} deltas=${deltaChars}`);
           finishUp();
           return;
         }
@@ -113,22 +185,30 @@ async function runOpenAICompatiblePrompt(config, userContent) {
           if (!choice) continue;
           const delta = choice.delta?.reasoning_content || choice.delta?.content;
           if (delta) {
+            deltaChars += delta.length;
             send({ type: 'message_update', delta });
           }
           if (choice.finish_reason === 'stop' || choice.finish_reason === 'length') {
+            console.error(`[sidecar] <<< finish_reason=${choice.finish_reason} bytes=${totalBytes} dataLines=${dataLines} deltas=${deltaChars}`);
             finishUp();
             return;
           }
-        } catch {
+        } catch (e) {
+          console.error(`[sidecar] <<< JSON.parse err: ${e instanceof Error ? e.message : String(e)} line=${data.slice(0, 200)}`);
           // 忽略非 JSON 行 (注释, 心跳等)
         }
       }
     }
+    console.error(`[sidecar] <<< stream done bytes=${totalBytes} dataLines=${dataLines} deltas=${deltaChars}`);
+    clearInterval(streamHeartbeatInterval);
     finishUp();
   } catch (e) {
+    clearInterval(streamHeartbeatInterval);
     if (e instanceof Error && e.name === 'AbortError') {
+      console.error('[sidecar] <<< AbortError');
       send({ type: 'error', message: 'Aborted' });
     } else {
+      console.error(`[sidecar] <<< stream read err: ${e instanceof Error ? e.message : String(e)}`);
       send({ type: 'error', message: `Stream read error: ${e instanceof Error ? e.message : String(e)}` });
     }
     finishUp();
@@ -179,6 +259,17 @@ rl.on('line', async (line) => {
 });
 
 rl.on('close', () => {
+  // v0.3.5+: 不要立即 process.exit(0) — 此时 fetch / stream 还在 await 中,
+  // 立即退出会让 AbortController 传播不及, catch / finishUp 跑不到,
+  // 前端就只看到 agent_start / message_start 然后被 Rust fallback agent_end,
+  // 没有任何 error 反馈, 给人感觉"调通了但内容空".
+  //
+  // 正确做法: 先 abort 当前请求, 给 800ms 让 catch / finishUp 跑完发完 error / message_end,
+  // 再退出. 如果 800ms 内还在 hang (极少见), 超时强制退出.
+  console.error('[sidecar] stdin closed, aborting current request + waiting 800ms for cleanup');
   if (currentAbortController) currentAbortController.abort();
-  process.exit(0);
+  setTimeout(() => {
+    console.error('[sidecar] exit (after cleanup)');
+    process.exit(0);
+  }, 800);
 });

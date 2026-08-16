@@ -4,7 +4,7 @@
  * 1:1 mirrors chat.html's bottom composer, 但 model chip 改成 active config.
  * v3: model 菜单视觉跟 PadSelect 弹层统一 (hover 灰底 / active 紫底+左 2px accent / checkmark)
  */
-import { ref, computed } from 'vue';
+import { ref, computed, nextTick, onMounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, AlertTriangle, Star, Check } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
@@ -51,25 +51,65 @@ function openSettings() {
 
 async function send() {
   const text = inputText.value.trim();
-  if (!text || !activeSession.value) return;
+  if (!text) return;
   if (isStreaming.value) return;
   if (!hasConfig.value) {
     openSettings();
     return;
   }
   inputText.value = '';
-  await chatStore.sendPromptViaWs(activeSession.value.id, text);
+  // v0.3.5+: sendPrompt 自动确保 session 存在 (无 workspace 会弹 folder picker)
+  await chatStore.sendPrompt(text);
 }
+
+/** 外部 (ChatMain quick prompt chips 等) 调用, 填充输入框. 已有内容会追加空格 + 新文本. */
+function setText(text: string) {
+  const cur = inputText.value.trimEnd();
+  inputText.value = cur ? `${cur} ${text}` : text;
+  // 让 textarea 重新聚焦 + 高度自适应
+  nextTick(() => {
+    const ta = document.querySelector('.pad-composer__input') as HTMLTextAreaElement | null;
+    if (ta) {
+      ta.focus();
+      // 把光标放末尾
+      const len = ta.value.length;
+      ta.setSelectionRange(len, len);
+      autoResize();
+    }
+  });
+}
+
+defineExpose({ setText });
+
+// ===== v0.3.7+ textarea 自动高度 =====
+// 行为: 1 行 (24px line-height + 2*4 padding) 起步, 多行时按 scrollHeight 长高, 上限 8 行 (200px).
+// 超过 8 行 → 内部滚动 (overflow-y: auto), 整体 composer 高度不再涨, 不挤掉消息列表.
+const textareaRef = ref<HTMLTextAreaElement | null>(null);
+const COMPOSER_MAX_H = 200;
+
+function autoResize() {
+  const ta = textareaRef.value;
+  if (!ta) return;
+  ta.style.height = 'auto'; // 先重置, 才能读到真实的 scrollHeight
+  const h = Math.min(ta.scrollHeight, COMPOSER_MAX_H);
+  ta.style.height = `${h}px`;
+  ta.style.overflowY = ta.scrollHeight > COMPOSER_MAX_H ? 'auto' : 'hidden';
+}
+
+watch(inputText, () => nextTick(autoResize));
+onMounted(() => nextTick(autoResize));
 </script>
 
 <template>
   <div class="pad-composer">
     <textarea
+      ref="textareaRef"
       v-model="inputText"
       class="pad-composer__input"
       rows="2"
       :placeholder="hasConfig ? '帮你编写代码、调试 Bug、优化性能等开发工作，交付生产级代码产物。' : '先在 Settings → Providers 加个 provider, 然后回这里发消息'"
       :disabled="isStreaming"
+      @input="autoResize"
       @keydown.enter.exact.prevent="send"
     />
     <div class="pad-composer__bar">
@@ -169,20 +209,38 @@ async function send() {
   width: 100%;
   background: var(--pad-bg-input);
   border-radius: var(--pad-radius-xl);
-  padding: var(--pad-sp-3);
+  padding: 10px 12px 8px;
   position: relative;
+  /* v0.3.7+ floating shadow: 让 composer 看起来浮在消息上方 */
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.06),
+    0 2px 6px rgba(0, 0, 0, 0.03),
+    0 0 0 1px var(--pad-border);
+  transition: box-shadow var(--pad-dur-base) var(--pad-ease-out-soft);
+}
+.pad-composer:focus-within {
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.08),
+    0 4px 8px rgba(0, 0, 0, 0.04),
+    0 0 0 1px var(--pad-accent);
 }
 .pad-composer__input {
+  display: block;
   width: 100%;
   background: transparent;
   border: none;
   outline: none;
   resize: none;
   font-size: var(--pad-fs-14);
-  line-height: var(--pad-lh-base);
+  line-height: 22px;
   color: var(--pad-fg-primary);
   font-family: var(--pad-font-sans);
-  padding: 0;
+  padding: 2px 2px 0;
+  /* v0.3.8.1: 初始 2 行高 (44px), 比之前的 22px 看起来更舒服 */
+  min-height: 44px;
+  max-height: 200px;
+  overflow-y: hidden;
+  box-sizing: border-box;
 }
 .pad-composer__input:disabled {
   opacity: 0.5;
