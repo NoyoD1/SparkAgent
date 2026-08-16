@@ -112,7 +112,8 @@ function onPointerUp(e: PointerEvent) {
 .pad-resize {
   position: relative;
   width: 12px;             /* 容器扩到 12px, 给光柱留 12px 宽的范围 */
-  margin: 0 -5.5px;        /* 但视觉上仍是 1px 中心线 (12 - 1 = 11, 两侧各 5.5) */
+  /* v0.3.8.8: 去掉 margin: 0 -5.5px, 不再跨越 column gap, 12px hit area
+   * 完整落在 12px gap 内, 不会盖到 sidebar / chat / drawer 内容 */
   background: transparent;
   cursor: col-resize;
   flex-shrink: 0;

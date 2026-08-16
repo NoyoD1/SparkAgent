@@ -102,6 +102,9 @@ function onDrawerResize(w: number) {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  /* v0.3.8.8: 加 12px column gap, 让 sidebar / chat / drawer 之间有明显视觉留白,
+   * ResizeHandle 1px 分隔线落在 gap 中间 (两侧各 6px 留白) */
+  column-gap: 12px;
 }
 
 .pad-app__settings {
