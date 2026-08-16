@@ -111,9 +111,7 @@ function onPointerUp(e: PointerEvent) {
 <style scoped>
 .pad-resize {
   position: relative;
-  width: 12px;             /* 容器扩到 12px, 给光柱留 12px 宽的范围 */
-  /* v0.3.8.8: 去掉 margin: 0 -5.5px, 不再跨越 column gap, 12px hit area
-   * 完整落在 12px gap 内, 不会盖到 sidebar / chat / drawer 内容 */
+  width: 8px;              /* v0.3.8.9: 8px 容器填满 8px column gap, 1px 中心线两侧各 3.5px */
   background: transparent;
   cursor: col-resize;
   flex-shrink: 0;
@@ -139,18 +137,18 @@ function onPointerUp(e: PointerEvent) {
   opacity: 0.6;
 }
 
-/* 鼠标跟随光柱: 12px 宽, 跟着 --handle-mouse-y 移动 */
+/* 鼠标跟随光柱: 8px 宽, 跟着 --handle-mouse-y 移动 */
 .pad-resize__beam {
   position: absolute;
   top: 0;
   bottom: 0;
   left: 50%;
   transform: translateX(-50%);
-  width: 12px;
+  width: 8px;
   pointer-events: none;
   /* 上下两端完全透明, 中心 (鼠标位置) 最亮 */
   background: radial-gradient(
-    ellipse 12px 80px at 50% var(--handle-mouse-y, 50%),
+    ellipse 8px 80px at 50% var(--handle-mouse-y, 50%),
     var(--pad-accent) 0%,
     transparent 100%
   );

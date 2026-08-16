@@ -146,17 +146,27 @@ async function copyMessage() {
       </div>
     </div>
 
-    <!-- Streaming loading: 3 个跳动点 + "生成中…" -->
-    <div v-if="isStreaming && !message.content" class="pad-msg__loading">
+    <!-- v0.3.8.9: Streaming loading — 整个 stream 期间一直显示,
+     * 不再要求 !message.content (之前 thinking 流完但 content 还没来时 loading 提前消失)
+     * 位置在 thinking/tools 之后, body 之前 -->
+    <div v-if="isStreaming" class="pad-msg__loading">
       <span class="pad-msg__loading-dot"></span>
       <span class="pad-msg__loading-dot"></span>
       <span class="pad-msg__loading-dot"></span>
-      <span class="pad-msg__loading-text">生成中…</span>
+      <span class="pad-msg__loading-text">{{ message.content ? '继续生成中…' : '生成中…' }}</span>
     </div>
 
     <!-- markdown body -->
     <div v-else-if="message.content" class="pad-msg__body">
       <MarkdownContent :content="message.content" />
+    </div>
+
+    <!-- v0.3.8.9: stream 结束但 4 类内容都为空, 给个明确提示而不是静默 -->
+    <div
+      v-else-if="!isStreaming && !message.content && !hasTools && (!thinking || !thinking.content)"
+      class="pad-msg__empty"
+    >
+      <span>AI 没有返回内容</span>
     </div>
 
     <!-- Actions: 仅在非 streaming 且有内容时显示 -->
@@ -394,6 +404,17 @@ async function copyMessage() {
 .pad-msg__loading-dot:nth-child(2) { animation-delay: 0.15s; }
 .pad-msg__loading-dot:nth-child(3) { animation-delay: 0.3s; }
 .pad-msg__loading-text { margin-left: 4px; }
+
+/* v0.3.8.9: stream 结束但 4 类内容都空时的占位提示 */
+.pad-msg__empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  font-size: var(--pad-fs-12);
+  font-style: italic;
+  color: var(--pad-fg-tertiary);
+}
 
 @keyframes pad-msg-bounce {
   0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }

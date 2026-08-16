@@ -380,8 +380,8 @@ const visible = computed(() => props.turns.length >= 1);
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  /* v0.3.8.4: gap 3 → 7, 上下留白更多, 视觉呼吸感更强 */
-  gap: 7px;
+  /* v0.3.8.9: gap 7 → 8, 视觉节奏更稳 */
+  gap: 8px;
   padding: 10px 0;
   max-height: calc(100% - 64px);
   overflow-y: auto;
@@ -408,10 +408,10 @@ const visible = computed(() => props.turns.length >= 1);
    * - transform-origin left center (向右长, 不让 layout 抖)
    * - border-radius 999px (pill 形, 两端完美半圆, 不再是矩形)
    * - height 3px 让圆角明显可见
-   * - padding 6px 上下扩 hit area (鼠标好抓, hover 不会断触) */
+   * - padding 8px 上下扩 hit area (鼠标好抓, hover 不会断触, 整条垂直线像游标卡尺一样好点) */
   position: relative;
   height: 3px;
-  padding: 6px 0;
+  padding: 8px 0;
   border: none;
   border-radius: 999px;
   cursor: pointer;
