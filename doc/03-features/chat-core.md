@@ -1,8 +1,8 @@
 # Chat 核心 (Chat Core)
 
-> 状态: 🟡 80%
-> 最后更新: 2026-08-16
-> spec 涉及: `app/src/components/ChatMain/` + `app/src/stores/chat.ts` + `sidecar/src/openai-compatible.mjs`
+> 状态: 🟢 95%
+> 最后更新: 2026-08-16 (v0.4 Pi SDK 集成端到端跑通)
+> spec 涉及: `app/src/components/ChatMain/` + `app/src/stores/chat.ts` + `sidecar/src/index.mjs`
 
 ---
 
@@ -20,7 +20,8 @@
 - ✅ 工具调用（tool_call）结果展示，可折叠
 - ✅ 复制消息 / 复制代码块
 - ✅ 重试（regenerate）— 单条消息级别
-- 🟡 中断生成（Stop 按钮）— **v0.4 必做**
+- ✅ **Pi SDK 集成 v0.4** — sidecar 用 `@earendil-works/pi-ai` + `@earendil-works/pi-agent-core`,7 内置 provider + 自定义 openai-compatible (商汤等) 全跑通
+- 🟡 中断生成（Stop 按钮）— **v0.4.1 必做**
 - ❌ 编辑用户消息后重发（edit & resend）
 - ❌ 引用回复（quote & reply）
 - ❌ 消息分支（fork from message N）
@@ -47,7 +48,7 @@
 | `app/src/components/ChatMain/MarkdownContent.vue` | marked 渲染 + 代码高亮 + v-html |
 | `app/src/components/ChatMain/ChatMessageNav.vue` | 消息间导航（上下条 / 跳到最新）|
 | `app/src/stores/chat.ts` | 消息状态机 + 事件订阅 + 流式 append |
-| `sidecar/src/openai-compatible.mjs` | LLM 流式 → JSON Lines 事件 |
+| `sidecar/src/index.mjs` | Pi SDK `Agent` + `createModels` 集成 → JSON Lines 事件 (v0.4 重写) |
 
 ### 2.1 事件流（v0.3.8.6+）
 
@@ -102,6 +103,7 @@ agent_start → message_start → message_update(N) → tool_start / tool_update
 
 ## 5. Changelog
 
+- **2026-08-16 · v0.4 (Pi SDK 集成)** · sidecar 重写用 `@earendil-works/pi-ai` + `@earendil-works/pi-agent-core`,支持 7 内置 provider + 自定义 openai-compatible (商汤 deepseek-v4-flash 真 key 端到端跑通). 修了 5 字段必填 + 错误 emit + event 去重 + import 路径. ADR-0012 记录决策
 - **2026-08-16 · v0.3.8.27** · 移除 composer 上方 fade mask（用户反馈"膏药贴"）
 - **2026-08-16 · v0.3.8.26** · thinking/tools 文字色区分（`:deep(.pad-md)` + `fg-secondary`）
 - **2026-08-16 · v0.3.8.11** · thinking 默认折叠 + leak 修复
