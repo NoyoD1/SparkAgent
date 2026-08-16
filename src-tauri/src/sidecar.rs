@@ -43,6 +43,10 @@ pub struct SidecarConfig {
     /// 'off' | 'low' | 'medium' | 'high'
     #[serde(default)]
     pub thinking_level: Option<String>,
+    /// v0.3.8.11: 当前 workspace 目录绝对路径, 注入到 system message
+    /// 让 LLM 知道在哪个目录下读写文件 (注意: 实际 file system tools 还没接)
+    #[serde(default)]
+    pub workspace_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -153,6 +157,7 @@ pub fn run_prompt(app: AppHandle, config: SidecarConfig, prompt: PromptMsg) {
             "baseUrl": config.base_url,
             "apiKey": config.api_key,
             "thinkingLevel": config.thinking_level,
+            "workspacePath": config.workspace_path,
         });
         let line = match serde_json::to_string(&config_msg) {
             Ok(s) => format!("{s}\n"),

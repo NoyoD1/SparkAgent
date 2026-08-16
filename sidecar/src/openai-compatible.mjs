@@ -56,9 +56,25 @@ async function runOpenAICompatiblePrompt(config, userContent) {
   const cleanBase = config.baseUrl.replace(/\/+$/, '');
   const url = `${cleanBase}/chat/completions`;
 
+  // v0.3.8.11: 拼 messages 数组 — 如果 config.workspacePath 有值,
+  // 注入 system message 告诉 LLM "你的工作目录是 X, 用户希望你读写这里".
+  // (注意: 当前 sidecar 没有真 file system tools, LLM 只能"描述"会做什么;
+  // 后续 v0.3.9+ 接 tool_calls (write_file/read_file/list_dir) 才能真写文件.)
+  const messages = [];
+  if (config.workspacePath) {
+    messages.push({
+      role: 'system',
+      content: `你是一个 Pi Agent。你的当前工作目录 (workspace) 是: ${config.workspacePath}\n`
+        + '当用户要求你读写文件时, 你应该按这个目录为根路径操作.\n'
+        + '注意: 你当前没有实际的文件操作工具, 只能告诉用户你会怎么操作. '
+        + '如果需要真实写文件, 请在回复中明确说明 "我当前没有 write_file 工具, 无法直接创建文件".',
+    });
+  }
+  messages.push({ role: 'user', content: userContent });
+
   const body = {
     model: config.model,
-    messages: [{ role: 'user', content: userContent }],
+    messages,
     stream: true,
   };
   if (config.thinkingLevel && config.thinkingLevel !== 'off') {
@@ -246,6 +262,7 @@ rl.on('line', async (line) => {
       baseUrl: msg.baseUrl,
       apiKey: msg.apiKey,
       thinkingLevel: msg.thinkingLevel,
+      workspacePath: msg.workspacePath || null,  // v0.3.8.11: 当前 workspace 目录
     };
   } else if (msg.type === 'prompt') {
     if (!currentConfig) {

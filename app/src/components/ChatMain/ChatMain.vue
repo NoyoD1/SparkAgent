@@ -252,6 +252,7 @@ function jumpToMessage(messageId: string) {
               v-for="(msg, idx) in messages"
               :key="msg.id"
               :message="msg"
+              :session-id="activeSession?.id"
               :thinking="msg.role === 'assistant' ? thinkingByMessageId.get(msg.id) : undefined"
               :tool-calls="msg.role === 'assistant' ? (toolCallsByMessageId.get(msg.id) || []) : []"
               :model-name="activeModelName"

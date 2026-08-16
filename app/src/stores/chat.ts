@@ -225,10 +225,8 @@ export const useChatStore = defineStore('chat', () => {
             const tb2 = d2.thinking.find((t) => t.messageId === assistantId);
             if (tb2) {
               tb2.content += event.delta;
-              // 边流边展开, 流完后可手动收起
-              if (tb2.collapsed && tb2.content.length > 0) {
-                tb2.collapsed = false;
-              }
+              // v0.3.8.11: thinking 折叠状态完全由用户控制, 不再被流事件覆盖
+              // (之前流式时自动展开, message_end 自动收起 — 跟用户预期矛盾)
             }
             console.log('[chat] thinking_update len=', tb2?.content.length);
           } else {
@@ -238,11 +236,7 @@ export const useChatStore = defineStore('chat', () => {
           }
           break;
         case 'message_end':
-          // 流结束后 thinking 自动收起
-          const tb3 = d2.thinking.find((t) => t.messageId === assistantId);
-          if (tb3 && tb3.content.length > 0) {
-            tb3.collapsed = true;
-          }
+          // v0.3.8.11: 不再自动收起 thinking, 用户自己决定何时折叠
           break;
         case 'tool_start':
           // v0.3.8.6: 工具调用折叠提示
@@ -311,12 +305,17 @@ export const useChatStore = defineStore('chat', () => {
       if (!active || !model) {
         throw new Error('请先在 Settings → Providers 添加并选一个 active provider + model');
       }
+      // v0.3.8.11: 注入当前 active workspace 的 path 作为 system message
+      // (从 sessionStore 取 activeWorkspace.path, 让 LLM 知道在哪个目录下操作)
+      const activeWs = sessionStore.activeWorkspace;
+      const workspacePath = activeWs?.path ?? null;
       await piTauri.sendPrompt(sessionId, text, () => ({
         providerId: active.id,
         provider: active.type,
         model: model.id,
         baseUrl: active.baseUrl,
         thinkingLevel: config.thinkingLevel,
+        workspacePath,
       }));
       console.log('[chat] sendPrompt: piTauri.sendPrompt resolved');
     } catch (e) {
@@ -332,6 +331,17 @@ export const useChatStore = defineStore('chat', () => {
     console.warn('[chat] sendPromptViaWs() is deprecated, use sendPrompt(content) instead');
     if (sessionId) sessionStore.selectSession(sessionId);
     return sendPrompt(content);
+  }
+
+  // v0.3.8.11: 用户手动切换 thinking 折叠状态
+  // v0.3.8.6 引入流式自动展开, message_end 自动收起 — 跟用户预期矛盾,
+  // 改为完全由用户控制. ChatMessage toggle 时调这个
+  function setThinkingCollapsed(sessionId: string, thinkingId: string, collapsed: boolean) {
+    const d = getSessionData(sessionId);
+    const tb = d.thinking.find((t) => t.id === thinkingId);
+    if (!tb) return;
+    tb.collapsed = collapsed;
+    chatData.value = { ...chatData.value, [sessionId]: { ...d } };
   }
 
   /** 如果 session 还是默认名 "新任务", 用首条消息前 30 字命名 */
@@ -357,5 +367,6 @@ export const useChatStore = defineStore('chat', () => {
     clearSession,
     sendPrompt,
     sendPromptViaWs, // deprecated, kept for backward compat
+    setThinkingCollapsed,
   };
 });

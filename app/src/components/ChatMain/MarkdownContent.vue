@@ -39,7 +39,11 @@ m.use({
 });
 
 const html = computed(() => {
-  const raw = m.parse(props.content || '', { async: false }) as string;
+  let input = props.content || '';
+  // v0.3.8.11: 把 LLM 输出里的 literal `\n` `\t` 转成真换行/制表符
+  // (LLM 偶尔会输出 "\\n" 字符串而不是真换行, 之前 marked + breaks:true 不处理这两个字符)
+  input = input.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+  const raw = m.parse(input, { async: false }) as string;
   let out = raw;
   // 1. v18+ GFM 严格 bold 边界补丁 (中文 markdown 常见)
   out = out.replace(/\*\*([^*\n<>]+?)\*\*/g, '<strong>$1</strong>');

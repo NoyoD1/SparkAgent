@@ -14,10 +14,13 @@
 import { computed, ref } from 'vue';
 import { ChevronDown, ThumbsUp, ThumbsDown, Copy, RefreshCw, Wrench } from 'lucide-vue-next';
 import type { ChatMessage, ThinkingBlock, ToolCallBlock } from '@/lib/mock/types';
+import { useChatStore } from '@/stores/chat';
 import MarkdownContent from './MarkdownContent.vue';
 
 interface Props {
   message: ChatMessage;
+  /** v0.3.8.11: 所属 session id (用于 toggle thinking 时写回 store) */
+  sessionId?: string;
   thinking?: ThinkingBlock;
   defaultThinkingCollapsed?: boolean;
   /** 保留, 暂未用, 后续 thinking 块可显示"deepseek-v4-flash 思考 1 次" */
@@ -28,15 +31,25 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  defaultThinkingCollapsed: false,
+  sessionId: '',
+  defaultThinkingCollapsed: true, // v0.3.8.11: 默认折叠, 用户主动展开
   modelName: '',
   isStreaming: false,
   toolCalls: () => [],
 });
 
-const thinkingCollapsed = ref(props.defaultThinkingCollapsed);
+// v0.3.8.11: thinking 折叠状态由 store 的 thinking.collapsed 字段管理
+// ChatMessage 内部不维护 ref, 直接读 props.thinking.collapsed, toggle 时写回 store
+// 这样:
+// 1. thinking 默认 collapsed (store 初始化时 collapsed: true)
+// 2. 用户点 chev → toggleThinking 写回 store
+// 3. 流式过来时 store collapsed 不被覆盖 (旧逻辑删了)
+const thinkingCollapsed = computed(() => props.thinking?.collapsed ?? true);
+
+const chatStore = useChatStore();
 function toggleThinking() {
-  thinkingCollapsed.value = !thinkingCollapsed.value;
+  if (!props.thinking || !props.sessionId) return;
+  chatStore.setThinkingCollapsed(props.sessionId, props.thinking.id, !thinkingCollapsed.value);
 }
 
 // v0.3.8.6: tool_calls 折叠 (默认收起), 点 chev 展开看详情
@@ -219,7 +232,7 @@ async function copyMessage() {
   word-wrap: break-word;
 }
 
-/* ===== thinking 块 ===== */
+/* ===== thinking 块 (v0.3.8.11: 浅色背景替代 border-left, 避免折叠时"漏边") ===== */
 .pad-msg__thinking { margin: 0; }
 .pad-msg__thinking-toggle {
   display: inline-flex;
@@ -247,13 +260,17 @@ async function copyMessage() {
 .pad-msg__thinking-body > div { overflow: hidden; }
 .pad-msg__thinking-body.is-collapsed { grid-template-rows: 0fr; }
 .pad-msg__thinking-content {
+  /* v0.3.8.11: 去掉 border-left + padding, 改用浅色背景块包裹.
+   * 之前 border-left 距离 message body 文字左边 10px (padding-left:10px), 看起来"漏边".
+   * 现在背景块紧贴 thinking 容器左边 (padding 0), 跟 message body 文字起点对齐. */
   margin-top: 4px;
   font-size: var(--pad-fs-12);
   font-style: italic;
   color: var(--pad-fg-secondary);
   line-height: var(--pad-lh-base);
-  padding: 6px 10px;
-  border-left: 2px solid var(--pad-border);
+  padding: 8px 12px;
+  background: var(--pad-bg-100);
+  border-radius: 6px;
 }
 
 /* ===== tool calls 块 (v0.3.8.6+) ===== */

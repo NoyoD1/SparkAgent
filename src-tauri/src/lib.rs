@@ -42,6 +42,9 @@ pub struct ClientConfig {
     /// 'off' | 'low' | 'medium' | 'high'
     #[serde(default)]
     pub thinking_level: Option<String>,
+    /// v0.3.8.11: 当前 workspace 目录绝对路径, 注入 system message
+    #[serde(default)]
+    pub workspace_path: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -160,6 +163,7 @@ async fn send_prompt(
             base_url,
             api_key,
             thinking_level: config.thinking_level,
+            workspace_path: config.workspace_path,  // v0.3.8.11
         },
         sidecar::PromptMsg {
             session_id,

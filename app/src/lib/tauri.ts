@@ -94,6 +94,8 @@ class PiTauriClient {
       model: string;
       baseUrl?: string;
       thinkingLevel: ThinkingLevel;
+      /** v0.3.8.11: 当前 workspace 目录绝对路径 (用于 system message 注入 LLM) */
+      workspacePath?: string | null;
     } | null,
   ): Promise<void> {
     console.log('[pi-tauri] sendPrompt called', { sessionId, contentLen: content.length });
@@ -112,6 +114,7 @@ class PiTauriClient {
           model: cfg.model,
           baseUrl: cfg.baseUrl ?? null,
           thinkingLevel: cfg.thinkingLevel,
+          workspacePath: cfg.workspacePath ?? null,  // v0.3.8.11
         },
       });
       console.log('[pi-tauri] sendPrompt invoke resolved', res);
