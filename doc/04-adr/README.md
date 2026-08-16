@@ -12,21 +12,35 @@
 
 ## 已记录的决策
 
-| # | 标题 | 状态 | 日期 |
-|---|---|---|---|
-| — | _（暂未开 ADR，先记在 doc README / 00-product-blueprint.md 内）_ | — | — |
+| # | 标题 | 状态 | 日期 | v0.4 相关 |
+|---|---|---|---|---|
+| [0001](0001-tauri-vs-electron.md) | Tauri 2 vs Electron | Accepted | 2026-08-12 | 🟢 |
+| [0002](0002-minimalist-design.md) | Minimalist Copy 设计系统 | Accepted | 2026-08-16 | 🟢 |
+| [0003](0003-desktop-only-sidecar.md) | Desktop-only + Node sidecar 拆分 | Accepted | 2026-08-12 | 🟢 |
+| [0004](0004-byok-os-keychain.md) | BYOK + OS Keychain | Accepted | 2026-08-12 | 🟢 |
+| [0005](0005-provider-rust-file.md) | Provider 持久化 → Rust 文件 | Accepted | 2026-08-15 | 🟡 |
+| [0006](0006-marked-v18-gfm.md) | marked v18 GFM 后处理修法 | Accepted | 2026-08-15 | 🟡 |
+| [0007](0007-no-ui-library.md) | 不引入 UI 组件库 | Accepted | 2026-08-14 | 🟡 |
+| [0008](0008-tauri-invoke-listen.md) | Tauri invoke/listen 替代 WS | Accepted | 2026-08-12 | 🟢 |
+| [0009](0009-sidecar-spawn-per-prompt.md) | Sidecar 一次一 spawn | Accepted | 2026-08-12 | 🟢 |
+| [0010](0010-sidecar-direct-fetch.md) | Sidecar 直接 fetch 不引 SDK | **Superseded（v0.4 计划推翻）** | 2026-08-12 | 🟢 |
+| [0011](0011-decorations-false.md) | `decorations: false` 自定义 title bar | Accepted | 2026-08-16 | 🟡 |
 
-## 计划要补的 ADR
+> 🟢 = v0.4 实施时必参考 / 🟡 = 间接影响
 
-- ADR-0001: **Tauri 2 vs Electron**（已落地但未写文档）
-- ADR-0002: **Minimalist Copy 设计系统**（v0.3.8.19+ 切换）
-- ADR-0003: **Desktop-only 形态 + Node sidecar 拆分**（v0.3 切）
-- ADR-0004: **BYOK + OS Keychain**（v0.3 切）
-- ADR-0005: **Provider 持久化迁 localStorage → Rust 文件**（v0.3.8+）
-- ADR-0006: **marked v18 GFM 严格化的后处理修法**
-- ADR-0007: **不引入 UI 组件库（自实现）**
+## 待补的 ADR
 
-> 这些决策散落在 commit message 和 `00-product-blueprint.md` 原则里，**下一步**：每个开一个 ADR md 详写。
+- ADR-0012: **5 档嵌套调色板**（v0.3.8.25 拍板）
+- ADR-0013: **不引入 Tailwind**（v0.3.8.19 拍板）
+- ADR-0014: **API key mask 函数 `sk-***XYZW`**（v0.3.7 R5 拍板）
+- ADR-0015: **Provider ID `crypto.randomUUID()` 128-bit**（v0.3.7 R2 拍板）
+- ADR-0016: **`window.__piTauri` 仅 DEV 暴露**（v0.3.7 R1 拍板）
+- ADR-0017: **Sidecar 错误信息 sanitize 401/403**（v0.3.7 R4 拍板）
+- ADR-0018: **Vite dev 跨端口 API 代理 / Tauri 内嵌加载**（基础架构）
+- ADR-0019: **Default workspace `<home>/PiAgent/` 自动创建**（v0.3.5+）
+- ADR-0020: **Pinia `acceptHMRUpdate` 防止 HMR 丢 state**（v0.3.8.1+）
+
+> 这些是次要决策，v0.4 实施过程中如需引用再补。
 
 ## 模板
 
