@@ -395,8 +395,10 @@ function jumpToMessage(messageId: string) {
   position: absolute;
   inset: 0;
   overflow-y: auto;
-  /* v0.3.8.1: 底部 120px 留给 composer area + button + 视觉呼吸 */
-  padding: 16px 0 120px 0;
+  /* v0.3.8.7: padding-right 10px, 让浏览器原生滚动条不贴 ResizeHandle 中线,
+   * 避免鼠标在两者之间无法选中滚动条.
+   * (list-inner 是 max-width 880px margin 0 auto, 居中逻辑不受影响) */
+  padding: 16px 10px 120px 0;
 }
 .pad-chatmain__list-inner {
   display: flex;
