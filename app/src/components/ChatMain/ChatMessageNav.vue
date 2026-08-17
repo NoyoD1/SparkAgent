@@ -109,19 +109,48 @@ function positionPopover(tickEl: HTMLElement) {
   const rect = tickEl.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0) return;
   const POPOVER_W = 260;
+  // 跟 CSS max-height: 280px 对齐; 真实高度 nextTick 测一次再微调
+  const POPOVER_MAX_H = 280;
   const MARGIN = 8;
+  const vh = window.innerHeight;
+
+  // ===== 水平: tick 右侧, 不够则左侧 =====
   let left = rect.right + MARGIN;
   if (left + POPOVER_W > window.innerWidth - MARGIN) {
     left = rect.left - POPOVER_W - MARGIN;
   }
   left = Math.max(MARGIN, left);
-  const top = rect.top + rect.height / 2;
+
+  // ===== 垂直: 视口自适应 =====
+  // v0.4.2.x fix: 之前用 `transform: translateY(-50%)` 让 popover 居中在 tick 上,
+  //   tick 在视口下半时, popover 下半会覆盖 composer (跟"游标卡尺在 chat 左侧, hover 之后
+  //   tips 默认在底部显示"是一回事 — 用户看到的是 tick + popover 一起, 但 popover 把 composer 盖了).
+  //   修法: tick 在视口上半 → popover 顶部在 tick 下方; tick 在下半 → popover 底部在 tick 上方.
+  //   不用 translateY(-50%) — 改成 top 直接定位, keyframe 同步更新.
+  const tickCenter = rect.top + rect.height / 2;
+  // 估算 popover 高度 (nextTick 后可用实际高度再 clamp; 这里先用 max-height)
+  let popoverH = POPOVER_MAX_H;
+  let top: number;
+  if (tickCenter < vh / 2) {
+    // tick 在视口上半 → popover 顶部在 tick 底部 + MARGIN
+    top = rect.bottom + MARGIN;
+  } else {
+    // tick 在视口下半 → popover 底部在 tick 顶部 - MARGIN (避免覆盖 composer)
+    top = rect.top - MARGIN - popoverH;
+  }
+  // 边界兜底: 任何一边超出视口就夹紧 (例如超长 chat 让 tick 自己都在视口外)
+  if (top + popoverH > vh - MARGIN) {
+    top = vh - MARGIN - popoverH;
+  }
+  if (top < MARGIN) {
+    top = MARGIN;
+  }
   popoverStyle.value = {
     position: 'fixed',
     top: `${top}px`,
     left: `${left}px`,
     width: `${POPOVER_W}px`,
-    transform: 'translateY(-50%)',
+    // v0.4.2.x fix: 不再 translateY(-50%), top 已经是 popover 真实上边位置
     zIndex: '99999',
   };
 }
@@ -349,7 +378,7 @@ const visible = computed(() => props.turns.length >= 1);
 
     <Teleport to="body">
       <div
-        v-if="hoveredIdx !== null && turns[hoveredIdx]"
+        v-if="hoveredIdx !== null && turns[hoveredIdx] && popoverStyle.top"
         class="pad-msgnav__popover"
         :style="popoverStyle"
         @mouseenter="onPopoverEnter"
@@ -452,10 +481,18 @@ const visible = computed(() => props.turns.length >= 1);
   font-family: var(--pad-font-sans);
   pointer-events: auto;
   animation: pad-msgnav-popover-in 0.15s var(--pad-ease-out-soft, ease-out);
+  /* v0.4.2.x 兜底 (issue "标尺 tooltip 第一次错位"): 默认 position: fixed + 极远 top/left,
+   * 万一 inline style 没设或设晚, 元素不会掉到 body 末尾 (static 位置 = 视觉"底部").
+   * 配合 v-if="... && popoverStyle.top" 拆条件, 正常路径 220ms 内根本不渲染.
+   * 这条 CSS 是异常路径兜底 (e.g. 极端 race: popoverStyle 计算中 element 已经 mount). */
+  position: fixed;
+  top: -9999px;
+  left: -9999px;
 }
 @keyframes pad-msgnav-popover-in {
-  from { opacity: 0; transform: translateY(-50%) translateX(-4px); }
-  to { opacity: 1; transform: translateY(-50%) translateX(0); }
+  /* v0.4.2.x fix: popover 现在用 top 直接定位 (锚点在 tick 上下方), 不再 translateY(-50%) */
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 .pad-msgnav__popover-head {
   font-size: var(--pad-fs-11);
