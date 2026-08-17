@@ -399,6 +399,19 @@ class PiTauriClient {
     return (await invoke('write_skill_file', { args })) as string;
   }
 
+  // ====== v0.4.4.3 Skill 导入: 读本地 .md 文件 + 解析 frontmatter ======
+  async readSkillFile(path: string): Promise<{
+    path: string;
+    raw: string;
+    name: string;
+    description: string | null;
+    disableModelInvocation: boolean;
+    body: string;
+    hasFrontmatter: boolean;
+  }> {
+    return (await invoke('read_skill_file', { path })) as any;
+  }
+
   // ====== App config (v0.3.8+: 持久化到 Rust 文件, 替代 localStorage) ======
   // 走 Rust 持久化是因为 WebView2 缓存被清时 localStorage 也被擦, provider 配置会丢.
   // 文件位置: %APPDATA%\com.piagent.desktop\config.json

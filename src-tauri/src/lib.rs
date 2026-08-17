@@ -199,6 +199,134 @@ async fn write_skill_file(args: WriteSkillFileArgs) -> Result<String, String> {
     Ok(abs.to_string_lossy().to_string())
 }
 
+// ====== v0.4.4.3 Skill 导入: 从本地 .md 文件读 + 解析 frontmatter ======
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ParsedSkillFile {
+    /// 文件绝对路径
+    path: String,
+    /// 文件 raw content (UTF-8)
+    raw: String,
+    /// frontmatter 解析后的 name (从 'name: xxx' 提取), 没 frontmatter 时 = 文件 basename (无 .md)
+    name: String,
+    /// frontmatter 解析后的 description, 没 frontmatter 时 = None
+    description: Option<String>,
+    /// frontmatter 解析后的 disable-model-invocation, 没 frontmatter 时 = false
+    disable_model_invocation: bool,
+    /// frontmatter 之后的所有 markdown 内容 (strip 掉 frontmatter block), 没 frontmatter 时 = raw
+    body: String,
+    /// 是否有 frontmatter block (--- ... ---)
+    has_frontmatter: bool,
+}
+
+/// 解析 SKILL.md frontmatter (简单 line-based, 不引 YAML 库)
+/// 格式:
+///   ---
+///   name: my-skill
+///   description: Some description
+///   disable-model-invocation: false
+///   ---
+///   # body markdown
+fn parse_skill_frontmatter(raw: &str) -> ParsedSkillFile {
+    let trimmed = raw.trim_start_matches('\u{feff}'); // strip BOM
+    let lines: Vec<&str> = trimmed.lines().collect();
+
+    // 找 frontmatter block: 第一行必须是 '---', 然后找下一个 '---'
+    let has_frontmatter = lines.first().map(|l| l.trim() == "---").unwrap_or(false);
+    let (fm_end_idx, body_start_idx) = if has_frontmatter {
+        let mut end = None;
+        for (i, l) in lines.iter().enumerate().skip(1) {
+            if l.trim() == "---" {
+                end = Some(i);
+                break;
+            }
+        }
+        match end {
+            Some(e) => (e, e + 1),
+            None => (0, 0), // 没找到结束, 视为无 frontmatter
+        }
+    } else {
+        (0, 0)
+    };
+
+    // 解析 frontmatter key: value
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    let mut disable_model_invocation = false;
+    if has_frontmatter && fm_end_idx > 1 {
+        for line in &lines[1..fm_end_idx] {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            if let Some((k, v)) = line.split_once(':') {
+                let k = k.trim();
+                let v = v.trim().trim_matches('"').trim_matches('\'');
+                match k {
+                    "name" => name = Some(v.to_string()),
+                    "description" => description = Some(v.to_string()),
+                    "disable-model-invocation" => {
+                        disable_model_invocation = matches!(v.to_lowercase().as_str(), "true" | "yes" | "1");
+                    }
+                    _ => {} // 忽略未知字段
+                }
+            }
+        }
+    }
+
+    // body: frontmatter 之后的所有内容
+    let body = if has_frontmatter && body_start_idx < lines.len() {
+        lines[body_start_idx..].join("\n")
+    } else {
+        raw.to_string()
+    };
+
+    ParsedSkillFile {
+        path: String::new(), // caller 填
+        raw: raw.to_string(),
+        name: name.unwrap_or_default(),
+        description,
+        disable_model_invocation,
+        body,
+        has_frontmatter,
+    }
+}
+
+#[tauri::command]
+async fn read_skill_file(path: String) -> Result<ParsedSkillFile, String> {
+    // 1. path 必须存在 + 是文件
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("文件不存在: {}", path));
+    }
+    if !p.is_file() {
+        return Err(format!("不是文件: {}", path));
+    }
+
+    // 2. 扩展名检查 (软警告, 不阻止)
+    if p.extension().map(|e| e.to_ascii_lowercase() != "md").unwrap_or(true) {
+        // 不是 .md, 但仍读 — user 可能强制选
+    }
+
+    // 3. 读文件
+    let raw = std::fs::read_to_string(&p).map_err(|e| format!("读文件失败: {}", e))?;
+
+    // 4. 解析 frontmatter
+    let mut parsed = parse_skill_frontmatter(&raw);
+    parsed.path = std::fs::canonicalize(&p).unwrap_or(p).to_string_lossy().to_string();
+
+    // 5. 如果没 frontmatter, name 走 basename (去 .md)
+    if parsed.name.is_empty() {
+        parsed.name = parsed.path
+            .rsplit(|c| c == '/' || c == '\\')
+            .next()
+            .unwrap_or("skill")
+            .trim_end_matches(".md")
+            .to_string();
+    }
+
+    Ok(parsed)
+}
+
 // ====== LLM command ======
 
 #[tauri::command]
@@ -486,6 +614,8 @@ pub fn run() {
             save_app_config,
             // v0.4.4 Skills: 写自定义 SKILL.md 到 workspace 或 global agentDir
             write_skill_file,
+            // v0.4.4.3 Skill 导入: 读本地 .md 文件 + 解析 frontmatter
+            read_skill_file,
             // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
             sidecar::send_rpc_command,
         ])

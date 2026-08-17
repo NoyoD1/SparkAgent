@@ -18,7 +18,8 @@
  *   - 上传 .md 文件
  */
 import { ref, computed } from 'vue';
-import { ArrowLeft, Save, AlertCircle, Loader2, Check, FileText, Sparkles } from 'lucide-vue-next';
+import { ArrowLeft, Save, AlertCircle, Loader2, Check, FileText, Sparkles, Upload } from 'lucide-vue-next';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { piTauri } from '@/lib/tauri';
 import { useSessionStore } from '@/stores/session';
 
@@ -26,6 +27,9 @@ const emit = defineEmits<{
   close: [];
   created: [filePath: string];
 }>();
+
+const importState = ref<'idle' | 'importing' | 'fail'>('idle');
+const importMessage = ref<string>('');
 
 const sessionStore = useSessionStore();
 
@@ -62,6 +66,39 @@ const finalBody = computed(() => {
   }
   return `---\nname: ${name.value}\ndescription: ${description.value || '(no description)'}\n---\n\n${trimmedBody}\n`;
 });
+
+async function importFromFile() {
+  importState.value = 'importing';
+  importMessage.value = '';
+  try {
+    // 1. Tauri 2 dialog:open 选文件 (md / markdown)
+    const selected = await openDialog({
+      multiple: false,
+      title: '选择 SKILL.md 文件',
+      filters: [
+        { name: 'Markdown / SKILL.md', extensions: ['md', 'markdown'] },
+        { name: '所有文件', extensions: ['*'] },
+      ],
+    });
+    if (!selected || typeof selected !== 'string') {
+      importState.value = 'idle';
+      return;
+    }
+    // 2. invoke read_skill_file → 解析 frontmatter
+    const parsed = await piTauri.readSkillFile(selected);
+    // 3. 填到 form
+    name.value = parsed.name;
+    description.value = parsed.description ?? '';
+    // body 用 parsed.body (strip 掉 frontmatter block), 没 frontmatter 时 = raw
+    body.value = parsed.hasFrontmatter ? parsed.body : parsed.raw;
+    importState.value = 'idle';
+    importMessage.value = `已加载 ${parsed.path} (name="${parsed.name}"${parsed.description ? `, description 已填充` : ''})`;
+    console.log('[skills] imported from', parsed.path, '— name:', parsed.name, 'description:', parsed.description, 'disableModelInvocation:', parsed.disableModelInvocation);
+  } catch (e) {
+    importState.value = 'fail';
+    importMessage.value = e instanceof Error ? e.message : String(e);
+  }
+}
 
 async function submit() {
   if (!name.value.trim()) {
@@ -136,7 +173,24 @@ async function submit() {
       <p class="pad-addskill__subtitle">
         创建一个 <code>SKILL.md</code> 文件 (Pi SDK 0.84.2 <code>loadSkills</code> 格式). 走 frontmatter + markdown body.
         启用后会在每次 send_prompt 时注入 system prompt.
+        <strong>已有 SKILL.md?</strong> 下面"从文件导入"自动解析 frontmatter.
       </p>
+    </div>
+
+    <div class="pad-addskill__import-row">
+      <button
+        type="button"
+        class="pad-addskill__import-btn"
+        :disabled="importState === 'importing'"
+        @click="importFromFile"
+      >
+        <Loader2 v-if="importState === 'importing'" :size="14" :stroke-width="1.75" class="pad-addskill__spinner" />
+        <Upload v-else :size="14" :stroke-width="1.75" />
+        <span>{{ importState === 'importing' ? '加载中...' : '从文件导入 (.md)' }}</span>
+      </button>
+      <span v-if="importMessage" class="pad-addskill__import-hint" :class="{ 'is-fail': importState === 'fail' }">
+        {{ importMessage }}
+      </span>
     </div>
 
     <form class="pad-addskill__form" @submit.prevent="submit">
@@ -289,6 +343,51 @@ async function submit() {
   background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.04));
   padding: 1px 4px;
   border-radius: 3px;
+}
+
+/* v0.4.4.3 从文件导入 row */
+.pad-addskill__import-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.02));
+  border: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  border-radius: var(--pad-radius-md);
+  margin-bottom: 16px;
+}
+.pad-addskill__import-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--pad-card);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md);
+  color: var(--pad-fg-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.pad-addskill__import-btn:hover:not(:disabled) {
+  background: var(--pad-accent-primary, #6366f1);
+  border-color: var(--pad-accent-primary, #6366f1);
+  color: white;
+}
+.pad-addskill__import-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.pad-addskill__import-hint {
+  font-size: 11px;
+  color: var(--pad-fg-tertiary);
+  line-height: 1.4;
+  word-break: break-all;
+}
+.pad-addskill__import-hint.is-fail {
+  color: var(--pad-fg-warning, #d97706);
 }
 
 .pad-addskill__form {
