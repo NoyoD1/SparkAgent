@@ -85,6 +85,58 @@ const agentDir = getAgentDir();
 const hash = createHash('sha256').update(workspacePath).digest('hex').slice(0, 16);
 const sessionDir = join(agentDir, 'sessions', hash);
 
+// ====== v0.4.4 Skills (Pi SDK 暴露) ======
+// Pi SDK 0.84.2 loadSkills({cwd, agentDir, skillPaths, includeDefaults}) 自动扫
+//   - {agentDir}/skills/ (user global)
+//   - {cwd}/.pi/skills/ (project local)
+//   - skillPaths 额外路径
+// 我们 includeDefaults: true, skillPaths 从 config 透传 (FE 后续可加, 现在默认 []).
+// FE 维护 enabledSkillNames, send_prompt 时一起传 config, sidecar 据此 format
+// + 注入 system prompt (Pi SDK 0.84.2 D165 systemPrompt 不可动态改, 必须重启).
+// enabled 改变 → FE restart sidecar (新 config 传新 enabledSkillNames).
+// list_skills 不走 RpcCommand (Pi SDK 没内置), 走 sidecar 启动时 stdout 一次性
+// emit {type:'skills_snapshot', skills:[...]} (类似 v0.4.x config_ok, runRpcMode
+// 接管 stdout 之前), FE 同步解析存 skills store.
+import { loadSkills, formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
+const skillsConfig = config.skills ?? { enabledNames: [], extraPaths: [] };
+const skillsResult = loadSkills({
+  cwd: workspacePath,
+  agentDir,
+  skillPaths: skillsConfig.extraPaths ?? [],
+  includeDefaults: true,
+});
+const allSkills = skillsResult.skills;
+const skillsDiagnostics = skillsResult.diagnostics;
+const enabledSkillNames = new Set(skillsConfig.enabledNames ?? []);
+const enabledSkills = allSkills.filter((s) => enabledSkillNames.has(s.name));
+const skillsPromptFragment = enabledSkills.length > 0
+  ? '\n\n' + formatSkillsForPrompt(enabledSkills)
+  : '';
+console.error(`[sidecar] skills: loaded ${allSkills.length} total, ${enabledSkills.length} enabled, ${skillsDiagnostics.length} diagnostics`);
+if (skillsDiagnostics.length > 0) {
+  for (const d of skillsDiagnostics.slice(0, 5)) {
+    console.error(`[sidecar] skills diag: ${d.type} ${d.message} ${d.path ?? ''}`);
+  }
+}
+// v0.4.4: sidecar 启动时 emit skills_snapshot (走 stdout 一次性, 跟 RpcEvent 区分)
+//   FE 收后存 skills store (list + name + description + baseDir + disableModelInvocation).
+//   Tauri 端 sidecar.rs spawn 后, stdout 第一行非 RpcEvent (v0.5.0 RpcResponse 有 type:'response'),
+//   这里走 type:'skills_snapshot' 区分.
+//   ⚠️ 必须 runRpcMode() 之前 emit, 一旦 runRpcMode 接管 stdout 走 takeOverStdout 后, 我们写
+//   process.stdout.write 会被 buffer / 拦截. 实际 runRpcMode 接管前 stdout 已被我们占用,
+//   emit 写一行 JSON 即可, 后续 runRpcMode 接管时这一行已经 flush.
+process.stdout.write(JSON.stringify({
+  type: 'skills_snapshot',
+  skills: allSkills.map((s) => ({
+    name: s.name,
+    description: s.description,
+    filePath: s.filePath,
+    baseDir: s.baseDir,
+    disableModelInvocation: s.disableModelInvocation,
+  })),
+  diagnostics: skillsDiagnostics,
+}) + '\n');
+
 // Pi SDK 0.84.2 SessionManager.create(cwd, sessionDir, {id}) 每次用新 timestamp 创 file,
 // 不支持用 id resume. 走跟 v0.4.2 step 1 一样 setSessionFile() 走 load 模式.
 let sessionManager = SessionManager.create(workspacePath, sessionDir, { id: sessionId });
@@ -201,7 +253,14 @@ intent across the session is still part of the conversation.
       extensionFactories: config.permissionMode === 'allow'
         ? []
         : [createPermissionExtension(config.permissionMode)],
-      appendSystemPromptOverride: (base) => [...base, CONTEXT_AWARENESS_INSTRUCTION],
+      appendSystemPromptOverride: (base) => [
+        ...base,
+        CONTEXT_AWARENESS_INSTRUCTION,
+        // v0.4.4 Skills: 把 enabled skills 格式化进 system prompt (Pi SDK 0.84.2 formatSkillsForPrompt
+        //   返回 XML 格式, 跟 <context_awareness> 风格一致). enabledSkillNames 从 config 传, 改 enabled
+        //   必须重启 sidecar (D165 systemPrompt 不可动态改).
+        ...(skillsPromptFragment ? [skillsPromptFragment] : []),
+      ],
     },
   });
 

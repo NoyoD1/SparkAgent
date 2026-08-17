@@ -13,6 +13,7 @@ import SidebarTabBar from './SidebarTabBar.vue';
 import SidebarFunctionList from './SidebarFunctionList.vue';
 import WorkspaceTree from './WorkspaceTree.vue';
 import SidebarUserArea from './SidebarUserArea.vue';
+import SkillsButton from './SkillsButton.vue';
 
 defineProps<{ noActiveTabBar?: boolean }>();
 
@@ -27,6 +28,9 @@ const { sidebarCollapsed } = storeToRefs(uiStore);
   >
     <SidebarTabBar :no-active="noActiveTabBar" />
     <SidebarFunctionList />
+    <div class="pad-sidebar__skills-row">
+      <SkillsButton />
+    </div>
     <WorkspaceTree />
     <SidebarUserArea />
   </aside>
@@ -48,5 +52,14 @@ const { sidebarCollapsed } = storeToRefs(uiStore);
 }
 .pad-sidebar.is-collapsed {
   width: 52px;
+}
+
+/* v0.4.4: SkillsButton 容器 — 跟 SidebarFunctionList 风格一致, 居中显示 */
+.pad-sidebar__skills-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.04));
 }
 </style>

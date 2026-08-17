@@ -138,6 +138,20 @@ export type ServerToClient =
       result: unknown;
       isError: boolean;
     }
+  // v0.4.4 Skills (Pi SDK 暴露) — sidecar 启动时一次性 emit, FE 存 skills store
+  //   走 chat:event channel (跟 RpcEvent 共用), payload 不是 RpcEvent 而是 sidecar 自定义协议
+  //   (类似 v0.4.x config_ok, runRpcMode 接管 stdout 之前 emit). 没 sessionId (跟 session 无关).
+  | {
+      type: 'skills_snapshot';
+      skills: Array<{
+        name: string;
+        description: string;
+        filePath: string;
+        baseDir: string;
+        disableModelInvocation: boolean;
+      }>;
+      diagnostics: Array<{ type: string; message: string; path?: string }>;
+    }
   // v0.4.2 step 1+ retry (5x exponential backoff, Pi SDK AgentSession 内置)
   | {
       type: 'auto_retry_start';
@@ -261,6 +275,10 @@ class PiTauriClient {
       /** v0.4.2 step 1+: per-workspace stable sessionId (从 configStore.perWorkspaceSessionId 读),
        *  让 sidecar 用同一 session 加载历史. undefined 时 sidecar 内部生成新 id. */
       sessionId?: string | null;
+      /** v0.4.4 Skills (Pi SDK 暴露): FE 维护 enabled skill names (存 localStorage),
+       *  send_prompt 时传 sidecar, sidecar 走 formatSkillsForPrompt 注入 system prompt.
+       *  enabled 改变必须重启 sidecar (D165 systemPrompt 不可动态改). */
+      skills?: { enabledNames: string[]; extraPaths?: string[] };
     } | null,
   ): Promise<void> {
     console.log('[pi-tauri] sendPrompt called', { sessionId, contentLen: content.length });
@@ -282,6 +300,7 @@ class PiTauriClient {
           workspacePath: cfg.workspacePath ?? null,  // v0.3.8.11
           permissionMode: cfg.permissionMode ?? 'ask',  // v0.4.1+ tool permission 初始值
           sessionId: cfg.sessionId ?? null,  // v0.4.2 step 1+
+          skills: cfg.skills ?? { enabledNames: [] },  // v0.4.4 Skills (Pi SDK 暴露)
         },
       });
       console.log('[pi-tauri] sendPrompt invoke resolved', res);

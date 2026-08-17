@@ -16,6 +16,7 @@ import { piTauri } from '@/lib/tauri';
 import { useConfigStore } from './config';
 import { useSessionStore } from './session';
 import { useUiStore } from './ui';
+import { useSkillsStore } from './skills';
 
 export type { ChatMessage, ThinkingBlock, ToolCallBlock, Step };
 
@@ -630,6 +631,11 @@ export const useChatStore = defineStore('chat', () => {
       //   写回), 改用 ensureSessionIdForWorkspace 拿保证存在的 id (没就生成 v4 UUID + persist),
       //   修"AI 永远第一次对话"bug
       const piSessionId = workspacePath ? config.ensureSessionIdForWorkspace(workspacePath) : undefined;
+      // v0.4.4 Skills (Pi SDK 暴露): 传 enabled skill names 给 sidecar, 走 formatSkillsForPrompt
+      //   注入 system prompt override. enabledByName 改后必须重启 sidecar (D165 systemPrompt
+      //   不可动态改), SkillsButton toggle 触发 Tauri sidecar kill+spawn.
+      const skills = useSkillsStore();
+      const enabledNames = skills.getEnabledNames();
       await piTauri.sendPrompt(sessionId, text, () => ({
         providerId: active.id,
         provider: active.type,
@@ -639,6 +645,7 @@ export const useChatStore = defineStore('chat', () => {
         workspacePath,
         permissionMode,
         sessionId: piSessionId,
+        skills: { enabledNames },
       }));
       console.log('[chat] sendPrompt: piTauri.sendPrompt resolved');
     } catch (e) {
