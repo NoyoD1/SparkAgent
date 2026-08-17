@@ -185,9 +185,24 @@ src-tauri\binaries\pi-agent-sidecar-x86_64-pc-windows-msvc.exe  108 MB  (Tauri �
 | 8758554 | doc sync | v0.5.7 — ADR-0017 status proposed → accepted + Architecture/Roadmap 同步 v0.5.0-v0.5.6 状态 |
 | 33fc5fa | release | **v0.5.8** — Tauri 2 标准 sidecar 机制 (D172 跨项目规则), 补 v0.5.6 漏的 `bundle.externalBin` + `app.shell().sidecar()`, 干净 Windows 机器 install MSI/NSIS 真能跑 |
 
-### 后续 (v0.5.8+ 待做)
+### v0.5.9 端到端验证 PASS (2026-08-17 23:07)
 
-- [ ] **v0.5.9 验证**: 拷 v0.5.8 NSIS installer 到干净 Windows 机器 install, 验证 sidecar.exe 自动部署 + 4 轮对话 memory test + 重启 .exe history 还在 (D166 端到端未验警告)
+**user 在干净 Windows 机器 install NSIS installer, 7 个核心场景全 PASS**:
+
+| # | 场景 | 状态 |
+|---|---|---|
+| 1 | 安装 (NSIS installer 走完, 装到 install_dir/) | ✅ |
+| 2 | Provider 配置 (LLM provider 接入, key 走 keychain) | ✅ |
+| 3 | 对话 send (消息流正常) | ✅ |
+| 4 | 工具调用 (tool executor 跑通) | ✅ |
+| 5 | think (thinking blocks 显示 OK) | ✅ |
+| 6 | 权限二次确认 (PermissionDialog 弹窗正常) | ✅ |
+| 7 | 上下文记忆 (多轮对话 history 累积, AI 记得之前聊过) | ✅ |
+
+完整 v0.5 cycle 收官: Phase 1-3 + 3 hotfix + 1 release 收尾 + 1 doc sync + 1 Tauri 2 sidecar 机制补全 + 1 端到端验证 = 14 commits, 全部 landed + 端到端验过.
+
+### 后续 (v0.5.9+ 待做)
+
 - [ ] v0.4.3: compaction 按钮 (UI 暴露 Pi SDK compact RPC, 跟 context 计数集成)
 - [ ] v0.4.4: 长期记忆 + 向量检索 + Context Manager 中央协调
 - [ ] v0.5.1: image tab 完整化 (multipart upload + drag-drop + preview)
