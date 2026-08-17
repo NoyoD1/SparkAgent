@@ -263,7 +263,6 @@ export const useChatStore = defineStore('chat', () => {
         case 'tool_end':
         case 'agent_end':
         case 'error':
-        case 'permission_request':  // v0.4.1+ tool permission 走单独流程, 不在这里处理
           // 这些 case 都需要 idx >= 0 (message_start 之后才走)
           if (idx < 0) {
             console.warn(`[chat] ${event.type} before assistant message created, ignoring`);

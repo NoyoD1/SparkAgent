@@ -235,13 +235,14 @@ function removeSession(id: string) {
               <span class="pad-wstree__session-dot" v-if="activeSessionId === s.id" />
               <MessageCircle v-else :size="11" :stroke-width="1.75" class="pad-wstree__session-icon" />
               <span class="pad-wstree__session-title">{{ s.title || '新任务' }}</span>
+              <!-- v0.4.1.5+: 删除按钮统一在右侧, 默认半透明显眼但弱化, hover 完全不透明
+                   (之前: 只 active 或 hover 显示, 位置/可见性不统一) -->
               <button
                 class="pad-wstree__session-del"
-                :class="{ 'is-shown': activeSessionId === s.id }"
                 title="删 session"
                 @click.stop="removeSession(s.id)"
               >
-                <Trash2 :size="10" :stroke-width="1.75" />
+                <Trash2 :size="11" :stroke-width="1.75" />
               </button>
             </div>
             <button
@@ -520,7 +521,8 @@ function removeSession(id: string) {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px;
+  /* v0.4.1.5+: 紧凑 padding, 避免 item 上下超宽 (用户反馈上下超宽只能一行显示) */
+  padding: 3px 8px;
   border-radius: var(--pad-radius-lg);
   background: transparent;
   border: 1px solid transparent;
@@ -551,7 +553,7 @@ function removeSession(id: string) {
 /* v0.4.1.3: streaming 跑马灯底部条 — 经典 marching ants 效果,
    session 在后台跑时, item 底部 2px accent gradient 横向循环移动,
    user 一眼看出哪些 session 在跑 (不用看 dot)
-   不依赖 is-active (就算没选中也能看到 streaming 状态)
+   不依赖 is-active (就算没选中也能看到 streaming 状态) */
 .pad-wstree__session.is-streaming {
   position: relative;
   overflow: hidden;
@@ -597,6 +599,9 @@ function removeSession(id: string) {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  /* v0.4.1.5+: 强制单行, 避免父容器子元素 line-height 撑高 */
+  display: block;
+  line-height: 1.3;
 }
 .pad-wstree__session-del {
   flex-shrink: 0;
@@ -610,16 +615,17 @@ function removeSession(id: string) {
   border: none;
   border-radius: var(--pad-radius-sm);
   cursor: pointer;
-  opacity: 0;
+  /* v0.4.1.5+: 默认半透明让位置统一可见, hover 完全不透明突出 */
+  opacity: 0.35;
   transition: opacity var(--pad-dur-fast) ease, background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
 }
-.pad-wstree__session:hover .pad-wstree__session-del,
-.pad-wstree__session-del.is-shown {
+.pad-wstree__session:hover .pad-wstree__session-del {
   opacity: 1;
 }
 .pad-wstree__session-del:hover {
   background: var(--pad-danger-subtle);
   color: var(--pad-danger-text);
+  opacity: 1;
 }
 .pad-wstree__session-empty {
   padding: 4px 8px;
