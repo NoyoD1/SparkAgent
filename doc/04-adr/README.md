@@ -26,6 +26,7 @@
 | [0010](0010-sidecar-direct-fetch.md) | Sidecar 直接 fetch 不引 SDK | **Superseded by 0012** | 2026-08-12 | 🟢 |
 | [0011](0011-decorations-false.md) | `decorations: false` 自定义 title bar | Accepted | 2026-08-16 | 🟡 |
 | [0012](0012-pi-sdk-integration.md) | 集成 pi-ai + pi-agent-core | Accepted | 2026-08-16 | 🟢 |
+| [0013](0013-session-manager-compact.md) | v0.4.2 上下文管理 (createAgentSession + SessionManager) | Accepted | 2026-08-17 | 🟢 |
 
 > 🟢 = v0.4 实施时必参考 / 🟡 = 间接影响
 
