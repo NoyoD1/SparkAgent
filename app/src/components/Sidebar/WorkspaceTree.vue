@@ -550,36 +550,46 @@ function removeSession(id: string) {
   /* v0.3.8.3: 选中态左边加一条 3px 圆角 accent 高亮条, 不再是纯矩形背景 */
   box-shadow: inset 3px 0 0 var(--pad-accent);
 }
-/* v0.4.1.3: streaming 跑马灯底部条 — 经典 marching ants 效果,
-   session 在后台跑时, item 底部 2px accent gradient 横向循环移动,
-   user 一眼看出哪些 session 在跑 (不用看 dot)
-   不依赖 is-active (就算没选中也能看到 streaming 状态) */
+/* v0.4.1.7+1: streaming 流光 — 整 item 区域一道 shine 软波, 永远在容器内
+   (v0.4.1.7 用 50% 宽 + no-repeat + 200% 移位, 数学无缝但 shine 只在容器内一半时间,
+    剩下 50% 时间容器全空, 边界循环时明显"亮→空→亮"顿挫)
+   新方案: 100% 宽渐变 + repeat + 7-stop 软过渡 (transparent 头尾 + 中间 60% 渐亮渐暗波峰)
+   - 整张 tile 始终覆盖容器, shine 永远在容器内某处, 没有"空"阶段
+   - animation 移位正好 100% = 一格, 数学无缝
+   - 软过渡 (15% / 30% / 50% / 70% / 85% 5 个非透明 stop) 让 shine 出入边缘是淡入淡出而不是硬切
+   - 慢一档到 1.8s, 让视觉更"流淌"而不是"刷刷" */
 .pad-wstree__session.is-streaming {
   position: relative;
   overflow: hidden;
 }
-.pad-wstree__session.is-streaming::after {
+.pad-wstree__session.is-streaming::before {
   content: '';
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2px;
+  inset: 0;
+  border-radius: inherit;
   background: linear-gradient(
     90deg,
     transparent 0%,
-    var(--pad-accent) 30%,
-    var(--pad-accent) 70%,
+    transparent 15%,
+    var(--pad-accent-200) 30%,
+    var(--pad-accent-300) 50%,
+    var(--pad-accent-200) 70%,
+    transparent 85%,
     transparent 100%
   );
-  background-size: 50% 100%;
-  background-repeat: repeat-x;
-  animation: pad-wstree-march 0.8s linear infinite;
+  background-size: 100% 100%;
+  background-repeat: repeat;
+  animation: pad-wstree-shimmer 1.8s linear infinite;
   pointer-events: none;
+  z-index: 0;
 }
-@keyframes pad-wstree-march {
-  from { background-position: 0% 0; }
-  to { background-position: 50% 0; }
+.pad-wstree__session.is-streaming > * {
+  position: relative;
+  z-index: 1;
+}
+@keyframes pad-wstree-shimmer {
+  from { background-position: 0 0; }       /* shine 波峰在容器中点 */
+  to   { background-position: -100% 0; }  /* 平移一格 (100% = 一个 tile 宽) → 数学无缝 */
 }
 .pad-wstree__session-dot {
   width: 6px;
