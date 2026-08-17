@@ -102,6 +102,8 @@ function emptyAppConfig() {
     thinkingLevel: 'medium' as 'off' | 'low' | 'medium' | 'high',
     // v0.4.1+: tool permission mode (跟 Rust config_store 默认 ask 对齐)
     permissionMode: 'ask' as PermissionMode,
+    // v0.4.2 step 1+: per-workspace stable sessionId, 让 sidecar 加载同一 session 历史
+    perWorkspaceSessionId: {} as Record<string, string>,
   };
 }
 
@@ -151,6 +153,8 @@ export const useConfigStore = defineStore('config', () => {
   const thinkingLevel = ref<'off' | 'low' | 'medium' | 'high'>(initial.thinkingLevel);
   // v0.4.1+ tool permission mode
   const permissionMode = ref<PermissionMode>(initial.permissionMode);
+  // v0.4.2 step 1+: per-workspace stable sessionId (key=workspacePath, value=sessionId uuidv7)
+  const perWorkspaceSessionId = ref<Record<string, string>>({});
   const loaded = ref(false);  // v0.3.8+: init() 完成后置 true
   const saving = ref(false);  // 写入 Rust 中, UI 可以 disable input
 
@@ -171,6 +175,10 @@ export const useConfigStore = defineStore('config', () => {
       // v0.4.1+: permission mode. 旧 config.json 没这字段 → undefined → 走 'ask' fallback
       const pm = (cfg.permissionMode as any) || 'ask';
       permissionMode.value = (pm === 'ask' || pm === 'smart' || pm === 'allow') ? pm : 'ask';
+      // v0.4.2 step 1+: per-workspace sessionId 映射. 旧 config.json 没这字段 → undefined → 空对象
+      perWorkspaceSessionId.value = (cfg.perWorkspaceSessionId && typeof cfg.perWorkspaceSessionId === 'object')
+        ? cfg.perWorkspaceSessionId
+        : {};
       // 如果读出来的字段跟默认不同, 主动落一次盘 (修旧数据)
       if (tl !== thinkingLevel.value) {
         console.log('[config] init: normalized thinkingLevel', JSON.stringify(tl), '->', thinkingLevel.value);
@@ -237,6 +245,7 @@ export const useConfigStore = defineStore('config', () => {
         activeProviderId: activeProviderId.value,
         thinkingLevel: thinkingLevel.value,
         permissionMode: permissionMode.value,
+        perWorkspaceSessionId: perWorkspaceSessionId.value,  // v0.4.2 step 1+
       });
     } catch (e) {
       console.error('[config] save failed', e);
@@ -247,7 +256,7 @@ export const useConfigStore = defineStore('config', () => {
 
   // deep watch: 任一字段变 → persist
   watch(
-    [providers, activeProviderId, thinkingLevel, permissionMode],
+    [providers, activeProviderId, thinkingLevel, permissionMode, perWorkspaceSessionId],
     () => {
       void persist();
     },
@@ -392,12 +401,35 @@ export const useConfigStore = defineStore('config', () => {
     }
   }
 
+  // ====== v0.4.2 step 1+: per-workspace sessionId getter/setter ======
+  /**
+   * 拿 workspace 关联的 sessionId. 第一次没设过 → 返回 undefined (sidecar 会自动生成新 id).
+   * 注意: 切 workspace 时用 setSessionIdForWorkspace 同步写回去 (即使 undefined 也要清旧值, 防 workspace 改名残留).
+   */
+  function getSessionIdForWorkspace(workspacePath: string): string | undefined {
+    return perWorkspaceSessionId.value[workspacePath];
+  }
+  /**
+   * 设置 workspace 关联的 sessionId. 同步写回 config_store, 切回时 sidecar 走同一 session.
+   * 传 undefined 移除 (workspace 改名 / 删了后清理).
+   */
+  function setSessionIdForWorkspace(workspacePath: string, sessionId: string | undefined) {
+    if (sessionId === undefined) {
+      const next = { ...perWorkspaceSessionId.value };
+      delete next[workspacePath];
+      perWorkspaceSessionId.value = next;
+    } else {
+      perWorkspaceSessionId.value = { ...perWorkspaceSessionId.value, [workspacePath]: sessionId };
+    }
+  }
+
   return {
     // state
     providers,
     activeProviderId,
     thinkingLevel,
     permissionMode,
+    perWorkspaceSessionId,  // v0.4.2 step 1+
     loaded,
     saving,
     // computed
@@ -407,6 +439,7 @@ export const useConfigStore = defineStore('config', () => {
     allEnabledModels,
     // functions
     enabledModels,
+    getSessionIdForWorkspace,  // v0.4.2 step 1+
     // actions
     init,
     addProvider,
@@ -418,6 +451,7 @@ export const useConfigStore = defineStore('config', () => {
     setActiveProvider,
     setThinkingLevel,
     setPermissionMode,
+    setSessionIdForWorkspace,  // v0.4.2 step 1+
     clearAll,
     migrateFromLocalStorage,
   };

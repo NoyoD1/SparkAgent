@@ -48,6 +48,10 @@ pub struct ClientConfig {
     /// v0.4.1+ tool permission 初始 mode: 'ask' (默认) | 'smart' | 'allow'
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// v0.4.2 step 1+: per-workspace stable sessionId (从 AppConfig.per_workspace_session_id[workspace] 读),
+    /// 让 sidecar 用同一 session 加载历史. None 时 sidecar 内部生成新 sessionId (跟 v0.4.1 兼容).
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -160,6 +164,12 @@ async fn send_prompt(
     ));
     // v0.4.1+ active sidecar map 由 .manage() 注册, 这里 clone Arc 出来 owned (要在 move app 前)
     let active = app.state::<std::sync::Arc<sidecar::ActiveSidecars>>().inner().clone();
+    // v0.4.2 step 1+: 从 AppConfig.per_workspace_session_id 读 sessionId (per-workspace stable)
+    // 让 sidecar 用同一 session 加载历史, 实现短期记忆 + per-workspace 隔离
+    let session_id_for_sidecar = match (&config.workspace_path, &config.session_id) {
+        (Some(ws), Some(sid)) if !ws.is_empty() && !sid.is_empty() => Some(sid.clone()),
+        _ => None,
+    };
     sidecar::run_prompt(
         app,
         sidecar::SidecarConfig {
@@ -170,6 +180,7 @@ async fn send_prompt(
             thinking_level: config.thinking_level,
             workspace_path: config.workspace_path,  // v0.3.8.11
             permission_mode: config.permission_mode.unwrap_or_else(|| "ask".to_string()),  // v0.4.1+
+            session_id: session_id_for_sidecar,  // v0.4.2 step 1+
         },
         sidecar::PromptMsg {
             session_id: session_id.clone(),
@@ -381,6 +392,8 @@ pub fn run() {
             // v0.4.1+ tool permission
             sidecar::send_permission_response,
             sidecar::set_permission_mode,
+            // v0.4.2 step 1+ context management
+            sidecar::compact_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

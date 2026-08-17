@@ -76,6 +76,77 @@ beforeToolCall: async (ctx, signal) => {
 
 FE 端 (`app/src/components/ChatMain/PermissionDialog.vue`): 弹窗让用户点"允许/拒绝", 调 `sendPermissionResponse(toolCallId, allow)` → sidecar 把结果 resolve 给 `beforeToolCall`.
 
+## 后续 Review (v0.4.2 step 1, 2026-08-17)
+
+**实现位置变更**: v0.4.1 实现是 `new Agent({ beforeToolCall: async (ctx, signal) => {...} })` 直接给 Agent. v0.4.2 切 `createAgentSession` 后, **`createAgentSession` 不暴露 `beforeToolCall` 选项** (sdk.ts:297-363 `agent = new Agent({...})` 只传 initialState/streamFn/onPayload/onResponse/sessionId/transformContext/steeringMode/followUpMode/transport/thinkingBudgets/maxRetryDelayMs, 没有 beforeToolCall 字段).
+
+**改走 Extension API**:
+
+```javascript
+import { DefaultResourceLoader, getAgentDir } from '@earendil-works/pi-coding-agent';
+
+// 1. 写 extension factory (module-level 引用 currentPermissionMode + pendingPermissionRequests)
+const permissionExtensionFactory = (pi) => {
+  pi.on('tool_call', async (event, ctx) => {
+    const mode = currentPermissionMode;
+    if (mode === 'allow') return;
+    if (mode === 'smart' && SMART_READ_ONLY_TOOLS.has(event.toolName)) return;
+    return new Promise((resolve) => {
+      const signal = ctx?.signal;
+      if (signal) {
+        signal.addEventListener('abort', () => {
+          pendingPermissionRequests.delete(event.toolCallId);
+          resolve({ block: true, reason: 'Aborted by user' });
+        }, { once: true });
+      }
+      pendingPermissionRequests.set(event.toolCallId, { resolve });
+      send({
+        type: 'permission_request',
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        args: event.input,
+        sessionId: currentSessionId,
+      });
+    });
+  });
+};
+
+// 2. 注入 ResourceLoader
+const customResourceLoader = new DefaultResourceLoader({
+  cwd: workspacePath,
+  agentDir: getAgentDir(),
+  extensionFactories: [
+    { name: 'pi-agent-permission', factory: permissionExtensionFactory, hidden: true },
+  ],
+});
+await customResourceLoader.reload();
+
+// 3. createAgentSession
+const { session } = await createAgentSession({
+  cwd: workspacePath,
+  model,
+  tools: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'],
+  sessionManager,
+  resourceLoader: customResourceLoader,
+});
+```
+
+**Pi SDK 内部自动桥接** (实测 grep 出来的):
+- `agent-session.ts:480-499` `_installAgentToolHooks` 创建 Agent 时, **自动装** `this.agent.beforeToolCall = async ({toolCall, args}) => runner.emitToolCall({type: "tool_call", toolName, toolCallId, input: args})`
+- 这意味着任何 `pi.on("tool_call", handler)` 注册的 handler 自动被 beforeToolCall 流程调用, **sidecar 不需要手动桥接**
+
+**Event 字段差异** (写扩展时注意):
+- 旧 beforeToolCall ctx: `ctx.toolCall.name`, `ctx.toolCall.id`, `ctx.args`
+- 新 ToolCallEvent: `event.toolName`, `event.toolCallId`, `event.input`
+- 旧返回值: `undefined` / `{ block: true, reason }`
+- 新返回值: `undefined` / `{ block: true, reason, terminate? }` (新增 `terminate` 字段 — 阻止 + 当前 batch 后 stop, ADR-0014 不强制用, 留作未来"批量 deny"扩展)
+
+**`ctx.signal` 获取**: Extension `ExtensionContext` 含 `signal` 字段, 可以 `ctx?.signal` 拿 AbortSignal. 旧实现直接传 `signal` 作为第 2 参数, 新实现要走 ctx.
+
+**没变更的决策**: 3 模式 ask/smart/allow + 4 个 read-only tool 白名单 + 默认 ask + 持久化到 config_store — 全部沿用. 只是实现路径从 `beforeToolCall hook` 改成 `Extension pi.on("tool_call")`.
+
+**没 Revisit 的部分**: Smart 白名单写死 / 写类仍 confirm / "批量允许 this session" 按钮 — 仍是 v0.5+ Revisit 候选.
+
 持久化: `currentPermissionMode` 存 Tauri `config_store` (FE 重启后恢复).
 
 **默认**: `ask` (最安全), 用户进 Settings → 权限设置 主动改 smart / allow.

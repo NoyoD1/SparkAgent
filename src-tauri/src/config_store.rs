@@ -34,6 +34,11 @@ pub struct AppConfig {
     /// 旧 config.json 没这字段 → 默认 'ask' (跟 v0.4.1 推荐一致, 防首次用户误删)
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    /// v0.4.2 step 1+: 每 workspace 关联 sessionId (key=workspace 绝对路径, value=sessionId uuidv7).
+    /// 切回 workspace 时让 sidecar 加载同一 session, 实现短期记忆 (per-workspace 隔离).
+    /// 旧 config.json 没这字段 → 默认空 HashMap, 第一次切 workspace 时 sidecar 会生成新 sessionId.
+    #[serde(default)]
+    pub per_workspace_session_id: std::collections::HashMap<String, String>,
 }
 
 fn default_thinking_level() -> String {

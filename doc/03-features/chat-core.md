@@ -93,6 +93,55 @@ agent_start → turn_start → message_start → message_update(N) → [tool_sta
 - `.pad-chatmain__composer-area` max-width 880px → **720px**（跟 list-inner 同步）
 - `.pad-hero__composer` + `.pad-hero__tabstrip` 已经 720px, 不动
 
+### 2.5 上下文管理 (v0.4.2 step 1, 2026-08-17)
+
+**核心**: `createAgentSession` + `SessionManager` (per-workspace 隔离) + Extension API (tool permission).
+
+**架构**:
+- **Sidecar**: `createAgentSession({cwd, model, sessionManager, resourceLoader, tools: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']})` 一行替代 v0.4.1 `new Agent({...})`
+- **SessionManager**: 自动持久化 user / assistant / tool_call / tool_result / model_change / thinking_level_change / compaction 7 类 entry 到 `<agentDir>/sessions/<sha256(workspace).slice(0,16)>/<timestamp>_<sessionId>.jsonl`
+- **Extension API**: `pi.on("tool_call", handler)` 接管 permission 3 模式 (ask/smart/allow), 走 `DefaultResourceLoader({ extensionFactories: [...] })` 注入
+- **per-workspace 隔离**: `workspacePath` 走 sha256 前 16 位 → 目录 hash. 切 workspace = 走不同目录 = session 互不污染
+- **per-workspace stable sessionId**: FE configStore.perWorkspaceSessionId[workspacePath] 存 sessionId, 切回时 sidecar 走 `setSessionFile(<existing file>)` 加载历史
+
+**IPC 事件 (FE 端可见)**:
+- `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage }` / `auto_retry_end { success, attempts, finalError? }` — 替代 v0.4.2 partial 的 `retry_*`. AgentSession 内置 5x 指数退避 (1s/2s/4s/8s/16s)
+- `compaction_start { reason: 'manual' | 'threshold' | 'overflow' }` / `compaction_end { reason, success, willRetry, errorMessage? }` — 手动或自动触发压缩
+- `entry_appended` (内部事件, FE 不需要, sidecar 跳过)
+
+**IPC 入口 (FE 主动调用)**:
+- `compact_session { sessionId }` → 走 `session.compact()` 触发手动压缩
+
+**FE 配置持久化 (Rust config_store)**:
+- `AppConfig.perWorkspaceSessionId: HashMap<workspacePath, sessionId>` — v0.4.2 step 1 新增字段, 旧 config.json 没这字段 → 默认空 `{}`
+
+**端到端测试指南 (用户验证)**:
+1. 启 app (`cargo tauri dev` 或生产 .exe)
+2. 配商汤 (active provider)
+3. **Test1 workspace**: 连发 5 条消息 ("你是谁", "1+1=?", "今天天气?", "1+2?", "OK 谢谢")
+4. **切 Test2 workspace**: 发 1 条 ("1+1=?"), 验证 AI **不记得** Test1 的对话 (新 session)
+5. **切回 Test1**: 发 1 条 ("1+1=?"), 验证 AI **记得** 前 5 条 (同 session 加载历史)
+6. 验证文件落盘: `ls ~/.pi/agent/sessions/59445b43e6b9508e/` 应该看到 `<timestamp>_<sessionId>.jsonl`, 里面 entry 包含 user/assistant messages
+7. 验压缩: 跑超长 session (e.g. 50 turn) → sidecar log 应看到 `compaction_start: reason=threshold` 自动触发
+
+**Smoke test 自动化验证** (`sidecar/test-smoke-session-persistence.mjs`):
+- ✅ Scenario 1: 新建 session — `~/.pi/agent/sessions/<hash>/<timestamp>_<sessionId>.jsonl` 存在, 5 行 (header + model_change + thinking + user + assistant)
+- ✅ Scenario 2: Resume session — 同 sessionId 走同一 file, 5 → 7 行 (新 user + assistant append), 不创建新 file
+- ✅ Scenario 3: Compaction — `compaction_start: reason=manual` + `compaction_end: reason=manual success=false err=Compaction failed: Nothing to compact (session too small)` (Pi SDK 拒绝太小的 session, 事件仍正确 emit)
+- ✅ Scenario 4: 跨 workspace 隔离 — WS_A 走 `59445b43e6b9508e`, WS_B 走 `7497e943a06416a7`, session header cwd 各自正确
+
+**Smoke test 自动化验证 (permission 4/4, 来自 test-smoke-permission.mjs)**:
+- ✅ ask 模式: permission_request 收到 → tool 拒绝
+- ✅ allow 模式: tool 直接放行
+- ✅ 运行时 set_permission_mode ask → allow 切换生效
+- ✅ smart 模式: 读类 (read/ls/find/grep) 自动放行
+
+**已知限制**:
+- 没做"重试单条消息"按钮 (单 assistant message 重发) — P1 后续
+- compaction FE UI 暂未加 (只是 log), 后续如果用户反馈需要再加 ui store 状态
+- session 文件可能 > 100MB 长对话 → v0.4.3+ 考虑 gzip
+- session 启动慢 ~150-300ms (vs v0.4.1 `new Agent` ~50ms) — ResourceLoader + ExtensionRunner + SettingsManager 启动开销
+
 ---
 
 ## 3. 已知问题 / 限制
@@ -126,6 +175,7 @@ agent_start → turn_start → message_start → message_update(N) → [tool_sta
 
 ## 5. Changelog
 
+- **2026-08-17 · v0.4.2 step 1 (smoke 4/4 PASS)** · `createAgentSession` + `SessionManager` per-workspace 隔离 + Extension API 接管 tool permission + 4 个新 IPC 事件 (`auto_retry_*` / `compaction_*`) + 1 个新 IPC 入口 (`compact_session`). 4 个 ADR 加 ## 后续 Review 段 (0012/0013/0014/0015). 详细见 §2.5
 - **2026-08-17 · v0.4.1.3 polish** · session 跑马灯 marching ants（别人 agent session 跑时也能看到）+ chat 内容收窄 880→720. user feedback "session 跑马灯效果 (别人 agent 界面)" + "中间回复内容的区域还是太宽了"
 - **2026-08-17 · v0.4.1.2 fix** · final body 渲染 `lastStep.stepText`（per-turn 隔离, 不跨 turn 重复）+ step UI 美化（标题 12px fg-tertiary, thinking fs-11 italic + 灰底, tool_call fs-11 mono 紧凑）. user feedback "内容重复" + "step UI 不够精致"
 - **2026-08-17 · v0.4.1.1 fix** · step 默认全折叠 (current step 也折叠) + 删 stepText 在 step 内重复渲染. user feedback "内容重复" + "默认展开太占地方"

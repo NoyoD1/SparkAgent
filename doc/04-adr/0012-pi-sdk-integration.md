@@ -15,6 +15,48 @@
 
 **用法规则 (2026-08-17 立)**: 涉及 Pi SDK 任何改动前, **必须先看上述文档** (README + 主要 .ts/.md), 再 grep `pi-sdk/packages/{ai,agent,coding-agent}/src/`. 不要等 user 跑出 bug 再回来抓瞎. 5 字段必填 + cost 必填 + event name (`tool_call_*` vs `tool_execution_*`) 这些坑, 文档里都有, 是 AI 没看就写导致的.
 
+## 后续 Review (v0.4.2 step 1, 2026-08-17)
+
+**实施细节变更**: v0.4.2 step 1 调研发现 `createAgentSession` 比 `new Agent` 强大得多, 把 sidecar 原本打算自写的 3 个机制**全部交给 Pi SDK 内置**:
+
+| 原计划 (v0.4.1 调研时) | Pi SDK 内置 (v0.84.2) | 决策 |
+|---|---|---|
+| sidecar 自写 5x retry 状态机 | `AgentSession` 内置 `auto_retry_start` / `auto_retry_end` (agent-session.ts:2700-2726), 退避 `baseDelayMs * 2^(attempt-1)` | ✅ 用 SDK 内置 |
+| sidecar 自管 session 文件持久化 | `SessionManager` 自动 `~/.pi/agent/sessions/<id>.jsonl` | ✅ 用 SDK 内置 |
+| sidecar 监听 `tool_execution_start` 前置拦截 permission | `Extension API` `pi.on("tool_call", handler)` → `ToolCallEventResult { block, reason, terminate }` (AgentSession 内部 `agent.beforeToolCall = runner.emitToolCall` 自动桥接) | ✅ 走 Extension |
+
+**集成方式更新**:
+- 旧 (v0.4.1): `new Agent({initialState, streamFn, beforeToolCall})` + 手动 session 管理
+- 新 (v0.4.2): `createAgentSession({cwd, model, sessionManager, resourceLoader, tools: ["read", "bash", "edit", "write", "grep", "find", "ls"]})` + 内置 `session.prompt()` / `session.subscribe()` / `session.compact()` / `session.abort()`
+
+**ResourceLoader 注入自定义 Extension** (用于 permission hook):
+```javascript
+const permissionExtension = (pi) => {
+  pi.on("tool_call", async (event, ctx) => { /* 3 模式逻辑 */ });
+};
+const loader = new DefaultResourceLoader({
+  cwd, agentDir: getAgentDir(),
+  extensionFactories: [{ name: "pi-agent-permission", factory: permissionExtension, hidden: true }],
+});
+const { session } = await createAgentSession({ cwd, model, resourceLoader: loader, ... });
+```
+
+**没变更的决策**: 7 内置 + 自定义 provider 模式 + 6 字段必填 + cost 必填 + 7 tool 工厂 — 全部不变. 只是从 `new Agent` 升级到 `createAgentSession`, 多走 ResourceLoader + SettingsManager + ExtensionRunner (启动慢 ~200ms, ADR-0013 接受).
+
+**新增的 4 个 AgentSession 事件 (→ IPC 协议)**:
+- `compaction_start { reason }` / `compaction_end { reason, result, aborted, willRetry, errorMessage? }`
+- `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage }` / `auto_retry_end { success, attempt, finalError? }`
+- `entry_appended { entry }` — sidecar 内部持久化事件, **不进 IPC** (FE 不需要)
+
+**关键 Pi SDK 内部发现 (实测时 grep 出来的)**:
+- `agent-session.ts:480-499` `_installAgentToolHooks`: AgentSession 创建时 `this.agent.beforeToolCall = async ({toolCall, args}) => runner.emitToolCall({...})`, 任何 `pi.on("tool_call")` handler 自动接管
+- `sdk.ts:247-254` 默认 active tool 4 个 (read/bash/edit/write), **必须传 `options.tools` 全 7 个** 才能激活 grep/find/ls
+- `agent-session.ts:2571` `_buildRuntime` 默认 `createAllToolDefinitions(cwd)` 注册全部 7 个 — 不需要 `customTools` 字段
+
+**为什么用 SDK 内置 retry 而不是坚持自写**: ADR-0015 决策"5x retry 1s/2s/4s/8s/16s"不变, 只是实现路径从 sidecar 自写状态机改成订阅 `auto_retry_start`/`auto_retry_end`. 用 SDK 内置的好处: (1) 跟 compaction / session_start 风格统一 (2) 省 200 行 sidecar 代码 (3) SDK 0.85+ 升级自动拿到新能力.
+
+**没 Revisit 的部分**: Provider 映射 / 6 字段必填 / cost 必填 / 7 tool 工厂 / auth 走 OS keychain — 全部沿用.
+
 **当前 npm 版本**: `@earendil-works/pi-ai@0.84.2` + `@earendil-works/pi-agent-core@0.84.2` + `@earendil-works/pi-coding-agent@0.84.2` (2026-08-17 装). 文档 main 分支可能跟 npm 同步也可能不, **遇到不一致以 npm 包内 dist/ 实际行为为准**, 但文档是 first stop.
 
 ## 背景

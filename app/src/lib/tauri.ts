@@ -38,9 +38,12 @@ export type ServerToClient =
   | { type: 'error'; message: string; sessionId: string }
   // v0.4.1+ tool permission: sidecar 问 FE "LLM 想跑 X tool, 允许吗"
   | { type: 'permission_request'; toolCallId: string; toolName: string; args: Record<string, unknown>; sessionId: string }
-  // v0.4.2+ LLM 错误自动重试: 5 次指数退避 (1s/2s/4s/8s/16s), sidecar 在 attempt 间隔 emit retry_start
-  | { type: 'retry_start'; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string; sessionId: string }
-  | { type: 'retry_end'; success: boolean; attempts: number; finalError?: string; aborted?: boolean; sessionId: string };
+  // v0.4.2 step 1 (AgentSession 内置): 5 次指数退避 (1s/2s/4s/8s/16s), AgentSession 内部自动 retry, 走 auto_retry_* 事件
+  | { type: 'auto_retry_start'; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string; sessionId: string }
+  | { type: 'auto_retry_end'; success: boolean; attempts: number; finalError?: string; sessionId: string }
+  // v0.4.2 step 1 (AgentSession 内置): 上下文压缩, 走 reason (manual / threshold / overflow) + result / willRetry / errorMessage
+  | { type: 'compaction_start'; reason: 'manual' | 'threshold' | 'overflow'; sessionId: string }
+  | { type: 'compaction_end'; reason: 'manual' | 'threshold' | 'overflow'; success: boolean; willRetry: boolean; errorMessage?: string; sessionId: string };
 
 type Handler = (event: ServerToClient) => void;
 
@@ -106,6 +109,9 @@ class PiTauriClient {
       workspacePath?: string | null;
       /** v0.4.1+ tool permission mode (ask / smart / allow), 初始值 */
       permissionMode?: 'ask' | 'smart' | 'allow';
+      /** v0.4.2 step 1+: per-workspace stable sessionId (从 configStore.perWorkspaceSessionId 读),
+       *  让 sidecar 用同一 session 加载历史. undefined 时 sidecar 内部生成新 id. */
+      sessionId?: string | null;
     } | null,
   ): Promise<void> {
     console.log('[pi-tauri] sendPrompt called', { sessionId, contentLen: content.length });
@@ -126,6 +132,7 @@ class PiTauriClient {
           thinkingLevel: cfg.thinkingLevel,
           workspacePath: cfg.workspacePath ?? null,  // v0.3.8.11
           permissionMode: cfg.permissionMode ?? 'ask',  // v0.4.1+ tool permission 初始值
+          sessionId: cfg.sessionId ?? null,  // v0.4.2 step 1+
         },
       });
       console.log('[pi-tauri] sendPrompt invoke resolved', res);
@@ -157,6 +164,17 @@ class PiTauriClient {
   async setPermissionMode(mode: 'ask' | 'smart' | 'allow'): Promise<void> {
     console.log('[pi-tauri] setPermissionMode', { mode });
     await invoke('set_permission_mode', { mode });
+  }
+
+  // ====== v0.4.2 step 1+ context management IPC ======
+  /**
+   * 手动压缩当前 session 的历史. 走 AgentSession.compact() (LLM-driven summary, 跟 Pi 主线一致).
+   * 触发后 sidecar 会 emit compaction_start → compaction_end 事件, FE 在 chat store 显示 toast / banner.
+   * @param sessionId - 当前 session 的 id (per-workspace)
+   */
+  async compactSession(sessionId: string): Promise<void> {
+    console.log('[pi-tauri] compactSession', { sessionId });
+    await invoke('compact_session', { sessionId });
   }
 
   // ====== Keychain API ======
@@ -232,6 +250,12 @@ export interface AppConfig {
   thinkingLevel: 'off' | 'low' | 'medium' | 'high';
   /** v0.4.1+ tool permission 模式 (跟 Rust config_store permission_mode 对齐, 旧 config.json 缺这字段) */
   permissionMode?: 'ask' | 'smart' | 'allow';
+  /**
+   * v0.4.2 step 1+: 每个 workspace 关联的 sessionId (uuid v7), 切回 workspace 时让 sidecar 加载同一 session.
+   * key = workspace 绝对路径, value = sessionId (跟 SessionManager 文件 <id>.jsonl 对应).
+   * 旧 config.json 没这字段 → 默认空对象, 第一次切 workspace 时 sidecar 会生成新 sessionId.
+   */
+  perWorkspaceSessionId?: Record<string, string>;
 }
 export interface AppProviderConfig {
   id: string;

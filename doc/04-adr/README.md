@@ -36,26 +36,27 @@
 
 ## 已记录的决策
 
-| # | 标题 | 状态 | 日期 | v0.4 相关 |
-|---|---|---|---|---|
-| [0001](0001-tauri-vs-electron.md) | Tauri 2 vs Electron | Accepted | 2026-08-12 | 🟢 |
-| [0002](0002-minimalist-design.md) | Minimalist Copy 设计系统 | Accepted | 2026-08-16 | 🟢 |
-| [0003](0003-desktop-only-sidecar.md) | Desktop-only + Node sidecar 拆分 | Accepted | 2026-08-12 | 🟢 |
-| [0004](0004-byok-os-keychain.md) | BYOK + OS Keychain | Accepted | 2026-08-12 | 🟢 |
-| [0005](0005-provider-rust-file.md) | Provider 持久化 → Rust 文件 | Accepted | 2026-08-15 | 🟡 |
-| [0006](0006-marked-v18-gfm.md) | marked v18 GFM 后处理修法 | Accepted | 2026-08-15 | 🟡 |
-| [0007](0007-no-ui-library.md) | 不引入 UI 组件库 | Accepted | 2026-08-14 | 🟡 |
-| [0008](0008-tauri-invoke-listen.md) | Tauri invoke/listen 替代 WS | Accepted | 2026-08-12 | 🟢 |
-| [0009](0009-sidecar-spawn-per-prompt.md) | Sidecar 一次一 spawn | Accepted | 2026-08-12 | 🟢 |
-| [0010](0010-sidecar-direct-fetch.md) | Sidecar 直接 fetch 不引 SDK | **Superseded by 0012** | 2026-08-12 | 🟢 |
-| [0011](0011-decorations-false.md) | `decorations: false` 自定义 title bar | Accepted | 2026-08-16 | 🟡 |
-| [0012](0012-pi-sdk-integration.md) | 集成 pi-ai + pi-agent-core | Accepted | 2026-08-16 | 🟢 |
-| [0013](0013-session-manager-compact.md) | v0.4.2 上下文管理 (createAgentSession + SessionManager) | Accepted | 2026-08-17 | 🟢 |
-| [0014](0014-tool-permission-3-modes.md) | Tool permission 3 模式 (ask/smart/allow) | Accepted | 2026-08-17 | 🟢 |
-| [0015](0015-llm-retry-5x-exponential-backoff.md) | LLM 失败 5 次指数退避重试 (1s/2s/4s/8s/16s) | Accepted | 2026-08-17 | 🟢 |
-| [0016](0016-stream-hang-watchdog.md) | Stream hang watchdog (30s 没新 event → abort + finishUp 兜底) | Accepted | 2026-08-17 | 🟢 |
+| # | 标题 | 状态 | 日期 | v0.4 相关 | 后续 Review |
+|---|---|---|---|---|---|
+| [0001](0001-tauri-vs-electron.md) | Tauri 2 vs Electron | Accepted | 2026-08-12 | 🟢 | - |
+| [0002](0002-minimalist-design.md) | Minimalist Copy 设计系统 | Accepted | 2026-08-16 | 🟢 | - |
+| [0003](0003-desktop-only-sidecar.md) | Desktop-only + Node sidecar 拆分 | Accepted | 2026-08-12 | 🟢 | - |
+| [0004](0004-byok-os-keychain.md) | BYOK + OS Keychain | Accepted | 2026-08-12 | 🟢 | - |
+| [0005](0005-provider-rust-file.md) | Provider 持久化 → Rust 文件 | Accepted | 2026-08-15 | 🟡 | - |
+| [0006](0006-marked-v18-gfm.md) | marked v18 GFM 后处理修法 | Accepted | 2026-08-15 | 🟡 | - |
+| [0007](0007-no-ui-library.md) | 不引入 UI 组件库 | Accepted | 2026-08-14 | 🟡 | - |
+| [0008](0008-tauri-invoke-listen.md) | Tauri invoke/listen 替代 WS | Accepted | 2026-08-12 | 🟢 | - |
+| [0009](0009-sidecar-spawn-per-prompt.md) | Sidecar 一次一 spawn | Accepted | 2026-08-12 | 🟢 | - |
+| [0010](0010-sidecar-direct-fetch.md) | Sidecar 直接 fetch 不引 SDK | **Superseded by 0012** | 2026-08-12 | 🟢 | - |
+| [0011](0011-decorations-false.md) | `decorations: false` 自定义 title bar | Accepted | 2026-08-16 | 🟡 | - |
+| [0012](0012-pi-sdk-integration.md) | 集成 pi-ai + pi-agent-core | Accepted | 2026-08-16 | 🟢 | [§实施细节变更 (v0.4.2 step 1)](#0012-后续-review) — new Agent → createAgentSession + Extension API 接管 tool call |
+| [0013](0013-session-manager-compact.md) | v0.4.2 上下文管理 (createAgentSession + SessionManager) | Accepted | 2026-08-17 | 🟢 | [§后续 Review](#0013-后续-review-v042-step-1-2026-08-17) — 调研发现 AgentSession 内置 auto_retry_* / compaction_* 事件 + permission 改 Extension |
+| [0014](0014-tool-permission-3-modes.md) | Tool permission 3 模式 (ask/smart/allow) | Accepted | 2026-08-17 | 🟢 | [§后续 Review](#0014-后续-review-v042-step-1-2026-08-17) — 实现从 beforeToolCall 改 Extension pi.on("tool_call") |
+| [0015](0015-llm-retry-5x-exponential-backoff.md) | LLM 失败 5 次指数退避重试 (1s/2s/4s/8s/16s) | Accepted | 2026-08-17 | 🟢 | [§后续 Review](#0015-后续-review-v042-step-1-2026-08-17) — 实现从 sidecar 自写状态机改用 AgentSession 内置 auto_retry_*, IPC 事件名 retry_* → auto_retry_* |
+| [0016](0016-stream-hang-watchdog.md) | Stream hang watchdog (30s 没新 event → abort + finishUp 兜底) | Accepted | 2026-08-17 | 🟢 | - |
 
 > 🟢 = v0.4 实施时必参考 / 🟡 = 间接影响
+> **后续 Review 列**: 该 ADR 是否被后续实施细节调整 (只加 "## 后续 Review" 段, 不改原决策)
 
 ## 待补的 ADR（次要决策, 引用时再补）
 

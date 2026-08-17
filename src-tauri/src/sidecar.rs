@@ -56,6 +56,11 @@ pub struct SidecarConfig {
     /// v0.4.1+ tool permission 初始 mode: 'ask' (默认) | 'smart' | 'allow'
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    /// v0.4.2 step 1+: per-workspace stable sessionId (uuid v7), 让 sidecar 用同一 session 加载历史.
+    /// FE 从 AppConfig.per_workspace_session_id[workspace_path] 读, 切 workspace 时同步.
+    /// 第一次没有 → sidecar 内部生成一个 (跟 v0.4.1 兼容).
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 fn default_permission_mode() -> String {
@@ -81,6 +86,12 @@ pub struct PermissionResponseMsg {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SetPermissionModeMsg {
     pub mode: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompactSessionMsg {
+    /// sessionId 用来定位到指定 sidecar 进程的 stdin
     pub session_id: String,
 }
 
@@ -185,7 +196,7 @@ pub fn run_prompt(
             }
         };
 
-        // 写 config (含 v0.4.1+ permissionMode)
+        // 写 config (含 v0.4.1+ permissionMode + v0.4.2 step 1+ sessionId)
         let config_msg = serde_json::json!({
             "type": "config",
             "provider": config.provider,
@@ -195,6 +206,7 @@ pub fn run_prompt(
             "thinkingLevel": config.thinking_level,
             "workspacePath": config.workspace_path,
             "permissionMode": config.permission_mode,
+            "sessionId": config.session_id,
         });
         let line = match serde_json::to_string(&config_msg) {
             Ok(s) => format!("{s}\n"),
@@ -350,6 +362,30 @@ pub async fn set_permission_mode(
         .write_all(line.as_bytes())
         .await
         .map_err(|e| format!("write set_permission_mode: {e}"))?;
+    Ok(())
+}
+
+/// v0.4.2 step 1+: FE 端手动触发压缩 (e.g. 用户在 UI 点了"压缩历史"按钮).
+/// 调 AgentSession.compact() 走 LLM-driven summary, 自动 persist 到 session.jsonl.
+/// 期间 sidecar 会 emit compaction_start → compaction_end, FE 显示 toast / banner.
+#[tauri::command]
+pub async fn compact_session(
+    msg: CompactSessionMsg,
+    active: State<'_, Arc<ActiveSidecars>>,
+) -> Result<(), String> {
+    debug_log(&format!("compact_session: session={}", msg.session_id));
+    let mut map = active.0.lock().await;
+    let stdin = map
+        .get_mut(&msg.session_id)
+        .ok_or_else(|| format!("no active sidecar for session={}", msg.session_id))?;
+    let ipc = serde_json::json!({
+        "type": "compact_session",
+    });
+    let line = format!("{}\n", serde_json::to_string(&ipc).map_err(|e| format!("ser: {e}"))?);
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| format!("write compact_session: {e}"))?;
     Ok(())
 }
 

@@ -163,6 +163,68 @@ const { session } = await createAgentSession({
 
 或者用 pi-coding-agent 提供的 `toolPolicy` / `permissionHandler` API（如果存在的话）。**实施时先查文档**，没 API 就在 tool execute 前做异步等待。
 
+## 后续 Review (v0.4.2 step 1, 2026-08-17)
+
+**调研推翻了两条 ADR 假设**:
+
+1. **§3 Permission hook 适配 错了** — 实施发现正确的做法不是监听 `tool_execution_start` (那是 tool 已经开始了, 拦截不了), 而是走 **Extension API** `pi.on("tool_call", handler)`:
+   - Pi SDK `agent-session.ts:480-499` `_installAgentToolHooks` 创建 Agent 时自动装 `this.agent.beforeToolCall = async ({toolCall, args}) => runner.emitToolCall({type: "tool_call", toolName, toolCallId, input: args})`
+   - 任何 `pi.on("tool_call", handler)` 自动接管, 返回 `ToolCallEventResult { block?, reason?, terminate? }` 决定行为
+   - `block: true` → 阻止 (Pi SDK 自动 emit error tool result), `terminate: true` → 当前 batch 后 stop
+   - 走 `DefaultResourceLoader({ extensionFactories: [{ name, factory, hidden: true }] })` 注入
+
+2. **§2 事件映射表错了 `entry_appended`** — 实施发现 `entry_appended { entry: SessionEntry }` 包含 session 内部所有持久化条目 (message / model_change / thinking_level_change / compaction), 不只是 entry. sidecar 应该 **过滤掉** `entry_appended` 不进 IPC, FE 不需要 (只 sidecar 内部用).
+
+**新增实施细节** (实测时确认的):
+
+- `createAgentSession` 接受 `sessionManager` 字段 (sdk.ts:81), 我们传 `SessionManager.create(cwd, sessionDirFor(cwd), { id: sessionId })`
+- `sessionManager.getSessionId()` 拿 sessionId, `sessionManager.buildSessionContext()` 读历史 messages
+- `session.prompt(text, { streamingBehavior: "steer" | "followUp" })` 提交用户消息, **不是** `agent.continue()` (AgentSession 内部管理 history, 没有 continue)
+- `session.subscribe(listener)` 收 `AgentSessionEvent` (包含所有 `AgentEvent` + 5 个 session-level: `compaction_start` / `compaction_end` / `entry_appended` / `auto_retry_start` / `auto_retry_end` / `agent_settled`)
+- `session.compact()` 手动压缩 (FE 端通过 IPC `compact_session` 触发)
+- `session.abort()` 取消当前 run
+
+**Per-workspace 隔离实施**:
+```javascript
+import { createHash } from 'crypto';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+function sessionDirFor(workspacePath) {
+  const hash = createHash('sha256').update(workspacePath).digest('hex').slice(0, 16);
+  return join(homedir(), '.pi', 'agent', 'sessions', hash);
+}
+const sessionDir = sessionDirFor(workspacePath);
+const sessionManager = SessionManager.create(workspacePath, sessionDir, { id: sessionId });
+```
+
+`SessionManager.create` 第二个参数 (sessionDir) 是**目录**, 不是文件路径. SessionManager 内部拼接 `<id>.jsonl` 落到该目录. 所以**per-workspace 隔离 = 目录 hash, sessionId 在目录内** (`~/.pi/agent/sessions/<hash>/<sessionId>.jsonl`).
+
+**sessionId 流程**:
+- FE 切 workspace 时, 读 `perWorkspaceSessionId.get(workspacePath) || uuidv7()`
+- 把 sessionId 通过 IPC `config { sessionId, workspacePath }` 传给 sidecar
+- sidecar 用来 `SessionManager.create(..., { id: sessionId })`, 决定落哪个文件
+- 同一 workspace 多次 session: sessionId 唯一, 多次 prompt 自动 append
+- 切走 workspace: sessionManager 不需要 unload, sidecar 全局保留 (内存状态)
+- 切回 workspace: 用原 sessionId 重新 create, SessionManager 读历史 messages 自动恢复
+
+**Active tool 7 个全激活** (重要):
+- `createAgentSession` 默认只激活 4 个 built-in (read/bash/edit/write), grep/find/ls 不会自动激活
+- 解决: `createAgentSession({ tools: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'] })` 显式传
+
+**ADR-0013 §后果 跟现实略有差异**:
+- 写的是"启动慢 ~200ms" — 实测 ~150-300ms 浮动, 跟 system load 有关
+- 写的是"Permission hook 要重写" — ✅ 已重写, 改 Extension (上面)
+- 写的是"Pi SDK API 还在 0.84 早期" — 0.84.2 实施时 API 稳定, 没有发现 breaking issue
+
+**新增的 IPC 协议事件** (FE chat store + tauri.ts 要同步改):
+- `compaction_start { reason: "manual" | "threshold" | "overflow", sessionId }` — FE 显示 "正在压缩历史" toast
+- `compaction_end { reason, success, willRetry, errorMessage?, sessionId }` — FE 隐藏 toast, 失败时显示 banner
+- `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage, sessionId }` — **替代 v0.4.2 partial 的 `retry_start`**, 跟 Pi SDK 对齐
+- `auto_retry_end { success, attempts, finalError?, sessionId }` — **替代 v0.4.2 partial 的 `retry_end`**
+
+**删 v0.4.2 partial 的 `retry_start` / `retry_end`**: 之前 (commit `88d05ea`) sidecar 自写 retry 状态机, 事件名 `retry_start` / `retry_end`. v0.4.2 step 1 改用 SDK 内置后, **事件名从 `retry_*` 改 `auto_retry_*`** (跟 Pi SDK 对齐, 跟 `compaction_*` 风格统一). FE 端 chat store + tauri.ts + ChatMessage.vue retry banner 代码要同步改.
+
 ### 4. 跨 session 持久化
 
 - sessionId 由 FE 给（每个 workspace 一个稳定 sessionId）

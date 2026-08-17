@@ -13,6 +13,7 @@
 | v0.3 | Tauri 化 | 桌面 app + OS keychain + Node sidecar | ✅ | 2026-08 上 |
 | v0.3.5 - v0.3.8.27 | UX Polish | 布局 / 主题 / 折叠 / 字体 / 设计系统 | ✅ | 2026-08 中 |
 | **v0.4** | **Tool Call 真正落地** | 文件读/写 / shell / 权限确认 / abort | 🟡 (4/6) | **2026-08 中** |
+| **v0.4.2 step 1** | **上下文管理 (createAgentSession + SessionManager per-workspace 隔离)** | 短期记忆 / 跨 workspace 隔离 | 🟢 (4/4 smoke PASS) | **2026-08-17** |
 | v0.5 | Memory | 跨会话 / 项目级 / 自动提取 | ⚪ | TBD |
 | v0.6 | Skills + MCP | 自定义指令 + MCP server 接入 | ⚪ | TBD |
 | v0.7 | Subagent / Plan | 多 agent 切换 / Plan 模式 | ⚪ | TBD |
@@ -43,6 +44,16 @@
 - ❌ item 5 Session 持久化 v0.4.2 集成
 - ❌ item 6 Workspace 路径校验 + 危险命令黑名单（v0.4 必做未做）
 
+**v0.4.2 step 1 完成项 (2026-08-17)**:
+- ✅ `createAgentSession` 切 `new Agent` (commit 落地中, smoke test 4/4 PASS — 新建/resume/compaction/跨 workspace 隔离)
+- ✅ Tool permission 改走 Extension `pi.on("tool_call", handler)` (走 `DefaultResourceLoader` 注入, Pi SDK 内部桥接)
+- ✅ LLM retry 改用 AgentSession 内置 `auto_retry_*` 事件, 删 sidecar 自写状态机 (commit `88d05ea` 的 200 行代码移除)
+- ✅ 4 个新 IPC 事件: `compaction_start` / `compaction_end` / `auto_retry_start` / `auto_retry_end` (替代 v0.4.2 partial 的 `retry_*`)
+- ✅ 1 个新 IPC 入口: `compact_session` (手动触发压缩)
+- ✅ per-workspace session 目录隔离 (sha256(workspace) 前 16 位 → `<agentDir>/sessions/<hash>/`)
+- ✅ per-workspace stable sessionId 持久化 (FE configStore.perWorkspaceSessionId 走 Rust config_store)
+- ✅ 4 个 ADR 加 `## 后续 Review` 段说明实施细节变更 (0012/0013/0014/0015), README 加 "后续 Review" 列
+
 ### 必做项（v0.4 6 项）
 
 | # | 项 | spec | 状态 | 验收 |
@@ -51,7 +62,7 @@
 | 2 | **7 个 tool 集成**（v0.4.1 反转用 `pi-coding-agent`，不是自写）| [tools.md](03-features/tools.md) | ✅ v0.4.1 | LLM 能读 / 写 workspace 内文件 + 跑命令 + 浏览；走 pi-coding-agent 工厂 (D102) |
 | 3 | **Tool permission system**（v0.4 最关键）| [tools.md](03-features/tools.md) + [security.md](03-features/security.md) | ❌ 未做 | 每个 tool call 用户显式 confirm（至少第一次），白名单 / 黑名单 |
 | 4 | **Abort / Stop button** | [chat-core.md](03-features/chat-core.md) | ❌ 未做 | 用户能中断生成 + tool call（kill sidecar 子进程）|
-| 5 | **Session 持久化**（v0.4.2 用 `pi-coding-agent` SessionManager）| [session.md](03-features/session.md) | 🟡 部分 | 重新打开 session 能看到 messages + tool calls + tool results（v0.4.1 message.steps 已落内存，v0.4.2 落盘）|
+| 5 | **Session 持久化**（v0.4.2 用 `pi-coding-agent` SessionManager + createAgentSession）| [session.md](03-features/session.md) | ✅ v0.4.2 step 1 | per-workspace 隔离的短期记忆: 切 workspace 走不同 session 目录, 切回走同一 session file, 持久化到 `~/.pi/agent/sessions/<hash>/<timestamp>_<sessionId>.jsonl` |
 | 6 | **Workspace 路径校验 + 危险命令黑名单** | [security.md](03-features/security.md) | ❌ 未做 | tool 拒绝 path traversal (`../` etc)；`rm -rf /` `mkfs` 等拦截 |
 
 ### Pi SDK 集成细节（item 1 + 2 — v0.4.1 最终版）

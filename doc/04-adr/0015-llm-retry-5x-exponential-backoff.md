@@ -81,6 +81,74 @@ IPC 协议加 2 事件:
 - `retry_start { attempt, maxAttempts, delayMs, errorMessage, sessionId }`
 - `retry_end { success, attempts, finalError?, aborted?, sessionId }`
 
+## 后续 Review (v0.4.2 step 1, 2026-08-17)
+
+**实现路径变更** (决策不变): v0.4.2 step 1 调研发现 `AgentSession` (pi-coding-agent 0.84+) **已经内置 LLM retry 状态机**, 没必要 sidecar 自写.
+
+**Pi SDK 内置 retry** (agent-session.ts:2700-2726):
+```typescript
+const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
+this._emit({
+  type: "auto_retry_start",
+  attempt: this._retryAttempt,
+  maxAttempts: ...,
+  delayMs,
+  errorMessage: ...,
+});
+// ... 走 prompt 再次
+this._emit({
+  type: "auto_retry_end",
+  success: true | false,
+  attempt: ...,
+  finalError?: ...,
+});
+```
+
+**关键差异**:
+1. **触发条件**: AgentSession 在 `agent.state.messages[last].stopReason === "error"` 时自动 retry (line 670-675). 跟 sidecar 自己拦截 `error` 事件等价.
+2. **退避算法**: `baseDelayMs * 2^(attempt-1)`, **跟 ADR-0015 的 [1s, 2s, 4s, 8s, 16s] 完全一致** (baseDelayMs=1000 + maxRetries=5)
+3. **不重 add user message**: AgentSession 内部走 prompt continuation, 跟 sidecar `agent.continue()` 等价
+4. **providerRetrySettings.maxRetries = 5**: 通过 SettingsManager 注入, sidecar 不需要自己数
+
+**实施变更**:
+- 旧 (v0.4.2 partial commit `88d05ea`): sidecar 自写 200 行 retry 状态机 (line 547-688), 拦截 `error` / `agent_end` 事件, pop 失败 assistant, 调 `agent.continue()`
+- 新 (v0.4.2 step 1): sidecar 只订阅 `AgentSession` 的 `auto_retry_start` / `auto_retry_end` 事件, **map 到 IPC 协议转发给 FE**, 不再写 retry 状态机
+
+**IPC 事件名重命名** (FE 端 chat store + tauri.ts + ChatMessage.vue 同步改):
+- 旧: `retry_start { attempt, maxAttempts, delayMs, errorMessage, sessionId }` / `retry_end { success, attempts, finalError?, sessionId }`
+- 新: `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage, sessionId }` / `auto_retry_end { success, attempt, finalError?, sessionId }`
+- 跟 Pi SDK 对齐, 跟 `compaction_*` 风格统一
+
+**配置注入** (SettingsManager):
+```javascript
+const customSettings = new SettingsManager(cwd, agentDir);
+customSettings.setProviderRetrySettings({ maxRetries: 5, baseDelayMs: 1000, maxRetryDelayMs: 16000 });
+const { session } = await createAgentSession({
+  cwd, model, sessionManager, resourceLoader,
+  settingsManager: customSettings,
+});
+```
+
+**Abort 兼容**: AgentSession 内置 retry 也走 `session.abort()`, 走 `_retryAbortController.abort()`. sidecar 不需要自己管 ac.signal.
+
+**Watchdog 互动**: ADR-0016 stream hang watchdog 跟 AgentSession 内置 retry 仍然**两层互补**:
+- watchdog 30s 兜底 stream hang (Provider 不 emit done)
+- retry 5x 兜底 LLM 错误返回 (429 / 5xx / network)
+- hang → abort → 触发 retry → 又 hang → 又 retry → 5 次用完用户等 30s*5 ≈ 150s
+- 跟 ADR-0016 写的一致, 不变
+
+**没变更的决策**:
+- 5x retry 1s/2s/4s/8s/16s 指数退避
+- 不区分错误类型 (429 / 5xx / network 全 retry)
+- UI 实时提示 (retry banner 旋转 icon + "重试中 1/5")
+- 5 次都失败回退到原 error UX
+
+**省下的 sidecar 代码**: 删 ~140 行 retry 状态机 (commit `88d05ea` 引入的). 替换为 ~30 行 event forwarding.
+
+**REVISIT 信号 (来自原始 ADR §何时 Revisit)**:
+- 已有 1 个信号触发: "Pi SDK 0.85+ 加了原生 retry 机制 → 用 SDK 内置替代, ADR 标 Superseded" — **本条就是**, v0.84.2 已经内置, v0.85 升级时再核对
+- 其他信号 (quota 不重试 / 31s 窗口太短 / FE retry banner 太抢戏 / 5 次都失败加按钮) — 仍 v0.5+ Revisit 候选
+
 ## 后果
 
 ### 正面

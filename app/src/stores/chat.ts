@@ -392,10 +392,10 @@ export const useChatStore = defineStore('chat', () => {
               return;
           }
           break;
-        // v0.4.2+ LLM 重试: sidecar 在 5 次重试间 emit retry_start / retry_end
-        // 关键: retry 期间 sidecar 不发 error 也不发 agent_end, 所以 streaming 状态保留,
+        // v0.4.2 step 1: AgentSession 内置 retry 5 次指数退避, sidecar 转发 auto_retry_start / auto_retry_end
+        // 关键: retry 期间 AgentSession 不发 agent_end, 所以 streaming 状态保留,
         // is-streaming 类的 shimmer 不会断. retryBySession 让 UI 显示"重试中 1/5...".
-        case 'retry_start':
+        case 'auto_retry_start':
           retryBySession.value = {
             ...retryBySession.value,
             [sessionId]: {
@@ -404,12 +404,20 @@ export const useChatStore = defineStore('chat', () => {
               errorMessage: event.errorMessage,
             },
           };
-          console.log(`[chat] retry_start: ${event.attempt}/${event.maxAttempts}, delayMs=${event.delayMs}, err=${event.errorMessage.slice(0, 80)}`);
+          console.log(`[chat] auto_retry_start: ${event.attempt}/${event.maxAttempts}, delayMs=${event.delayMs}, err=${event.errorMessage.slice(0, 80)}`);
           break;
-        case 'retry_end':
+        case 'auto_retry_end':
           // 清理 retry 状态 (success 或 final failure 都已经发过)
           retryBySession.value = { ...retryBySession.value, [sessionId]: null };
-          console.log(`[chat] retry_end: success=${event.success}, attempts=${event.attempts}${event.finalError ? ', err=' + event.finalError.slice(0, 80) : ''}`);
+          console.log(`[chat] auto_retry_end: success=${event.success}, attempts=${event.attempts}${event.finalError ? ', err=' + event.finalError.slice(0, 80) : ''}`);
+          break;
+        // v0.4.2 step 1: AgentSession 内置 compaction (手动 / 自动 threshold / overflow), sidecar 转发 compaction_start / compaction_end
+        case 'compaction_start':
+          console.log(`[chat] compaction_start: reason=${event.reason}`);
+          // FE 暂不显示 toast (简单 log), 后续如果用户反馈需要再加 ui store
+          break;
+        case 'compaction_end':
+          console.log(`[chat] compaction_end: reason=${event.reason} success=${event.success} willRetry=${event.willRetry}${event.errorMessage ? ', err=' + event.errorMessage.slice(0, 80) : ''}`);
           break;
         case 'permission_request': {
           // v0.4.1+ tool permission: sidecar 问 "LLM 想跑 X tool, 允许吗"
@@ -447,6 +455,9 @@ export const useChatStore = defineStore('chat', () => {
       const workspacePath = activeWs?.path ?? null;
       // v0.4.1+: 注入当前 permission mode 作为初始值
       const permissionMode = config.permissionMode;
+      // v0.4.2 step 1+: 注入 per-workspace stable sessionId, 让 sidecar 加载同一 session 历史
+      // undefined 时 sidecar 内部生成新 id (跟 v0.4.1 兼容)
+      const piSessionId = workspacePath ? config.getSessionIdForWorkspace(workspacePath) : undefined;
       await piTauri.sendPrompt(sessionId, text, () => ({
         providerId: active.id,
         provider: active.type,
@@ -455,6 +466,7 @@ export const useChatStore = defineStore('chat', () => {
         thinkingLevel: config.thinkingLevel,
         workspacePath,
         permissionMode,
+        sessionId: piSessionId,
       }));
       console.log('[chat] sendPrompt: piTauri.sendPrompt resolved');
     } catch (e) {
