@@ -237,8 +237,14 @@ function jumpToMessage(messageId: string) {
               :steps="msg.role === 'assistant' ? (msg.steps || []) : []"
               :model-name="activeModelName"
               :is-streaming="isMessageStreaming(idx)"
-              :error-message="isMessageStreaming(idx) ? null : chatStore.getError(activeSession?.id)"
-              :retry="isMessageStreaming(idx) ? (chatStore.retryBySession?.[activeSession?.id || ''] ?? null) : null"
+              :error-message="
+                isMessageStreaming(idx) || idx < messages.length - 1
+                  ? null
+                  : chatStore.getError(activeSession?.id)
+              "
+              :retry="
+                isMessageStreaming(idx) ? (chatStore.retryBySession?.[activeSession?.id || ''] ?? null) : null
+              "
             />
           </div>
         </div>
