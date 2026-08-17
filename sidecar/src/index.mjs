@@ -293,7 +293,7 @@ function buildModels(config) {
  *   让 modelRuntime 知道 user-custom. (PI_FAUX 模式同款修法, 走 registerNativeProvider.)
  */
 function buildUserCustomProvider(config) {
-  const customApiKey = config.apiKey || '';
+  const initialApiKey = config.apiKey || '';
   return createProvider({
     id: 'user-custom',
     name: config.providerLabel || 'Custom',
@@ -301,10 +301,17 @@ function buildUserCustomProvider(config) {
     auth: {
       apiKey: {
         name: 'Custom OpenAI-compatible API key',
-        resolve: async () => ({
-          auth: { apiKey: customApiKey },
-          source: 'sidecar config',
-        }),
+        // v0.4.2.x fix (issue "No API key found for user-custom"): 之前 resolver 只 return closure
+        //   捕获的 customApiKey, 完全忽略 Pi SDK 传进来的 credential 参数. 后果:
+        //   RuntimeCredentials.setRuntimeApiKey('user-custom', realKey) 把真 key 存到 override,
+        //   resolveProviderAuth 读 credential 时 resolver 拿到的还是空 customApiKey (closure 捕获时
+        //   config.apiKey 可能是空) → getAuth return 空 apiKey → LLM 抛 "No API key found".
+        // 修法: 优先用 credential?.key (来自 RuntimeCredentials, 包含 setRuntimeApiKey 写的真 key),
+        //   退到 initialApiKey (closure 初始值, 兼容没调 setRuntimeApiKey 的 fallback 路径).
+        resolve: async ({ credential }) => {
+          const apiKey = credential?.key || initialApiKey;
+          return { auth: { apiKey }, source: 'sidecar config' };
+        },
       },
     },
     models: [{
@@ -623,6 +630,9 @@ rl.on('line', (line) => {
           return;
         }
         globalConfig = msg;
+        // v0.4.2.x 诊断 log: 验证 stdin 真的进了 (apiKey 长度 / baseUrl 值), 排查 issue 1
+        //   "No API key found for user-custom" 用. 下一轮确认后删.
+        console.error(`[sidecar] raw stdin: apiKeyLen=${msg.apiKey?.length ?? 'undef'} baseUrl=${msg.baseUrl ? 'set' : 'undef'} provider=${msg.provider} sessionId=${msg.sessionId?.slice(0, 16) ?? 'undef'}`);
         if (msg.permissionMode === 'ask' || msg.permissionMode === 'smart' || msg.permissionMode === 'allow') {
           currentPermissionMode = msg.permissionMode;
         } else {
