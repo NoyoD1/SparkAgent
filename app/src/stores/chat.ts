@@ -249,6 +249,19 @@ export const useChatStore = defineStore('chat', () => {
           streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
           // v0.4.2+ 清 retry 状态 (5 次重试都失败, 终态错误)
           retryBySession.value = { ...retryBySession.value, [sessionId]: null };
+          // v0.4.2.x fix: 跟 agent_end 一样, 关闭还在 active 的 step (user abort / 任意错误
+          //   时 turn_end 可能还没 emit, 折叠栏会一直转圈显示 "运行中" 直到下次 turn_start.
+          //   把当前 message 的最后 step (如果有, isActive=true) 标 closed)
+          if (idx >= 0) {
+            const assistantMsg = d2.messages[idx];
+            if (assistantMsg.steps) {
+              const lastStep = assistantMsg.steps[assistantMsg.steps.length - 1];
+              if (lastStep && lastStep.isActive) {
+                lastStep.isActive = false;
+                lastStep.collapsed = true;
+              }
+            }
+          }
           console.error('[chat] error event:', event.message);
           chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
           off();
