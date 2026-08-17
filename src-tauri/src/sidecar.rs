@@ -1,17 +1,29 @@
 /**
  * Sidecar spawn + IPC bridge.
  *
- * 流式架构:
- *   Tauri command (send_prompt)
- *     → tokio::spawn 启动 node sidecar (单进程单 prompt, 简单 MVP)
- *     → stdin 写 {config} + {prompt}
- *     → 后台 task 读 stdout, 逐行 parse 成 JSON event, emit 'chat:event' 给 frontend
- *     → 收到 agent_end → 自然结束, child drop 时 kill_on_drop 杀进程
+ * v0.5.0 全量重写: 跟之前 v0.4.x 比, 不再在 Rust 端手写 stdin/stdout 协议解析, 全用
+ *   Pi SDK 0.84.2 提供的 runRpcMode() 轮子.
  *
- * v0.4.1+ tool permission:
- *   - 写完 config + prompt 后, stdin 移到 ActiveSidecars map
- *   - FE invoke send_permission_response / set_permission_mode 拿 map 里的 stdin 写后续消息
- *   - agent_end 后 task 移除 map entry, 进程被杀, stdin 关闭
+ * 协议:
+ *   - argv[2] = config JSON (one-shot init: workspacePath / provider / model / apiKey /
+ *     baseUrl / sessionId / thinkingLevel / tools)
+ *   - stdin line 1+ = Pi SDK RpcCommand (prompt / steer / follow_up / abort / set_model /
+ *     cycle_model / set_thinking_level / set_steering_mode / set_follow_up_mode / compact /
+ *     set_auto_compaction / set_auto_retry / abort_retry / bash / abort_bash / get_state /
+ *     get_commands / get_session_stats / export_html / switch_session / fork / clone /
+ *     get_fork_messages / get_entries / get_tree / get_last_assistant_text / set_session_name /
+ *     get_messages / extension_ui_response) — 完整 list 见 @earendil-works/pi-coding-agent/modes/rpc/rpc-types
+ *   - stdout = Pi SDK RpcResponse + RpcEvent + extension_ui_request
+ *
+ * 流式架构 (跟之前一样, 但逻辑简化):
+ *   Tauri command (send_prompt / send_rpc_command)
+ *     → tokio::spawn 启动 node sidecar (单进程多 RpcCommand, 一次 prompt → agent_end)
+ *     → spawn 时 argv[2] 传 config JSON
+ *     → stdin 写第一个 RpcCommand (prompt)
+ *     → 注册 stdin 到 ActiveSidecars map, 让后续 send_rpc_command (e.g. permission_response
+ *       → extension_ui_response / set_model / abort / compact) 找得到
+ *     → 后台 task 读 stdout 逐行 parse RpcEvent, emit 'chat:event' 给 frontend
+ *     → 收到 agent_end → 移除 map entry, child drop 时 kill_on_drop 杀进程
  *
  * 路径: dev 模式从 cwd 找 sidecar/src/index.mjs.
  *       production 模式需要 bundle Node + sidecar (Phase 3+ TODO).
@@ -25,8 +37,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::Mutex;
 
-/// v0.4.1+ active sidecar 进程 stdin 全局表 (per-session).
-/// 让 FE 端 invoke (send_permission_response / set_permission_mode) 能写到指定 session 的 stdin.
+/// v0.5.0 active sidecar 进程 stdin 全局表 (per-session).
+/// 让 FE 端 invoke (send_rpc_command) 能写到指定 session 的 stdin.
 /// task 结束 (agent_end) 时移除 entry, 避免悬空 handle.
 pub struct ActiveSidecars(pub Mutex<HashMap<String, ChildStdin>>);
 
@@ -37,6 +49,7 @@ impl Default for ActiveSidecars {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SidecarConfig {
     /// Provider type: 'openai-compatible' / 'anthropic' / 'openai' / ...
     pub provider: String,
@@ -65,34 +78,6 @@ pub struct SidecarConfig {
 
 fn default_permission_mode() -> String {
     "ask".to_string()
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PromptMsg {
-    pub session_id: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PermissionResponseMsg {
-    pub tool_call_id: String,
-    pub allow: bool,
-    #[serde(default)]
-    pub reason: Option<String>,
-    /// sessionId 用来定位到指定 sidecar 进程的 stdin
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SetPermissionModeMsg {
-    pub mode: String,
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CompactSessionMsg {
-    /// sessionId 用来定位到指定 sidecar 进程的 stdin
-    pub session_id: String,
 }
 
 fn find_sidecar_script() -> Result<std::path::PathBuf, String> {
@@ -129,18 +114,16 @@ fn emit_error(app: &AppHandle, session_id: &str, message: &str) {
     let _ = app.emit("chat:event", &end);
 }
 
-/// Spawn sidecar, send config + prompt, stream events to frontend.
-/// 每个 prompt 一个独立 sidecar 进程 (MVP 简单版).
-/// 进程在收到 'agent_end' 事件后自然结束.
-///
-/// v0.4.1+ 参数 active 必须是 owned Arc<...> 因为 spawn task 跨 await 需要 'static lifetime.
+/// v0.5.0: 启动 sidecar, argv[2] 传 config JSON, stdin 第一个 RpcCommand 是 prompt.
+/// 后续 send_rpc_command 写同一个 stdin.
+/// session 在收到 'agent_end' 事件后自然结束.
 pub fn run_prompt(
     app: AppHandle,
     config: SidecarConfig,
-    prompt: PromptMsg,
+    session_id: String,
+    initial_command_json: String,
     active: Arc<ActiveSidecars>,
 ) {
-    let session_id = prompt.session_id;
     debug_log(&format!("run_prompt: session={session_id}"));
     tokio::spawn(async move {
         let script = match find_sidecar_script() {
@@ -155,8 +138,28 @@ pub fn run_prompt(
             }
         };
 
+        // v0.5.0: config 走 argv[2] (跟 Pi SDK main.ts pattern 一致)
+        let config_arg = match serde_json::to_string(&serde_json::json!({
+            "type": "config",
+            "provider": config.provider,
+            "model": config.model,
+            "baseUrl": config.base_url,
+            "apiKey": config.api_key,
+            "thinkingLevel": config.thinking_level,
+            "workspacePath": config.workspace_path,
+            "permissionMode": config.permission_mode,
+            "sessionId": config.session_id,
+        })) {
+            Ok(s) => s,
+            Err(e) => {
+                emit_error(&app, &session_id, &format!("ser config: {e}"));
+                return;
+            }
+        };
+
         let mut child = match Command::new("node")
             .arg(&script)
+            .arg(&config_arg)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -196,54 +199,22 @@ pub fn run_prompt(
             }
         };
 
-        // 写 config (含 v0.4.1+ permissionMode + v0.4.2 step 1+ sessionId)
-        let config_msg = serde_json::json!({
-            "type": "config",
-            "provider": config.provider,
-            "model": config.model,
-            "baseUrl": config.base_url,
-            "apiKey": config.api_key,
-            "thinkingLevel": config.thinking_level,
-            "workspacePath": config.workspace_path,
-            "permissionMode": config.permission_mode,
-            "sessionId": config.session_id,
-        });
-        let line = match serde_json::to_string(&config_msg) {
-            Ok(s) => format!("{s}\n"),
-            Err(e) => {
-                emit_error(&app, &session_id, &format!("ser config: {e}"));
-                return;
-            }
-        };
+        // v0.5.0: stdin line 1 = 第一个 RpcCommand (e.g. prompt)
+        let line = format!("{initial_command_json}\n");
         if let Err(e) = stdin.write_all(line.as_bytes()).await {
-            emit_error(&app, &session_id, &format!("write config: {e}"));
+            emit_error(&app, &session_id, &format!("write initial command: {e}"));
             return;
         }
 
-        // 写 prompt
-        let prompt_msg = serde_json::json!({
-            "type": "prompt",
-            "sessionId": session_id,
-            "content": prompt.content,
-        });
-        let line = match serde_json::to_string(&prompt_msg) {
-            Ok(s) => format!("{s}\n"),
-            Err(e) => {
-                emit_error(&app, &session_id, &format!("ser prompt: {e}"));
-                return;
-            }
-        };
-        if let Err(e) = stdin.write_all(line.as_bytes()).await {
-            emit_error(&app, &session_id, &format!("write prompt: {e}"));
-            return;
-        }
-
-        // v0.4.1+ 注册 stdin 到 active map, 让 FE 端 send_permission_response / set_permission_mode 找得到
+        // 注册 stdin 到 active map, 让 FE 端 send_rpc_command (e.g. extension_ui_response /
+        // set_model / abort / compact) 找得到
         {
             let mut map = active.0.lock().await;
             map.insert(session_id.clone(), stdin);
         }
-        debug_log(&format!("run_prompt: wrote config + prompt, stdin registered to active map"));
+        debug_log(&format!(
+            "run_prompt: wrote initial RpcCommand, stdin registered to active map"
+        ));
 
         // 后台读 stderr → log
         tokio::spawn(async move {
@@ -254,7 +225,7 @@ pub fn run_prompt(
             }
         });
 
-        // 主 task: 读 stdout, 逐行 emit event
+        // 主 task: 读 stdout, 逐行 emit RpcEvent 给 frontend
         let mut reader = BufReader::new(stdout).lines();
         let mut got_agent_end = false;
         let mut event_count = 0u32;
@@ -272,7 +243,7 @@ pub fn run_prompt(
                     continue;
                 }
             };
-            // 注入 sessionId 给 frontend dispatch
+            // 注入 sessionId 给 frontend dispatch (RpcEvent 自身没 sessionId 字段)
             if let Some(obj) = event.as_object_mut() {
                 obj.insert("sessionId".to_string(), serde_json::json!(session_id));
             }
@@ -300,7 +271,7 @@ pub fn run_prompt(
             let _ = app.emit("chat:event", &end);
         }
 
-        // v0.4.1+ 从 active map 移除 stdin (Agent 自然结束, 后续 permission_response 不应到达)
+        // 从 active map 移除 stdin (Agent 自然结束, 后续 RpcCommand 不应到达)
         {
             let mut map = active.0.lock().await;
             map.remove(&session_id);
@@ -311,81 +282,38 @@ pub fn run_prompt(
     });
 }
 
-/// v0.4.1+ FE 端 PermissionDialog 点了允许/拒绝, 写到对应 sidecar stdin
+/// v0.5.0: 通用 stdin 透传 — FE 端发任意 RpcCommand 写到指定 sidecar stdin.
+/// 之前 v0.4.x 的 send_permission_response / set_permission_mode / compact_session 3 个
+/// 特殊 invoke 全部合并到这一个 — Rust 端不解析 RpcCommand, 直接 JSON.stringify 后
+/// 写一行 stdin. 权限弹窗响应 → extension_ui_response RpcCommand; abort → abort
+/// RpcCommand; set_model → set_model RpcCommand; compact → compact RpcCommand; 等等.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RpcCommandMsg {
+    /// sessionId 用来定位到指定 sidecar 进程的 stdin
+    pub session_id: String,
+    /// RpcCommand 的 JSON 字符串 (FE 端构造, Rust 端不解析)
+    pub command_json: String,
+}
+
 #[tauri::command]
-pub async fn send_permission_response(
-    msg: PermissionResponseMsg,
+pub async fn send_rpc_command(
+    msg: RpcCommandMsg,
     active: State<'_, Arc<ActiveSidecars>>,
 ) -> Result<(), String> {
     debug_log(&format!(
-        "send_permission_response: session={} tool={} allow={}",
-        msg.session_id, msg.tool_call_id, msg.allow
+        "send_rpc_command: session={} cmd={}",
+        msg.session_id,
+        msg.command_json.chars().take(120).collect::<String>()
     ));
     let mut map = active.0.lock().await;
     let stdin = map
         .get_mut(&msg.session_id)
         .ok_or_else(|| format!("no active sidecar for session={}", msg.session_id))?;
-    let ipc = serde_json::json!({
-        "type": "permission_response",
-        "toolCallId": msg.tool_call_id,
-        "allow": msg.allow,
-        "reason": msg.reason,
-    });
-    let line = format!("{}\n", serde_json::to_string(&ipc).map_err(|e| format!("ser: {e}"))?);
+    let line = format!("{}\n", msg.command_json);
     stdin
         .write_all(line.as_bytes())
         .await
-        .map_err(|e| format!("write permission_response: {e}"))?;
-    Ok(())
-}
-
-/// v0.4.1+ FE 端切了 permission mode, 实时同步到 sidecar
-#[tauri::command]
-pub async fn set_permission_mode(
-    msg: SetPermissionModeMsg,
-    active: State<'_, Arc<ActiveSidecars>>,
-) -> Result<(), String> {
-    debug_log(&format!(
-        "set_permission_mode: session={} mode={}",
-        msg.session_id, msg.mode
-    ));
-    let mut map = active.0.lock().await;
-    let stdin = map
-        .get_mut(&msg.session_id)
-        .ok_or_else(|| format!("no active sidecar for session={}", msg.session_id))?;
-    let ipc = serde_json::json!({
-        "type": "set_permission_mode",
-        "mode": msg.mode,
-    });
-    let line = format!("{}\n", serde_json::to_string(&ipc).map_err(|e| format!("ser: {e}"))?);
-    stdin
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|e| format!("write set_permission_mode: {e}"))?;
-    Ok(())
-}
-
-/// v0.4.2 step 1+: FE 端手动触发压缩 (e.g. 用户在 UI 点了"压缩历史"按钮).
-/// 调 AgentSession.compact() 走 LLM-driven summary, 自动 persist 到 session.jsonl.
-/// 期间 sidecar 会 emit compaction_start → compaction_end, FE 显示 toast / banner.
-#[tauri::command]
-pub async fn compact_session(
-    msg: CompactSessionMsg,
-    active: State<'_, Arc<ActiveSidecars>>,
-) -> Result<(), String> {
-    debug_log(&format!("compact_session: session={}", msg.session_id));
-    let mut map = active.0.lock().await;
-    let stdin = map
-        .get_mut(&msg.session_id)
-        .ok_or_else(|| format!("no active sidecar for session={}", msg.session_id))?;
-    let ipc = serde_json::json!({
-        "type": "compact_session",
-    });
-    let line = format!("{}\n", serde_json::to_string(&ipc).map_err(|e| format!("ser: {e}"))?);
-    stdin
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|e| format!("write compact_session: {e}"))?;
+        .map_err(|e| format!("write rpc_command: {e}"))?;
     Ok(())
 }
 

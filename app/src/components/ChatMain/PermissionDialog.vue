@@ -49,14 +49,21 @@ const toolArgs = computed(() => {
 async function respond(allow: boolean) {
   const req = pendingPermission.value;
   if (!req) return;
-  console.log('[PermissionDialog] respond', { allow, sessionId: req.sessionId, toolCallId: req.toolCallId });
+  console.log('[PermissionDialog] respond', { allow, sessionId: req.sessionId, id: req.toolCallId });
   try {
-    // v0.4.2.x fix: 之前漏传 sessionId, Rust 端 PermissionResponseMsg.session_id 是
-    //   required → 整个 permission 流程崩. 改传 req.sessionId (从 sidecar permission_request
-    //   event 拿到, ui store 已缓存).
-    await piTauri.sendPermissionResponse(req.sessionId, req.toolCallId, allow, allow ? undefined : 'User denied');
+    // v0.5.0: Pi SDK 通用 extension UI 协议 — 弹窗响应走 RpcCommand { type: 'extension_ui_response' }
+    //   替代 v0.4.x 的 sendPermissionResponse 特殊 invoke.
+    //   跟 v0.4.x permission_request 兼容: req.toolCallId 实际是 extension_ui_request event.id
+    //   (chat store 解析 extension_ui_request 时把 event.id 存为 toolCallId 字段).
+    //   RpcExtensionUIResponse schema: { type: 'extension_ui_response', id, confirmed: boolean }
+    //   详见 @earendil-works/pi-coding-agent/modes/rpc/rpc-types.
+    await piTauri.sendRpcCommand(req.sessionId, {
+      type: 'extension_ui_response',
+      id: req.toolCallId,
+      confirmed: allow,
+    });
   } catch (e) {
-    console.error('[PermissionDialog] sendPermissionResponse failed', e);
+    console.error('[PermissionDialog] sendRpcCommand(extension_ui_response) failed', e);
   }
   // 立即关弹窗, 不等服务端 tool_end event (不然有视觉延迟)
   uiStore.closePermissionDialog();

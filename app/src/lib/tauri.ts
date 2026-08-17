@@ -1,10 +1,15 @@
 /**
- * Pi Agent Tauri Client — replaces lib/ws.ts.
+ * Pi Agent Tauri Client — v0.5.0 RPC mode.
  *
- * 用 Tauri 2 的 invoke + listen 跟 Rust host 通信:
+ * 跟 v0.4.x 比, 不再手写 v0.4.x 自定义 IPC 协议 (config_ok / config_error /
+ * permission_request / 各种 tool_* / message_update delta field), 改成 Pi SDK
+ * 0.84.2 原生 RpcEvent 协议:
  *   - invoke('send_prompt', { sessionId, content, config })  启动一次 LLM 调用
- *   - listen('chat:event', (e) => ...)                       收流式事件
- *   - invoke('save_api_key' | 'delete_api_key' | 'list_api_keys' | 'has_api_key' | 'migrate_from_env')
+ *   - invoke('send_rpc_command', { sessionId, commandJson })  通用 RpcCommand 透传
+ *     (permission dialog 响应 → extension_ui_response / abort / set_model / compact)
+ *   - listen('chat:event', (e) => ...)  收 RpcEvent stream (Pi SDK 原生 event)
+ *   - invoke('save_api_key' | 'delete_api_key' | 'list_api_keys' | 'has_api_key' |
+ *     'migrate_from_env' | ...)  走 keychain
  *
  * 跟 ws.ts 的区别:
  *   - apiKey 永不在前端 (走 OS keychain, Rust 直接读)
@@ -17,33 +22,158 @@ import { listen } from '@tauri-apps/api/event';
 
 console.log('[pi-tauri] module loaded, tauri-internals=', typeof (window as any).__TAURI_INTERNALS__);
 
-// ====== Event types (跟 server/src/types.ts ServerToClient 对齐 + 加 sessionId) ======
+// ====== Event types (v0.5.0: Pi SDK 0.84.2 RpcEvent schema 透传) ======
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
 
+/** Pi SDK AgentMessage 简化 schema (FE 只关心 role + content + tool_calls) */
+export interface AgentMessageLite {
+  role: 'user' | 'assistant' | 'toolResult';
+  content: string | AgentContentBlock[];
+  /** tool call id (assistant 调 tool 时) */
+  toolCallId?: string;
+  /** tool name (assistant 调 tool 时) */
+  toolName?: string;
+  /** tool call args (assistant 调 tool 时) */
+  args?: Record<string, unknown>;
+  /** tool call result (toolResult 消息时) */
+  result?: unknown;
+  /** isError (toolResult 消息时) */
+  isError?: boolean;
+  /** token usage (assistant 消息时) */
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { input: number; output: number; cacheRead: number; cacheWrite: number } };
+}
+
+export type AgentContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'thinking'; thinking: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> };
+
+/** v0.5.0 Pi SDK RpcEvent (跟 Pi SDK 0.84.2 AgentSessionEvent / AgentEvent 对齐, 外加 sessionId) */
 export type ServerToClient =
-  | { type: 'ready' }
-  | { type: 'config_ok'; provider: string; model: string; sessionId?: string }
-  | { type: 'config_error'; message: string; sessionId?: string }
   | { type: 'agent_start'; sessionId: string }
-  /** v0.4.1 step 累加: Pi SDK 一次 prompt 可能跑多个 turn (tool_call 链), turn_start/turn_end 标 step 边界 */
+  | {
+      type: 'agent_end';
+      sessionId: string;
+      /** Pi SDK 0.84.2 AgentSessionEvent.agent_end: { messages: AgentMessage[]; willRetry: boolean } */
+      messages?: AgentMessageLite[];
+      willRetry?: boolean;
+    }
+  | { type: 'agent_settled'; sessionId: string }
   | { type: 'turn_start'; sessionId: string }
-  | { type: 'turn_end'; sessionId: string }
-  | { type: 'message_start'; sessionId: string }
-  | { type: 'message_update'; delta: string; kind?: 'thinking' | 'content'; sessionId: string }
-  | { type: 'tool_start'; toolName: string; toolCallId: string; args: Record<string, unknown>; sessionId: string }
-  | { type: 'tool_update'; toolCallId: string; delta: string; sessionId: string }
-  | { type: 'tool_end'; toolCallId: string; result?: unknown; error?: string; sessionId: string }
-  | { type: 'message_end'; sessionId: string }
-  | { type: 'agent_end'; sessionId: string }
-  | { type: 'error'; message: string; sessionId: string }
-  // v0.4.1+ tool permission: sidecar 问 FE "LLM 想跑 X tool, 允许吗"
-  | { type: 'permission_request'; toolCallId: string; toolName: string; args: Record<string, unknown>; sessionId: string }
-  // v0.4.2 step 1 (AgentSession 内置): 5 次指数退避 (1s/2s/4s/8s/16s), AgentSession 内部自动 retry, 走 auto_retry_* 事件
-  | { type: 'auto_retry_start'; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string; sessionId: string }
-  | { type: 'auto_retry_end'; success: boolean; attempts: number; finalError?: string; sessionId: string }
-  // v0.4.2 step 1 (AgentSession 内置): 上下文压缩, 走 reason (manual / threshold / overflow) + result / willRetry / errorMessage
-  | { type: 'compaction_start'; reason: 'manual' | 'threshold' | 'overflow'; sessionId: string }
-  | { type: 'compaction_end'; reason: 'manual' | 'threshold' | 'overflow'; success: boolean; willRetry: boolean; errorMessage?: string; sessionId: string };
+  | {
+      type: 'turn_end';
+      sessionId: string;
+      message?: AgentMessageLite;
+      toolResults?: AgentMessageLite[];
+    }
+  | {
+      type: 'message_start';
+      sessionId: string;
+      /** Pi SDK AgentEvent.message_start: { message: AgentMessage } */
+      message: AgentMessageLite;
+    }
+  | {
+      type: 'message_update';
+      sessionId: string;
+      /** Pi SDK AgentEvent.message_update: { message: AgentMessage; assistantMessageEvent: AssistantMessageEvent } */
+      message: AgentMessageLite;
+      /**
+       * 嵌套 streaming event. 跟 v0.4.x 直接 delta 字段不一样.
+       * - { type: 'text_delta', delta: string }        text 流式
+       * - { type: 'thinking_delta', delta: string }    thinking 流式
+       * - { type: 'tool_call_delta', delta: string }   tool call args 流式
+       * - { type: 'done' }                              assistant 消息结束
+       */
+      assistantMessageEvent:
+        | { type: 'text_delta'; delta: string }
+        | { type: 'thinking_delta'; delta: string }
+        | { type: 'tool_call_delta'; delta: string }
+        | { type: 'done' };
+    }
+  | {
+      type: 'message_end';
+      sessionId: string;
+      message: AgentMessageLite;
+    }
+  // v0.5.0 tool_execution_* (Pi SDK 用 tool_execution_* 不是 v0.4.x 的 tool_*)
+  | {
+      type: 'tool_execution_start';
+      sessionId: string;
+      toolCallId: string;
+      toolName: string;
+      args: Record<string, unknown>;
+    }
+  | {
+      type: 'tool_execution_update';
+      sessionId: string;
+      toolCallId: string;
+      toolName: string;
+      args: Record<string, unknown>;
+      partialResult: unknown;
+    }
+  | {
+      type: 'tool_execution_end';
+      sessionId: string;
+      toolCallId: string;
+      toolName: string;
+      result: unknown;
+      isError: boolean;
+    }
+  // v0.4.2 step 1+ retry (5x exponential backoff, Pi SDK AgentSession 内置)
+  | {
+      type: 'auto_retry_start';
+      sessionId: string;
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
+      errorMessage: string;
+    }
+  | {
+      type: 'auto_retry_end';
+      sessionId: string;
+      success: boolean;
+      /** Pi SDK 用单数 attempt (不是 v0.4.x 的 attempts) */
+      attempt: number;
+      finalError?: string;
+    }
+  // v0.4.2 step 1+ compaction (手动 / 自动 threshold / overflow)
+  | {
+      type: 'compaction_start';
+      sessionId: string;
+      reason: 'manual' | 'threshold' | 'overflow';
+    }
+  | {
+      type: 'compaction_end';
+      sessionId: string;
+      reason: 'manual' | 'threshold' | 'overflow';
+      /** Pi SDK CompactionResult */
+      result?: unknown;
+      aborted: boolean;
+      willRetry: boolean;
+      errorMessage?: string;
+    }
+  // v0.5.0 extension UI (替代 v0.4.x 的 permission_request) — Pi SDK RPC 协议
+  // 弹窗 method: select / confirm / input / editor / notify / setStatus / setWidget / setTitle
+  | {
+      type: 'extension_ui_request';
+      sessionId: string;
+      id: string;
+      method: 'select' | 'confirm' | 'input' | 'editor' | 'notify' | 'setStatus' | 'setWidget' | 'setTitle' | 'set_editor_text';
+      title?: string;
+      message?: string;
+      options?: string[];
+      placeholder?: string;
+      prefill?: string;
+      notifyType?: 'info' | 'warning' | 'error';
+      statusKey?: string;
+      statusText?: string | undefined;
+      widgetKey?: string;
+      widgetLines?: string[] | undefined;
+      widgetPlacement?: 'aboveEditor' | 'belowEditor';
+      timeout?: number;
+    }
+  // v0.4.2.x fix: 顶层错误事件 (跟 v0.4.x 兼容, Rust emit_error 触发)
+  | { type: 'error'; message: string; sessionId: string };
 
 type Handler = (event: ServerToClient) => void;
 
@@ -142,50 +272,28 @@ class PiTauriClient {
     }
   }
 
-  // ====== v0.4.1+ tool permission IPC ======
   /**
-   * FE 端 PermissionDialog 点了 允许/拒绝, 调这个发回 sidecar
-   * - allow=true  → sidecar 放行 tool 执行
-   * - allow=false → sidecar 阻止 tool (Pi SDK emit error tool result)
-   *
-   * v0.4.2.x fix: 必须传 sessionId, Rust 端 PermissionResponseMsg.session_id 是 required
-   *   (没 #[serde(default)]), 之前漏传 → Tauri 抛 "missing required key msg" → 整个
-   *   permission 流程崩, sidecar 永远等不到 permission_response → LLM 卡死 → 用户
-   *   只能 abort → 3 个 step 都累积 "This operation was aborted" 错误提示.
+   * v0.5.0: 通用 RpcCommand 透传 — 替代 v0.4.x 的 sendPermissionResponse / setPermissionMode / compactSession
+   * 3 个特殊 invoke. FE 端构造 RpcCommand 对象, 这里 JSON.stringify 后 invoke('send_rpc_command', ...).
+   * 典型用法:
+   *   - 权限弹窗:  sendRpcCommand({ type: 'extension_ui_response', id, confirmed: true })
+   *   - abort:     sendRpcCommand({ type: 'abort' })
+   *   - set_model: sendRpcCommand({ type: 'set_model', provider, modelId })
+   *   - compact:   sendRpcCommand({ type: 'compact' })
+   *   - 等等, 40+ RpcCommand 都走这一个
    */
-  async sendPermissionResponse(
+  async sendRpcCommand(
     sessionId: string,
-    toolCallId: string,
-    allow: boolean,
-    reason?: string,
+    cmd: Record<string, unknown>,
   ): Promise<void> {
-    console.log('[pi-tauri] sendPermissionResponse', { sessionId, toolCallId, allow, reason });
-    await invoke('send_permission_response', {
-      sessionId,
-      toolCallId,
-      allow,
-      reason: reason ?? null,
-    });
-  }
-
-  /**
-   * v0.4.1+ 用户在 Composer 切了 permission mode, 调这个实时同步到 sidecar.
-   * 下次 tool call 用新 mode.
-   */
-  async setPermissionMode(mode: 'ask' | 'smart' | 'allow'): Promise<void> {
-    console.log('[pi-tauri] setPermissionMode', { mode });
-    await invoke('set_permission_mode', { mode });
-  }
-
-  // ====== v0.4.2 step 1+ context management IPC ======
-  /**
-   * 手动压缩当前 session 的历史. 走 AgentSession.compact() (LLM-driven summary, 跟 Pi 主线一致).
-   * 触发后 sidecar 会 emit compaction_start → compaction_end 事件, FE 在 chat store 显示 toast / banner.
-   * @param sessionId - 当前 session 的 id (per-workspace)
-   */
-  async compactSession(sessionId: string): Promise<void> {
-    console.log('[pi-tauri] compactSession', { sessionId });
-    await invoke('compact_session', { sessionId });
+    const commandJson = JSON.stringify(cmd);
+    console.log('[pi-tauri] sendRpcCommand', { sessionId, type: (cmd as any).type });
+    try {
+      await invoke('send_rpc_command', { sessionId, commandJson });
+    } catch (e) {
+      console.error('[pi-tauri] sendRpcCommand FAILED', e);
+      throw e;
+    }
   }
 
   // ====== Keychain API ======

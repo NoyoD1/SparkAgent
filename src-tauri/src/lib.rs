@@ -170,6 +170,19 @@ async fn send_prompt(
         (Some(ws), Some(sid)) if !ws.is_empty() && !sid.is_empty() => Some(sid.clone()),
         _ => None,
     };
+
+    // v0.5.0: 构造 Pi SDK RpcCommand.prompt 协议 (跟 Pi SDK main.ts 一致)
+    // RpcCommand.prompt schema: { id?, type: "prompt", message, images?, streamingBehavior?: "steer" | "followUp" }
+    // Pi SDK 0.84.2 runRpcMode 接收后 emit preflightResult 调 success(id, "prompt") → RpcResponse.
+    let prompt_cmd = serde_json::json!({
+        "id": format!("prompt-{session_id}"),
+        "type": "prompt",
+        "message": content,
+        "streamingBehavior": "steer",
+    });
+    let prompt_cmd_json = serde_json::to_string(&prompt_cmd)
+        .map_err(|e| format!("ser prompt cmd: {e}"))?;
+
     sidecar::run_prompt(
         app,
         sidecar::SidecarConfig {
@@ -182,10 +195,8 @@ async fn send_prompt(
             permission_mode: config.permission_mode.unwrap_or_else(|| "ask".to_string()),  // v0.4.1+
             session_id: session_id_for_sidecar,  // v0.4.2 step 1+
         },
-        sidecar::PromptMsg {
-            session_id: session_id.clone(),
-            content,
-        },
+        session_id.clone(),
+        prompt_cmd_json,
         active,
     );
     Ok(())
@@ -389,11 +400,8 @@ pub fn run() {
             ensure_default_workspace,
             load_app_config,
             save_app_config,
-            // v0.4.1+ tool permission
-            sidecar::send_permission_response,
-            sidecar::set_permission_mode,
-            // v0.4.2 step 1+ context management
-            sidecar::compact_session,
+            // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
+            sidecar::send_rpc_command,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -211,7 +211,6 @@ export const useChatStore = defineStore('chat', () => {
       if (
         idx < 0 &&
         (event.type === 'error' ||
-          event.type === 'config_error' ||
           event.type === 'agent_end' ||
           event.type === 'message_end')
       ) {
@@ -225,23 +224,8 @@ export const useChatStore = defineStore('chat', () => {
         console.log(`[chat] pushed placeholder assistant for early ${event.type}`);
       }
       switch (event.type) {
-        case 'config_ok':
-          // v0.4.2.x fix: 之前 config_ok 走 default 警告 'unhandled event type: config_ok'.
-          //   实际是 sidecar 启动成功 (createAgentSession 完成) 的信号, 仅日志.
-          console.log('[chat] config_ok: provider=', event.provider, 'model=', event.model);
-          break;
-        case 'config_error':
-          // v0.4.2.x fix: config_error (e.g. Model not found / session build 失败) 必须始终处理,
-          //   跟 error 一样展示给用户, 不能被 idx < 0 吞掉.
-          //   placeholder 已经在前面 push 过了 (如果 idx < 0), 这里直接 set errorBySession.
-          errorBySession.value = { ...errorBySession.value, [sessionId]: event.message };
-          streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
-          retryBySession.value = { ...retryBySession.value, [sessionId]: null };
-          console.error('[chat] config_error:', event.message);
-          chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
-          off();
-          return;
         case 'error':
+          // v0.5.0: Rust 端 emit_error 触发的顶层 error 事件 (跟 v0.4.x 兼容)
           // v0.4.2.x fix: 之前 error 跟其他 message_start 后事件分组, 触发 `if (idx < 0) return`
           //   吞掉, 看起来"发送没回复". 拉出来独立处理, 始终 set errorBySession.
           //   placeholder 已经在前面 push 过了 (如果 idx < 0).
@@ -249,9 +233,7 @@ export const useChatStore = defineStore('chat', () => {
           streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
           // v0.4.2+ 清 retry 状态 (5 次重试都失败, 终态错误)
           retryBySession.value = { ...retryBySession.value, [sessionId]: null };
-          // v0.4.2.x fix: 跟 agent_end 一样, 关闭还在 active 的 step (user abort / 任意错误
-          //   时 turn_end 可能还没 emit, 折叠栏会一直转圈显示 "运行中" 直到下次 turn_start.
-          //   把当前 message 的最后 step (如果有, isActive=true) 标 closed)
+          // v0.4.2.x fix: 跟 agent_end 一样, 关闭还在 active 的 step
           if (idx >= 0) {
             const assistantMsg = d2.messages[idx];
             if (assistantMsg.steps) {
@@ -267,9 +249,8 @@ export const useChatStore = defineStore('chat', () => {
           off();
           return;
         case 'agent_end':
-          // v0.4.2.x fix: agent_end 跟 error 一样, 可能在 message_start 之前到达 (error flow),
-          //   placeholder 已经在前面 push 过了 (如果 idx < 0). 这里始终做清理 + auto-name.
-          //   正常 flow 时 placeholder 不会被 push, 走原本的 `assistant.steps` 关闭逻辑.
+          // v0.5.0: Pi SDK AgentSessionEvent.agent_end: { messages: AgentMessage[]; willRetry: boolean }
+          // 跟 v0.4.x 比, 多了 messages 全量 + willRetry 字段 (v0.4.x 自定义事件)
           if (idx >= 0) {
             const assistantMsg = d2.messages[idx];
             if (assistantMsg.steps) {
@@ -281,7 +262,6 @@ export const useChatStore = defineStore('chat', () => {
             }
           }
           streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
-          // v0.4.2+ 清 retry 状态 (agent_end 正常结束)
           retryBySession.value = { ...retryBySession.value, [sessionId]: null };
           chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
           console.log(
@@ -289,19 +269,22 @@ export const useChatStore = defineStore('chat', () => {
             idx,
             'total msgs=',
             d2.messages.length,
+            'willRetry=',
+            event.willRetry,
           );
           off();
           maybeAutoNameSession(sessionId, text);
           return;
+        case 'agent_settled':
+          // v0.5.0: Pi SDK AgentSession 内部最后的事件 (turn 收尾 + tool 清理完后)
+          // 不需要动 store, 仅日志
+          console.log('[chat] agent_settled');
+          break;
         case 'agent_start':
-          // v0.3.8.14: agent_start 之前 v0.3.8.13 漏了, 走 default 警告
-          // agent_start 是 sidecar 启动信号, 不需要动 store, 仅日志
           console.log('[chat] agent_start');
           break;
         case 'turn_start':
-          // v0.4.1 step 累加: 创建新 step group, 后续 message_update/tool_* 路由到这里
-          // v0.4.1 fix: collapsed 默认 true (用户反馈"默认展开太占地方"),
-          // 包括 current step — 当前 step 通过 isActive 标 accent 边 + spinner 提示, 不强制展开
+          // v0.4.1 step 累加: 创建新 step group, 后续 message_update/tool_execution_* 路由到这里
           if (idx >= 0) {
             const assistant = d2.messages[idx];
             if (!assistant.steps) assistant.steps = [];
@@ -318,7 +301,7 @@ export const useChatStore = defineStore('chat', () => {
           }
           break;
         case 'turn_end':
-          // v0.4.1 fix: turn_end 不再设 collapsed (默认就是 true), 只标 isActive = false
+          // turn_end 收到: 关闭最后一个 step
           if (idx >= 0) {
             const assistant = d2.messages[idx];
             const steps = assistant.steps || [];
@@ -330,7 +313,8 @@ export const useChatStore = defineStore('chat', () => {
           }
           break;
         case 'message_start':
-          // 第一次 message_start: 懒创建 assistant message
+          // v0.5.0: Pi SDK AgentEvent.message_start: { message: AgentMessage }
+          // 跟 v0.4.x 比, message 嵌套在 event.message 字段, 不是顶层 role/content
           if (idx < 0) {
             d2.messages.push({
               id: assistantId,
@@ -338,81 +322,81 @@ export const useChatStore = defineStore('chat', () => {
               content: '',
               createdAt: new Date().toISOString(),
             });
-            // 同时重置 thinking (legacy, v0.4.1+ 不再累积到顶层 thinking, 但兼容旧数据)
             const tbNew = d2.thinking.find((t) => t.messageId === assistantId);
             if (tbNew) tbNew.content = '';
             break;
           }
-          // 后续 message_start (少见, 但有些 API 会重发): 重置内容
+          // 后续 message_start: 重置内容
           d2.messages[idx].content = '';
           const tbRst = d2.thinking.find((t) => t.messageId === assistantId);
           if (tbRst) tbRst.content = '';
           break;
         case 'message_update':
         case 'message_end':
-        case 'tool_start':
-        case 'tool_update':
-        case 'tool_end':
+        case 'tool_execution_start':
+        case 'tool_execution_update':
+        case 'tool_execution_end':
+          // v0.5.0: tool_execution_* (Pi SDK) 替代 v0.4.x tool_*
           // v0.4.2.x fix: agent_end + error 已经在 switch 开头独立处理 (返回), 不会到这里.
-          //   这里只对 'message_update' / 'tool_*' 等真正需要 assistant message 才有意义的事件
-          //   做 idx < 0 检查. 这些事件 idx < 0 是不正常的, 警告后丢弃.
           if (idx < 0) {
             console.warn(`[chat] ${event.type} before assistant message created, ignoring`);
             return;
           }
           const assistant = d2.messages[idx];
-          // v0.4.1 step 累加: 找当前 step (最后一个), 没 step 就 fallback 创建
           const getCurrentStep = (): Step | undefined => {
             const steps = assistant.steps || [];
             if (steps.length === 0) return undefined;
             return steps[steps.length - 1];
           };
-          // 走对应 case 处理
           switch (event.type) {
             case 'message_update':
-              if (event.kind === 'thinking') {
-                // v0.4.1: thinking 路由到 currentStep (不再累积到顶层 d2.thinking)
-                const step = getCurrentStep();
-                if (step) {
-                  let tb2 = step.thinking[step.thinking.length - 1];
-                  if (!tb2) {
-                    tb2 = {
-                      id: `think-${step.id}`,
-                      messageId: assistantId,
-                      content: '',
-                      collapsed: false,  // step 内 thinking 默认展开
-                    };
-                    step.thinking.push(tb2);
+              // v0.5.0: event.assistantMessageEvent 嵌套 + .type 标 kind (text_delta / thinking_delta / tool_call_delta)
+              // 跟 v0.4.x 的 event.delta + event.kind 不同
+              {
+                const ame = event.assistantMessageEvent;
+                if (ame.type === 'thinking_delta') {
+                  // thinking 路由到 currentStep
+                  const step = getCurrentStep();
+                  if (step) {
+                    let tb2 = step.thinking[step.thinking.length - 1];
+                    if (!tb2) {
+                      tb2 = {
+                        id: `think-${step.id}`,
+                        messageId: assistantId,
+                        content: '',
+                        collapsed: false,  // step 内 thinking 默认展开
+                      };
+                      step.thinking.push(tb2);
+                    }
+                    tb2.content += ame.delta;
+                  } else {
+                    // fallback: 顶层 thinking (兼容无 step 数据)
+                    let tb2 = d2.thinking.find((t) => t.messageId === assistantId);
+                    if (!tb2) {
+                      tb2 = {
+                        id: `think-${assistantId}`,
+                        messageId: assistantId,
+                        content: '',
+                        collapsed: true,
+                      };
+                      d2.thinking.push(tb2);
+                    }
+                    tb2.content += ame.delta;
                   }
-                  tb2.content += event.delta;
-                } else {
-                  // fallback: 顶层 thinking (兼容无 step 数据)
-                  let tb2 = d2.thinking.find((t) => t.messageId === assistantId);
-                  if (!tb2) {
-                    tb2 = {
-                      id: `think-${assistantId}`,
-                      messageId: assistantId,
-                      content: '',
-                      collapsed: true,
-                    };
-                    d2.thinking.push(tb2);
-                  }
-                  tb2.content += event.delta;
+                } else if (ame.type === 'text_delta') {
+                  // text delta: 既累积到 message.content (final reply 兼容旧 UI), 也累积到 currentStep.stepText
+                  assistant.content += ame.delta;
+                  const step = getCurrentStep();
+                  if (step) step.stepText += ame.delta;
                 }
-                console.log('[chat] thinking_update len=', (getCurrentStep()?.thinking[getCurrentStep()!.thinking.length - 1]?.content.length) ?? 0);
-              } else {
-                // text_delta: 既累积到 message.content (final reply 兼容旧 UI), 也累积到 currentStep.stepText
-                assistant.content += event.delta;
-                const step = getCurrentStep();
-                if (step) step.stepText += event.delta;
-                console.log('[chat] content_update len=', assistant.content.length);
+                // tool_call_delta: Pi SDK 增量发送 tool call args, 当前 FE 不展示 (tool_execution_start
+                //   事件已经包含完整 args). 这里吞掉, 不弹错.
               }
               break;
             case 'message_end':
               break;
-            case 'tool_start':
+            case 'tool_execution_start':
               {
-                // v0.4.1: tool 路由到 currentStep
                 const step = getCurrentStep();
                 const target = step ? step.toolCalls : d2.toolCalls;
                 target.push({
@@ -423,37 +407,40 @@ export const useChatStore = defineStore('chat', () => {
                   status: 'running',
                   startedAt: new Date().toISOString(),
                 });
-                console.log('[chat] tool_start', event.toolName, 'routed to', step ? 'step' : 'legacy');
+                console.log('[chat] tool_execution_start', event.toolName, 'routed to', step ? 'step' : 'legacy');
               }
               break;
-            case 'tool_update':
+            case 'tool_execution_update':
               {
                 const step = getCurrentStep();
                 const target = step ? step.toolCalls : d2.toolCalls;
                 const tc = target.find((x) => x.id === event.toolCallId);
-                if (tc) tc.result = (tc.result || '') + event.delta;
+                if (tc && event.partialResult !== undefined) {
+                  // v0.5.0: partialResult 是 any 类型 (string / object / 等), FE 简化累积字符串
+                  const partial = typeof event.partialResult === 'string'
+                    ? event.partialResult
+                    : JSON.stringify(event.partialResult, null, 2);
+                  tc.result = (tc.result || '') + partial;
+                }
               }
               break;
-            case 'tool_end':
+            case 'tool_execution_end':
               {
+                // v0.5.0: event.isError (不是 v0.4.x 的 event.error)
                 const step = getCurrentStep();
                 const target = step ? step.toolCalls : d2.toolCalls;
                 const tc = target.find((x) => x.id === event.toolCallId);
                 if (tc) {
-                  tc.status = event.error ? 'error' : 'success';
+                  tc.status = event.isError ? 'error' : 'success';
                   tc.endedAt = new Date().toISOString();
                   if (typeof event.result === 'string') tc.result = event.result;
                   else if (event.result !== undefined) tc.result = JSON.stringify(event.result, null, 2);
                 }
               }
               break;
-            // v0.4.2.x fix: agent_end + error 已经在外层 case 处理 (外层早 return, 不会到内层 switch),
-            //   这里删掉 dead code 避免误导.
           }
           break;
         // v0.4.2 step 1: AgentSession 内置 retry 5 次指数退避, sidecar 转发 auto_retry_start / auto_retry_end
-        // 关键: retry 期间 AgentSession 不发 agent_end, 所以 streaming 状态保留,
-        // is-streaming 类的 shimmer 不会断. retryBySession 让 UI 显示"重试中 1/5...".
         case 'auto_retry_start':
           retryBySession.value = {
             ...retryBySession.value,
@@ -466,29 +453,37 @@ export const useChatStore = defineStore('chat', () => {
           console.log(`[chat] auto_retry_start: ${event.attempt}/${event.maxAttempts}, delayMs=${event.delayMs}, err=${event.errorMessage.slice(0, 80)}`);
           break;
         case 'auto_retry_end':
-          // 清理 retry 状态 (success 或 final failure 都已经发过)
+          // v0.5.0: event.attempt 单数 (不是 v0.4.x 的 attempts)
           retryBySession.value = { ...retryBySession.value, [sessionId]: null };
-          console.log(`[chat] auto_retry_end: success=${event.success}, attempts=${event.attempts}${event.finalError ? ', err=' + event.finalError.slice(0, 80) : ''}`);
+          console.log(`[chat] auto_retry_end: success=${event.success}, attempt=${event.attempt}${event.finalError ? ', err=' + event.finalError.slice(0, 80) : ''}`);
           break;
-        // v0.4.2 step 1: AgentSession 内置 compaction (手动 / 自动 threshold / overflow), sidecar 转发 compaction_start / compaction_end
+        // v0.4.2 step 1: AgentSession 内置 compaction (手动 / 自动 threshold / overflow)
         case 'compaction_start':
           console.log(`[chat] compaction_start: reason=${event.reason}`);
-          // FE 暂不显示 toast (简单 log), 后续如果用户反馈需要再加 ui store
           break;
         case 'compaction_end':
-          console.log(`[chat] compaction_end: reason=${event.reason} success=${event.success} willRetry=${event.willRetry}${event.errorMessage ? ', err=' + event.errorMessage.slice(0, 80) : ''}`);
+          // v0.5.0: Pi SDK CompactionResult + aborted + willRetry + errorMessage?
+          console.log(`[chat] compaction_end: reason=${event.reason} aborted=${event.aborted} willRetry=${event.willRetry}${event.errorMessage ? ', err=' + event.errorMessage.slice(0, 80) : ''}`);
           break;
-        case 'permission_request': {
-          // v0.4.1+ tool permission: sidecar 问 "LLM 想跑 X tool, 允许吗"
-          // 转发给 ui store 弹 PermissionDialog, 弹窗点击后调 tauri.sendPermissionResponse
-          // 弹窗同时缓存 sessionId, 因为 permission_response IPC 需要
-          console.log('[chat] permission_request:', event.toolName, 'args=', event.args);
-          useUiStore().openPermissionDialog({
-            toolCallId: event.toolCallId,
-            toolName: event.toolName,
-            args: event.args,
-            sessionId: event.sessionId,
-          });
+        case 'extension_ui_request': {
+          // v0.5.0: Pi SDK RPC 协议的 extension UI, 替代 v0.4.x 的 permission_request
+          // 跟 v0.4.x 比, 走的是通用 dialog (method: select/confirm/input/editor/notify) 而不只 tool permission
+          // 当前 v0.4.x FE UI 只展示 confirm (tool permission), 其它 method 只日志不弹窗
+          if (event.method === 'confirm') {
+            // tool permission 弹窗 (跟 v0.4.x permission_request 行为一致)
+            console.log('[chat] extension_ui_request confirm:', event.title, 'message=', event.message);
+            useUiStore().openPermissionDialog({
+              toolCallId: event.id,        // 弹窗用 id 字段存 (跟 extension_ui_response 的 id 配对)
+              toolName: event.title || 'Tool',
+              args: { message: event.message },
+              sessionId: event.sessionId,
+              // 关键: 弹窗的 respond 调 sendRpcCommand({ type: 'extension_ui_response', id, confirmed: true })
+              // 替代 v0.4.x 的 sendPermissionResponse(sessionId, toolCallId, allow)
+            });
+          } else {
+            // 其它 method (select / input / editor / notify) 当前不弹窗, 只日志
+            console.log(`[chat] extension_ui_request: method=${event.method} (not yet handled in UI)`, event);
+          }
           break;
         }
         default:
