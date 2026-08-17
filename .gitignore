@@ -60,6 +60,9 @@ src-tauri/gen/
 src-tauri/WixTools/
 *.app
 *.dmg
+# sidecar/dist/pi-agent-sidecar.exe 是 bun build --compile 产物, 必须 commit (D163
+#   跨项目规则: Tauri release 不依赖 system Node, 必须 ship standalone .exe). 例外:
+!sidecar/dist/pi-agent-sidecar.exe
 *.exe
 *.msi
 *.deb

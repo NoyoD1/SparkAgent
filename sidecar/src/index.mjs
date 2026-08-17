@@ -29,8 +29,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
 import {
   createAgentSessionFromServices,
@@ -56,9 +55,12 @@ import {
 //     内部 attachJsonlLineReader 注册 on('data') 时 stream 状态可能异常, 同样收不到 data
 // **改用 process.argv[2] 传 config JSON** — 跟 Pi SDK main.ts 的 pattern 一致, 完全绕开
 //   stdin pipe mode switch 问题. stdin 100% 归 runRpcMode 接管, 接 line 1 = RpcCommand.
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
+// v0.5.0 之前用 `import.meta.url` + `fileURLToPath` 算 __filename/__dirname, 但:
+//   - bun build --compile 出的 standalone .exe 里 import.meta.dir / __dirname 是开发机绝对路径
+//     (D144 / D163 跨项目规则), 拷到别机器找不到 sibling files → sidecar 直接 fail
+//   - v0.5.0 改造后, sidecar 不依赖 sibling files (config 走 argv[2], workspace 走 cwd or
+//     config.workspacePath, agentDir 走 getAgentDir() 用 USERPROFILE / HOME)
+//   - 所以 __filename / __dirname 是 dead code, bun compile 时不会嵌入路径, 删了避免误导
 const configArg = process.argv[2];
 if (!configArg) {
   console.error('[sidecar] no config arg in process.argv[2], exiting');

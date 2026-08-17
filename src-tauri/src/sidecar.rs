@@ -17,16 +17,17 @@
  *
  * 流式架构 (跟之前一样, 但逻辑简化):
  *   Tauri command (send_prompt / send_rpc_command)
- *     → tokio::spawn 启动 node sidecar (单进程多 RpcCommand, 一次 prompt → agent_end)
- *     → spawn 时 argv[2] 传 config JSON
+ *     → tokio::spawn 启动 sidecar .exe (单进程多 RpcCommand, 一次 prompt → agent_end)
+ *     → spawn 时 argv[1] 传 config JSON (bun runtime 重新设置 process.argv,
+ *       argv[0] = "bun", argv[1] = .exe 路径, argv[2] = user arg = config JSON)
  *     → stdin 写第一个 RpcCommand (prompt)
  *     → 注册 stdin 到 ActiveSidecars map, 让后续 send_rpc_command (e.g. permission_response
  *       → extension_ui_response / set_model / abort / compact) 找得到
  *     → 后台 task 读 stdout 逐行 parse RpcEvent, emit 'chat:event' 给 frontend
  *     → 收到 agent_end → 移除 map entry, child drop 时 kill_on_drop 杀进程
  *
- * 路径: dev 模式从 cwd 找 sidecar/src/index.mjs.
- *       production 模式需要 bundle Node + sidecar (Phase 3+ TODO).
+ * 路径: 走 CARGO_MANIFEST_DIR 编译时绝对路径找 sidecar/dist/pi-agent-sidecar.exe
+ *       (bun build --compile 产物, D163 跨项目规则: release 不依赖 system Node).
  */
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -81,21 +82,28 @@ fn default_permission_mode() -> String {
 }
 
 fn find_sidecar_script() -> Result<std::path::PathBuf, String> {
-    // 用 CARGO_MANIFEST_DIR (编译时绝对路径 = src-tauri/), parent() = 项目根
-    // 不用 current_dir() 因为 cargo tauri dev 时 binary 的 cwd 是 src-tauri/
+    // v0.5.6: 不再依赖 system node + sidecar/src/index.mjs (D163 / D144 跨项目规则).
+    //   之前调 `Command::new("node") .arg(&script)`, 要求用户机器装 Node.js + 项目内 .mjs
+    //   文件存在, MSI/NSIS installer 不打 .mjs 源码 → release .exe 在用户机器 fail.
+    //   现在调 `pi-agent-sidecar.exe` (bun build --compile 出的 standalone executable),
+    //   108 MB self-contained, 拷任何 Windows 机器都能直接跑, 不依赖 system Node / 项目源码.
+    // dev 模式: bun compile 后产物在 sidecar/dist/pi-agent-sidecar.exe, Tauri .exe 走
+    //   CARGO_MANIFEST_DIR 找.
+    // 路径: <project_root>/sidecar/dist/pi-agent-sidecar.exe
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let project_root = std::path::Path::new(manifest_dir).parent().ok_or_else(|| {
         format!("CARGO_MANIFEST_DIR ({manifest_dir}) has no parent (cannot find project root)")
     })?;
-    let script = project_root.join("sidecar").join("src").join("index.mjs");
-    if !script.exists() {
+    let exe = project_root.join("sidecar").join("dist").join("pi-agent-sidecar.exe");
+    if !exe.exists() {
         return Err(format!(
-            "Sidecar script not found at {}. cwd={:?}",
-            script.display(),
+            "Sidecar executable not found at {}. Run `bun build --compile --target=bun-windows-x64 --outfile {}` first. cwd={:?}",
+            exe.display(),
+            exe.display(),
             std::env::current_dir().ok()
         ));
     }
-    Ok(script)
+    Ok(exe)
 }
 
 fn emit_error(app: &AppHandle, session_id: &str, message: &str) {
@@ -157,8 +165,7 @@ pub fn run_prompt(
             }
         };
 
-        let mut child = match Command::new("node")
-            .arg(&script)
+        let mut child = match Command::new(&script)
             .arg(&config_arg)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -167,12 +174,12 @@ pub fn run_prompt(
             .spawn()
         {
             Ok(c) => {
-                debug_log(&format!("node spawned, pid={}", c.id().unwrap_or(0)));
+                debug_log(&format!("sidecar spawned, pid={}", c.id().unwrap_or(0)));
                 c
             }
             Err(e) => {
-                debug_log(&format!("spawn node failed: {e}"));
-                emit_error(&app, &session_id, &format!("spawn node failed: {e}"));
+                debug_log(&format!("spawn sidecar failed: {e}"));
+                emit_error(&app, &session_id, &format!("spawn sidecar failed: {e}"));
                 return;
             }
         };
