@@ -16,7 +16,8 @@
 | **v0.4.2 step 1** | **上下文管理 (createAgentSession + SessionManager per-workspace 隔离)** | 短期记忆 / 跨 workspace 隔离 | 🟢 (4/4 smoke PASS) | **2026-08-17** |
 | **v0.5.0 ~ v0.5.8** | **RPC 模式重构 + Release** | sidecar 重写 + Pi SDK RPC + Tauri 2 标准 sidecar + 端到端验证 | 🟢 (14 commits + 验证 PASS) | **2026-08-17** |
 | **v0.5.8 hotfix** | **stale binary 修复** | beforeBuildCommand 路径加 ../ (Tauri 2 cwd = app/) + cargo tauri build 嵌新 dist | 🟢 (1 commit `66e7a9a`) | **2026-08-18** |
-| **v0.4.3** | **Compaction UI (redesign)** | ContextIndicator 紧凑指示器 + popover 二级展开 | 🟢 (commit `681f248` + 嵌入新 binary 待验) | **2026-08-18** |
+| **v0.4.3** | **Compaction UI (redesign + Polish)** | ContextIndicator 紧凑指示器 + popover 二级展开 + 5 轮 polish (1→2.5) + D182 token 计量修正 | 🟢 (commit `681f248` + 5 轮 polish commit `57e1a47`, 端到端验证 PASS) | **2026-08-18** |
+| **v0.5.8 hotfix²** | **D162 修正 (改回 `node scripts/build-fe.mjs`)** | tauri-cli 2.11.4 源码实测推翻 D162/D144/D181 (cwd 实际 = 项目根, 不是 app/), 推翻 v0.5.8 hotfix 66e7a9a 的 `../scripts/` 错改 | 🟢 (1 commit `6a3e1a4`, 端到端验证 PASS) | **2026-08-18** |
 | **v0.4.4 系列** | **P0 Pi SDK 暴露 (table stakes)** | skills / slash cmds / rules / usage | ⚪ (规划) | **2026-09 目标** |
 | v0.5.0+ | P1 自建 | Plan mode / sub-agents / MCP 集成 | ⚪ | TBD |
 | v0.6 | Web app + Agent SDK | claude.ai/code 对标 / 编程 API | ⚪ | TBD |
@@ -218,13 +219,20 @@ src-tauri\binaries\pi-agent-sidecar-x86_64-pc-windows-msvc.exe  108 MB  (Tauri �
 
 #### 🥇 P0 — 1 个月内必做 (table stakes for 2026, Pi SDK 暴露, 0 风险)
 
-- [x] ✅ **v0.4.3 Compaction UI** (commit `5d5b536` + redesign commit `681f248`, 2026-08-18 00:55) — UI 暴露 Pi SDK `core/compaction/` 已有 `compact` RPC, redesign 走 Claude Code 紧凑指示器 + popover 二级展开 (UX 原则: 功能逻辑一体, 不割裂)
+- [x] ✅ **v0.4.3 Compaction UI** (commit `5d5b536` + redesign commit `681f248` + 5 轮 polish commit `57e1a47`, 2026-08-18 02:32, 端到端验证 PASS) — UI 暴露 Pi SDK `core/compaction/` 已有 `compact` RPC, redesign 走 Claude Code 紧凑指示器 + popover 二级展开 (UX 原则: 功能逻辑一体, 不割裂). Polish 5 轮落地: (1) popover minimalist (删 cost + BYOK + 1px border + box-shadow none + TaskDrawer 删上下文加会话文件), (2) 4 dots 灰阶, (2.3) 删 X + compress text link, (2.4) D182 修正 (Pi SDK 0.84.2 message_update 顶层 usage 修正, 0 0 0 0 → 数字正常), (2.5) 压缩按钮挪到"上下文窗口"标题后面 (D184 user 原文字面理解).
 - [ ] **v0.4.4 Skills (Pi SDK 暴露)** (2-3h, 极高 ROI) — Pi SDK 有 `core/skills.ts` (loadSkillsFromDir + formatSkillsForPrompt), UI 加 skill 管理面板
 - [ ] **v0.4.5 Slash commands (内置)** (2-3h, 高 ROI) — 走 Pi SDK `core/slash-commands.ts` 暴露内置 + custom 命令
 - [ ] **v0.4.6 Project rules (类似 CLAUDE.md)** (1-2h, 高 ROI) — 走 UI 让 user 创建/编辑 project memory file, 走 `appendSystemPromptOverride` 注入
 - [ ] **v0.4.7 /usage 完整化** (2h, 中 ROI) — 走 Pi SDK `usage-totals.ts` + 分类聚合 + UI 图表
 
 **P0 进度: 1/5 (v0.4.3 ✅, 还有 4 项) — 0 风险快速做完. 估计 1 周内完剩下 4 项.**
+
+#### P0 期间 (2026-08-18) 修正的 3 条 memory 规则 (D170 同步 + D183 教训)
+
+- **D162 / D144 / D181 全部错的** — Tauri 2 在 Windows 平台 beforeBuildCommand 实际 cwd = `dirs.frontend` = **项目根** (`D:\UnityWork\Tools\Pi`), 不是 `app/`. 根因: tauri-cli 2.11.4 `WalkBuilder` + `parents(false) + max_depth(3)` 找不到 `app/package.json` (是兄弟不是子), fallback 到 `tauri.parent()`. 修法: `beforeBuildCommand` 路径用 `node scripts/build-fe.mjs` (无 `../`, 跟 v0.5.8 commit 33fc5fa 一致), 推翻 v0.5.8 hotfix 66e7a9a 改回 `../scripts/` 的错改. 端到端验证: 0 0 0 0 (D182 错 schema) → 4 行 token 数字正常.
+- **D182 修正** — Pi SDK 0.84.2 `json-event.ts:6-15 + 31-45` 显式把 `message_update` 顶层加 `usage`, **没有顶层 `message` 字段** (是 `message_start + deltas build it, message_end 提供 final`, by design). `message_end` 保持原 schema, 顶层无 usage, 嵌在 `event.message.usage`. 修法: tauri.ts message_update schema 删顶层 `message` 加顶层 `usage`; chat.ts case 'message_update' 改读 `event.usage` (顶层).
+- **D183 教训** — 改 memory rule 前必须实测, 不能凭 user 反馈推论. v0.5.8 commit 33fc5fa 当时实测 cwd = app/ 实际是 `build-fe.mjs` 内部 `import.meta.url` 自己定位的 (跟 cargo 实际 cwd 无关, log 输出 cwd 是脚本算的), D162/D144/D181 全部基于这个错误实测, 这次 tauri-cli 2.11.4 源码 + `cmd echo CWD=%CD%` 实测推翻.
+- **D184 教训** — 凭草图推测 UI 位置会连续 4 轮错 (v0.4.3.2 / 2.2 / 2.3 / 2.4 全部把"压缩"放在 0% 后面, user 凌晨 2:30 强烈不满). **按 user 原话字面理解, 不推测**.
 
 #### 🥈 P1 — 2-3 个月内做 (重要, Pi SDK 缺需自建)
 
