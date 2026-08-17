@@ -14,13 +14,17 @@
 | v0.3.5 - v0.3.8.27 | UX Polish | 布局 / 主题 / 折叠 / 字体 / 设计系统 | ✅ | 2026-08 中 |
 | **v0.4** | **Tool Call 真正落地** | 文件读/写 / shell / 权限确认 / abort | 🟡 (4/6) | **2026-08 中** |
 | **v0.4.2 step 1** | **上下文管理 (createAgentSession + SessionManager per-workspace 隔离)** | 短期记忆 / 跨 workspace 隔离 | 🟢 (4/4 smoke PASS) | **2026-08-17** |
-| v0.5 | Memory | 跨会话 / 项目级 / 自动提取 | ⚪ | TBD |
-| v0.6 | Skills + MCP | 自定义指令 + MCP server 接入 | ⚪ | TBD |
-| v0.7 | Subagent / Plan | 多 agent 切换 / Plan 模式 | ⚪ | TBD |
-| v0.8 | 协作 / 分享 | session 导出 / 团队空间 | ⚪ | TBD |
-| v0.9 | 跨平台 | macOS / Linux 适配 | ⚪ | TBD |
-| **Pre-release** | **打包 (release 前置)** | **sidecar 编译成独立 .exe + 单 binary 分发** | ⚪ | **v1.0 前必做** |
+| **v0.5.0 ~ v0.5.8** | **RPC 模式重构 + Release** | sidecar 重写 + Pi SDK RPC + Tauri 2 标准 sidecar + 端到端验证 | 🟢 (14 commits + 验证 PASS) | **2026-08-17** |
+| **v0.4.3 系列** | **P0 Pi SDK 暴露 (table stakes)** | compaction / skills / slash cmds / rules / usage | ⚪ (规划) | **2026-09 目标** |
+| v0.5.0+ | P1 自建 | Plan mode / sub-agents / MCP 集成 | ⚪ | TBD |
+| v0.6 | Web app + Agent SDK | claude.ai/code 对标 / 编程 API | ⚪ | TBD |
+| v0.7 | 体验增强 | Auto mode / Voice / Hooks / Notepads | ⚪ | TBD |
+| v0.8 | 协作 + 平台扩展 | Team rules / Cloud sync / VSCode 插件 | ⚪ | TBD |
+| v0.9 | 跨平台 | macOS / Linux / Mobile POC | ⚪ | TBD |
+| **Pre-release** | **打包 (release 前置)** | **sidecar 编译成独立 .exe + 单 binary 分发** | 🟢 (v0.5.6 done) | **v1.0 前必做** |
 | **v1.0** | **稳定版** | 自动更新 + 完整文档 + 用户指南 | ⚪ | TBD |
+
+> **roadmap 重大更新 (2026-08-17)**: 跟 Claude Code v2.1.x / Trae v2.0+ / Cursor 3.x 2026 Q2 主流产品对标后, 决定走 **"Pi SDK 暴露优先 + 自建补缺"** 路线, 详细 43 项功能对比见 [05-competitive-analysis-2026.md](05-competitive-analysis-2026.md). 短期 (0-6 月) P0 + P1 重点补 table stakes, 长期评估是否换底座.
 
 ---
 
@@ -201,13 +205,46 @@ src-tauri\binaries\pi-agent-sidecar-x86_64-pc-windows-msvc.exe  108 MB  (Tauri �
 
 完整 v0.5 cycle 收官: Phase 1-3 + 3 hotfix + 1 release 收尾 + 1 doc sync + 1 Tauri 2 sidecar 机制补全 + 1 端到端验证 = 14 commits, 全部 landed + 端到端验过.
 
-### 后续 (v0.5.9+ 待做)
+### 后续 (v0.5.9+ 待做) — 2026-08-17 竞品对标重排
 
-- [ ] v0.4.3: compaction 按钮 (UI 暴露 Pi SDK compact RPC, 跟 context 计数集成)
-- [ ] v0.4.4: 长期记忆 + 向量检索 + Context Manager 中央协调
-- [ ] v0.5.1: image tab 完整化 (multipart upload + drag-drop + preview)
-- [ ] v0.5.2: multi-agent / sub-agent 探索 (Pi SDK sub-agent extension 模式)
-- [ ] v0.5.3: Tauri 2 mobile / iPad / Android 调研 (POC)
+> **roadmap 重大更新**: 跟 Claude Code v2.1.x / Trae v2.0+ / Cursor 3.x 2026 Q2 主流产品对标后, 决定走 **"Pi SDK 暴露优先 + 自建补缺"** 路线, 详细 43 项功能对比见 [05-competitive-analysis-2026.md](05-competitive-analysis-2026.md). 短期 (0-6 月) P0 + P1 重点补 table stakes, 长期评估是否换底座.
+
+#### 🥇 P0 — 1 个月内必做 (table stakes for 2026, Pi SDK 暴露, 0 风险)
+
+- [ ] **v0.4.3 Compaction UI** (1-2h, 极高 ROI) — UI 暴露 Pi SDK `core/compaction/` 已有 `compact` RPC, 按钮调 `send_rpc_command` 即完事, 跟 context 计数集成
+- [ ] **v0.4.4 Skills (Pi SDK 暴露)** (2-3h, 极高 ROI) — Pi SDK 有 `core/skills.ts` (loadSkillsFromDir + formatSkillsForPrompt), UI 加 skill 管理面板
+- [ ] **v0.4.5 Slash commands (内置)** (2-3h, 高 ROI) — 走 Pi SDK `core/slash-commands.ts` 暴露内置 + custom 命令
+- [ ] **v0.4.6 Project rules (类似 CLAUDE.md)** (1-2h, 高 ROI) — 走 UI 让 user 创建/编辑 project memory file, 走 `appendSystemPromptOverride` 注入
+- [ ] **v0.4.7 /usage 完整化** (2h, 中 ROI) — 走 Pi SDK `usage-totals.ts` + 分类聚合 + UI 图表
+
+**P0 全部是 Pi SDK 已有功能 UI 暴露, 0 风险快速做完. 1-2 周完 5 项.**
+
+#### 🥈 P1 — 2-3 个月内做 (重要, Pi SDK 缺需自建)
+
+- [ ] **v0.5.0 Plan mode** (4-6h, 高 ROI) — Pi SDK 没原生 plan mode, 走 PreToolUse permission 拦截 + 第一个 tool call 让 AI 写 plan + user 审批
+- [ ] **v0.5.1 Sub-agents (Explore/Plan)** (8-12h, 高 ROI) — Pi SDK 没原生 sub-agent, 走多个 sidecar 进程 + 主控协调, 短期只支持 Explore/Plan 两种
+- [ ] **v0.5.2 Background tasks** (中 ROI) — 走 sidecar 进程 detach + 状态同步, UI 列出 background tasks
+- [ ] **v0.5.3 MCP 集成 Phase 1 (stdio)** (8-10h, 极高 ROI) — 走 sidecar 启动 stdio MCP server + Pi SDK 走 `extensionFactories` 暴露为 tool
+
+#### 🥉 P2 — 6 个月内做 (nice-to-have / 差异化)
+
+- [ ] **v0.6.0 Web app (claude.ai/code 对标)** — 走 Tauri 2 web target 复用前端, 部署到 Vercel/自建
+- [ ] **v0.6.0 Agent SDK (编程 API)** — 走 Tauri command 暴露为 JSON-RPC, 跟现有 send_rpc_command 复用
+- [ ] **v0.7.0 Auto mode (智能 permission)** — 走 second 模型做 classifier 评估每个 tool call 风险
+- [ ] **v0.7.0 Voice input** — 走 web speech API
+- [ ] **v0.7.0 CLI 模式** — 走 Tauri 2 CLI target 复用现有 sidecar
+- [ ] **v0.7.0 Notepads / Canvas** — 差异化, 走 Vue 3 + 自实现画布
+- [ ] **v0.8.0 Team 共享 rules** — 跟 cloud sync 一起做
+- [ ] **v0.8.0 跨设备 cloud sync** — 走 Tauri 2 cloud sync
+- [ ] **v0.8.0 Plugin marketplace** — 跟 Team 共享一起做
+- [ ] **v0.8.0 IDE 插件 (VS Code)** — 走 webview embed 简化版
+- [ ] **v0.9.0 跨平台** — macOS / Linux / Mobile POC
+
+#### 历史项 (已包含在前面 milestone)
+
+- [x] ~~v0.5.1: image tab 完整化~~ — 改到 P2 v0.7.0 跟 canvas 一起做
+- [x] ~~v0.5.2: multi-agent / sub-agent 探索~~ — 改到 P1 v0.5.1
+- [x] ~~v0.5.3: Tauri 2 mobile / iPad / Android 调研~~ — 改到 P2 v0.9.0 跨平台
 
 ---
 
