@@ -24,7 +24,12 @@
 | **Pre-release** | **打包 (release 前置)** | **sidecar 编译成独立 .exe + 单 binary 分发** | 🟢 (v0.5.6 done) | **v1.0 前必做** |
 | **v1.0** | **稳定版** | 自动更新 + 完整文档 + 用户指南 | ⚪ | TBD |
 
-> **roadmap 重大更新 (2026-08-17)**: 跟 Claude Code v2.1.x / Trae v2.0+ / Cursor 3.x 2026 Q2 主流产品对标后, 决定走 **"Pi SDK 暴露优先 + 自建补缺"** 路线, 详细 43 项功能对比见 [05-competitive-analysis-2026.md](05-competitive-analysis-2026.md). 短期 (0-6 月) P0 + P1 重点补 table stakes, 长期评估是否换底座.
+> **roadmap 重大更新 (2026-08-17 23:26, user 拍板)**: 跟 Claude Code v2.1.x / Trae v2.0+ / Cursor 3.x 2026 Q2 主流产品对标后, 决定走 **"Pi SDK 暴露优先 + 自建补缺"** 路线, 详细 43 项功能对比见 [05-competitive-analysis-2026.md](05-competitive-analysis-2026.md). 短期 (0-6 月) P0 + P1 重点补 table stakes, 长期评估是否换底座.
+>
+> **ADR 拍板状态 (2026-08-17 23:26)**:
+> - [ADR-0021](04-adr/0021-pi-agent-2026-strategy.md) ✅ **accepted** (A 方案: 跟 Pi SDK 走)
+> - [ADR-0022](04-adr/0022-sub-agent-architecture.md) ⚪ **proposed** (待 user 拍板 A/B/C)
+> - [ADR-0023](04-adr/0023-mcp-integration.md) ✅ **accepted** (3 阶段全做)
 
 ---
 

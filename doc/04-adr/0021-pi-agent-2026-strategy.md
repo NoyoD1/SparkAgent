@@ -1,8 +1,8 @@
 # ADR-0021: Pi Agent 2026 战略 — 跟 Pi SDK 走 + 自建补缺 (D172 演进版)
 
-**Status**: proposed (2026-08-17, 待 user 拍板)
+**Status**: accepted (2026-08-17, user 拍板 A 方案)
 **Context**: v0.5.9 端到端验证通过后, 跟 Claude Code v2.1.x / Trae v2.0+ / Cursor 3.x 2026 Q2 主流产品对标, 识别 13 项 P0/P1 缺口
-**Decider**: 待 user 拍板 (按 "判断题不要罗列 pros/cons 让用户选" 规则, AI 给推荐)
+**Decider**: user 拍板 A 方案 (2026-08-17 23:26) — 跟 Pi SDK 走 + 自建补缺, 短期 P0 1-2 周 + P1 2-3 月, 6 月再评估是否切换底座
 
 ## 当前 Pi SDK 0.84.2 能力盘点
 
@@ -103,14 +103,21 @@
 
 ## 决策点 (user 拍板)
 
-- [ ] 同意 A 方案
-- [ ] 或同意 B/C 方案 (需 user 给出具体理由)
-- [ ] 或混合 (P0 走 A, P1 评估 B/C)
+- [x] ✅ 同意 A 方案 (2026-08-17 23:26, user 拍板)
+- [ ] 短期 (1-2 周): P0 5 项 Pi SDK 暴露 (compaction / skills / slash / rules / usage)
+- [ ] 中期 (2-3 月): P1 4 项自建 (Plan mode / Sub-agents / Background / MCP)
+- [ ] 6 月时: 评估是否切 B/C 方案
+
+### 落地计划
+
+- v0.4.3 (~1 周后): Compaction UI (Pi SDK 已有, 1-2h 即可)
+- v0.4.4-v0.4.7 (~2 周内): 5 项 P0 全部 UI 暴露
+- v0.5.0+ (~2-3 月): P1 自建功能
 
 ---
 
 **关联**:
 - [05-competitive-analysis-2026.md](../05-competitive-analysis-2026.md) — 43 项功能对比
 - [02-roadmap.md](../02-roadmap.md) — P0/P1/P2 重排后的 roadmap
-- ADR-0022 (TBD) — Sub-agent 架构
-- ADR-0023 (TBD) — MCP 集成方案
+- ADR-0022 (TBD) — Sub-agent 架构 (待 user 拍板)
+- ADR-0023 — MCP 集成方案 (user 拍板, 3 阶段实施)

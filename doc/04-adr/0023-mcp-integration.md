@@ -1,8 +1,8 @@
 # ADR-0023: MCP 集成方案 — stdio Phase 1 + SSE/HTTP Phase 2
 
-**Status**: proposed (2026-08-17, 待 user 拍板)
+**Status**: accepted (2026-08-17, user 拍板 3 阶段全做)
 **Context**: Pi SDK 0.84.2 没原生 MCP 支持, 主流产品 (Claude Code / Trae / Cursor) 都有, 1000+ community MCP servers
-**Decider**: 待 user 拍板
+**Decider**: user 拍板 3 阶段全做 (2026-08-17 23:26) — Phase 1 v0.5.3 stdio + Phase 2 v0.5.4 SSE/HTTP + Phase 3 v0.5.5 UI 管理面板
 
 ## 背景
 
@@ -105,9 +105,25 @@ Pi SDK 0.84.2 没 MCP 支持. 我们的方案: sidecar 启动 MCP server (走 st
 
 ## 决策点 (user 拍板)
 
-- [ ] 同意 3 阶段实施 (Phase 1 v0.5.3 / Phase 2 v0.5.4 / Phase 3 v0.5.5)
-- [ ] 或只要 Phase 1 (stdio), Phase 2/3 后续评估
-- [ ] 或不实施, 继续等 Pi SDK 加 MCP
+- [x] ✅ 同意 3 阶段全做 (2026-08-17 23:26, user 拍板)
+
+### 落地计划
+
+- **v0.5.3 (~2-3 月)**: Phase 1 stdio transport (核心 8-10h)
+  - sidecar 加 mcp client (~100 行)
+  - Tauri 加 mcp_start_server / mcp_stop_server / mcp_list_servers / mcp_invoke tool
+  - 配置文件: ~/.pi/mcp_servers.json
+  - Pi SDK `extensionFactories` 暴露 MCP tools 给 LLM
+  - 测试: 集成 filesystem MCP server, 验证 LLM 能 list/read/write 文件
+
+- **v0.5.4 (~3 月)**: Phase 2 SSE + Streamable HTTP transport (4h)
+  - mcp client 加 SSE / Streamable HTTP 客户端
+  - 远程 MCP server 支持 (e.g. hosted Linear/Figma MCP)
+
+- **v0.5.5 (~3-4 月)**: Phase 3 UI management 面板 (2h)
+  - Settings → MCP Servers 页面
+  - 启停 / 配置 / 状态查看
+  - 跟现有 BYOK keychain 集成 (env 引用 keychain)
 
 ---
 

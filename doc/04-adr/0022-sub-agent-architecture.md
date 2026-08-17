@@ -114,13 +114,47 @@ Pi SDK 0.84.2 0 支持 sub-agent (grep 验证无 `subagent` / `spawnAgent` / `fo
 
 ## 决策点 (user 拍板)
 
-- [ ] 同意 A 方案
-- [ ] 或 B 方案
-- [ ] 或 C 方案 (不实现)
+- [ ] 同意 A 方案 (多 sidecar 进程, 推荐)
+- [ ] 或 B 方案 (单进程多 session)
+- [ ] 或 C 方案 (不实现, 等 Pi SDK 演进)
+
+### 方案 A vs B 详细对比 (2026-08-17 23:26 user 提问后补充)
+
+**类比**:
+- 方案 A: 开了 3 家**独立公司**, 每家有自己的 CEO + 办公室 + 账本
+- 方案 B: **一家公司**开了 3 个**独立部门**, 共享 CEO 共享办公室, 切换会议桌 (session) 协作
+
+**关键区别对比表**:
+
+| 维度 | 方案 A (多 sidecar 进程) | 方案 B (单进程多 session) |
+|---|---|---|
+| **类比** | 3 家独立公司 | 1 家公司 3 个部门 |
+| **进程数** | 3 个 .exe (108 MB × 3 = 324 MB) | 1 个 .exe (108 MB) |
+| **启动延迟** | 每个 sub-agent ~300ms (spawn) | ~ms (进程内切 session) |
+| **隔离强度** | 🔥 强 (sub-agent 崩了 main 没事) | ⚠️ 弱 (sub-agent 崩了 main 也崩) |
+| **资源开销** | 高 (3 × 108 MB) | 低 (1 × 108 MB) |
+| **通信路径** | 跨进程: stdin/stdout JSONL + Tauri 转发 | 进程内: 直接 API 调用 |
+| **Pi SDK 兼容性** | ✅ 0 改动, 复用 v0.5.0+ RPC | ⚠️ 需 v0.5.4 sync fix + 多 session 实测, **Pi SDK 0.84.2 单进程多 session 未验证** |
+| **复用现有基础设施** | ✅ 100% 复用 v0.5.8 Tauri 2 sidecar | ⚠️ 需扩展 sidecar 内部加 session 路由 |
+| **跟 Pi SDK 演进兼容** | ✅ Pi SDK 加 sub-agent 后走 plugin 替换 | ⚠️ Pi SDK 演进可能改 session 协议 |
+| **tool 沙箱** | ✅ 每个 sub-agent 独立 (permission 隔离) | ⚠️ 共享 permission 状态 |
+| **实施时间** | 8-12h (复用基础设施) | 12-16h (需新增 session router + state 一致性测试) |
+| **风险** | 🟢 低 (复用已验证) | 🟡 中 (未实测) |
+
+**为什么 A 是推荐**:
+1. **0 基础设施改动**: 复用 v0.5.8 的 Tauri 2 标准 sidecar 机制 (D172 规则), 跟 main sidecar 跑一模一样的协议
+2. **风险最低**: 不需要碰 Pi SDK session 切换逻辑, 不需要单进程多 session state 一致性测试
+3. **隔离最强**: sub-agent 跑崩了 main 没事 (这正是 Claude Code 把 sub-agent 独立的原因)
+4. **跟 Pi SDK 演进兼容**: Pi SDK 如果加 sub-agent 原生支持, 我们走 plugin layer 替换, 不动业务代码
+
+**A 方案的"资源浪费"问题怎么破**:
+- 短期: 接受 108 MB × N (3 个 sub-agent = 324 MB), 现代电脑 16 GB 起步, 毛毛雨
+- 中期: **sub-agent 复用** (同一 type 复用同一进程, LLM 请求走 multiplex)
+- 长期: Pi SDK 加 sub-agent 原生支持后切 B (走 plugin 替换 A 的子进程层)
 
 ---
 
 **关联**:
 - [05-competitive-analysis-2026.md](../05-competitive-analysis-2026.md) — sub-agent 缺口分析
-- ADR-0021 — Pi Agent 2026 战略
-- ADR-0023 (TBD) — MCP 集成方案
+- ADR-0021 — Pi Agent 2026 战略 (user 拍板 A 方案)
+- ADR-0023 — MCP 集成方案 (user 拍板 3 阶段全做)
