@@ -36,6 +36,7 @@ import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
+  DefaultResourceLoader,
   getAgentDir,
   runRpcMode,
   SessionManager,
@@ -137,7 +138,7 @@ if (config.baseUrl) {
 
 // ====== 3. createAgentSessionRuntime factory ======
 // 跟 Pi SDK main.ts 的 createRuntime 一样, 走完整 services + modelRuntime + sessionManager 流程.
-// 我们的 factory 注入 user-custom provider + setRuntimeApiKey.
+// 我们的 factory 注入 user-custom provider + setRuntimeApiKey + permission extension.
 const createRuntime = async ({
   cwd,
   agentDir: dir,
@@ -147,6 +148,17 @@ const createRuntime = async ({
     cwd,
     agentDir: dir,
     modelRuntimeSignal: AbortSignal.timeout(15_000),
+    // v0.5.0 fix: 传 InlineExtension extensionFactories, 让 Pi SDK 在 on('tool_call') 时
+    //   弹 confirm 弹窗 (跟 v0.4.x sidecar 自写 Extension 行为一致).
+    //   之前 v0.5.0 我们没传, 导致 no handlers → beforeToolCall 永远 return undefined →
+    //   tool call 直接放行, 即使 permission mode = 'ask' 也不弹窗.
+    //   配合 runRpcMode 内部 ExtensionUIContext, handler 调 ctx.ui.confirm() 会
+    //   emit extension_ui_request → FE 弹窗 → user 选 → extension_ui_response →
+    //   handler 据此 return { block: true } (拒绝) 或 undefined (放行).
+    //   mode = 'allow' 时不传 extensionFactories, 走 Pi SDK 默认 (tool 直接放行, 不弹窗).
+    resourceLoaderOptions: config.permissionMode === 'allow' ? {} : {
+      extensionFactories: [createPermissionExtension(config.permissionMode)],
+    },
   });
 
   const providerId = config.baseUrl ? 'user-custom' : config.provider;
@@ -190,7 +202,7 @@ const createRuntime = async ({
   // 4) tools: 7 内置 (read/bash/edit/write/grep/find/ls), 跟 v0.4.2 step 1 一致
   const tools = config.tools ?? ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'];
 
-  console.error(`[sidecar] creating agent session: model=${model.provider}/${model.id} thinking=${config.thinkingLevel ?? 'medium'} tools=${tools.join(',')}`);
+  console.error(`[sidecar] creating agent session: model=${model.provider}/${model.id} thinking=${config.thinkingLevel ?? 'medium'} tools=${tools.join(',')} permissionMode=${config.permissionMode ?? 'ask'}`);
 
   return createAgentSessionFromServices({
     services,
@@ -200,6 +212,64 @@ const createRuntime = async ({
     tools,
   });
 };
+
+/**
+ * v0.5.0 权限 extension: 把 v0.4.x 自写的 beforeToolCall hook 走 InlineExtension
+ *   on('tool_call') 重新实现, 跟 Pi SDK 0.84.2 的 runRpcMode 配对.
+ *
+ * 工作流:
+ *   1. tool call 之前 Pi SDK 调 extension 全部 on('tool_call') handler
+ *   2. handler 调 ctx.ui.confirm(title, message) — runRpcMode 内部把 confirm 翻译成
+ *      extension_ui_request RPC event emit 给 FE
+ *   3. FE 弹窗 → user 选 → FE 写 extension_ui_response RpcCommand 到 sidecar stdin
+ *   4. runRpcMode 路由回 pendingExtensionRequests.get(id) → resolve → handler 拿到 boolean
+ *   5. handler 据此 return { block: true, reason } (拒绝) 或 undefined (放行)
+ *   6. Pi SDK 继续或终止 tool call
+ *
+ * 跟 v0.4.x 区别: v0.4.x 是我们 sidecar 直接 emit permission_request 跟 FE 通信.
+ *   v0.5.0 走 Pi SDK 标准 extension_ui_request 协议, 跟 Pi 生态兼容.
+ */
+function createPermissionExtension(permissionMode) {
+  return (pi) => {
+    pi.on('tool_call', async (event, ctx) => {
+      // event.toolName, event.toolCallId, event.input
+      const toolName = event.toolName;
+      const toolArgs = event.input || {};
+      const argsPreview = JSON.stringify(toolArgs).slice(0, 200);
+
+      if (permissionMode === 'deny') {
+        console.error(`[perm] deny ${toolName} (mode=deny)`);
+        return { block: true, reason: 'Tool use denied (permission mode=deny)' };
+      }
+
+      if (permissionMode === 'allow') {
+        // 理论上不会到这里 (mode=allow 不传 extensionFactories), 兜底
+        console.error(`[perm] allow ${toolName} (mode=allow fallback)`);
+        return undefined;
+      }
+
+      // mode = 'ask' (默认): 弹 confirm 弹窗
+      console.error(`[perm] ask ${toolName} args=${argsPreview}`);
+      try {
+        const allowed = await ctx.ui.confirm(
+          `Allow tool: ${toolName}`,
+          JSON.stringify(toolArgs, null, 2),
+        );
+        if (allowed) {
+          console.error(`[perm] user allowed ${toolName}`);
+          return undefined;
+        } else {
+          console.error(`[perm] user denied ${toolName}`);
+          return { block: true, reason: 'User denied permission' };
+        }
+      } catch (e) {
+        // confirm 抛错 (e.g. RPC stream closed, FE disconnected) — 默认 block
+        console.error(`[perm] confirm failed for ${toolName}:`, e instanceof Error ? e.message : String(e));
+        return { block: true, reason: `Permission prompt failed: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    });
+  };
+}
 
 // ====== 4. 创 runtime ======
 const runtime = await createAgentSessionRuntime(createRuntime, {
