@@ -71,62 +71,62 @@ async function respond(allow: boolean) {
 </script>
 
 <template>
-  <Transition name="perm-fade">
-    <div v-if="isOpen" class="perm-overlay" @click.self="respond(false)">
-      <div class="perm-dialog" role="dialog" aria-modal="true">
-        <div class="perm-dialog__head">
-          <Shield :size="18" :stroke-width="1.75" class="perm-dialog__head-icon" />
-          <span class="perm-dialog__head-title">工具权限确认</span>
-          <button class="perm-dialog__close" title="拒绝" @click="respond(false)">
-            <X :size="16" :stroke-width="1.75" />
-          </button>
-        </div>
-        <div class="perm-dialog__body">
-          <p class="perm-dialog__desc">
-            AI 想执行 <strong>{{ toolLabel }}</strong> 操作, 是否允许?
-          </p>
-          <div v-if="toolArgs.length > 0" class="perm-dialog__args">
-            <div v-for="[k, v] in toolArgs" :key="k" class="perm-dialog__arg">
-              <span class="perm-dialog__arg-key">{{ k }}</span>
-              <code class="perm-dialog__arg-value">{{ v }}</code>
-            </div>
+  <!--
+    v0.5.0: 不再 Teleport to body + 居中 modal.
+    inline 渲染在 ChatMain .pad-chatmain__composer-area 内、Composer 正上方.
+    inline flow 性质保证弹窗底边始终贴 Composer 顶边, Composer 高度动态变化时弹窗自然跟随.
+    不用 ResizeObserver 也不用 ResizeEvent, 浏览器 inline flow 自动处理.
+  -->
+  <Transition name="perm-slide-up">
+    <div v-if="isOpen" class="perm-dialog" role="alertdialog" aria-modal="false">
+      <div class="perm-dialog__head">
+        <Shield :size="16" :stroke-width="1.75" class="perm-dialog__head-icon" />
+        <span class="perm-dialog__head-title">工具权限确认</span>
+        <button class="perm-dialog__close" title="拒绝" @click="respond(false)">
+          <X :size="14" :stroke-width="1.75" />
+        </button>
+      </div>
+      <div class="perm-dialog__body">
+        <p class="perm-dialog__desc">
+          AI 想执行 <strong>{{ toolLabel }}</strong> 操作, 是否允许?
+        </p>
+        <div v-if="toolArgs.length > 0" class="perm-dialog__args">
+          <div v-for="[k, v] in toolArgs" :key="k" class="perm-dialog__arg">
+            <span class="perm-dialog__arg-key">{{ k }}</span>
+            <code class="perm-dialog__arg-value">{{ v }}</code>
           </div>
-          <p v-else class="perm-dialog__desc-empty">(无参数)</p>
         </div>
-        <div class="perm-dialog__foot">
-          <button class="perm-dialog__btn perm-dialog__btn--deny" @click="respond(false)">
-            <ShieldX :size="14" :stroke-width="1.75" />
-            <span>拒绝</span>
-          </button>
-          <button class="perm-dialog__btn perm-dialog__btn--allow" @click="respond(true)">
-            <ShieldCheck :size="14" :stroke-width="1.75" />
-            <span>允许</span>
-          </button>
-        </div>
+        <p v-else class="perm-dialog__desc-empty">(无参数)</p>
+      </div>
+      <div class="perm-dialog__foot">
+        <button class="perm-dialog__btn perm-dialog__btn--deny" @click="respond(false)">
+          <ShieldX :size="13" :stroke-width="1.75" />
+          <span>拒绝</span>
+        </button>
+        <button class="perm-dialog__btn perm-dialog__btn--allow" @click="respond(true)">
+          <ShieldCheck :size="13" :stroke-width="1.75" />
+          <span>允许</span>
+        </button>
       </div>
     </div>
   </Transition>
 </template>
 
 <style scoped>
-.perm-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  background: rgba(0, 0, 0, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  /* 跟 ChatMessage / Settings 弹窗一致 */
-}
+/*
+ * v0.5.0: inline 浮层, 不再 fixed 全屏 modal.
+ * 位置由父容器 (ChatMain .pad-chatmain__composer-area 内部, Composer 正上方) 决定.
+ * 不需要 position: absolute / fixed, 跟 Composer 同列 inline 渲染.
+ *
+ * 父容器 padding: 0 16px 12px 已经是 chatmain 准备好, 这里弹窗 + Composer 共用居中 720px.
+ * 弹窗自己加 margin-bottom 跟 Composer 留 8px 视觉间距.
+ */
 .perm-dialog {
+  margin: 0 0 8px;
   background: var(--pad-popover);
   border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-lg);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18), 0 4px 12px rgba(0, 0, 0, 0.08);
-  width: 100%;
-  max-width: 480px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -135,7 +135,7 @@ async function respond(allow: boolean) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 14px 16px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--pad-divider);
   background: var(--pad-bg-active);
 }
@@ -143,7 +143,7 @@ async function respond(allow: boolean) {
   color: var(--pad-accent);
 }
 .perm-dialog__head-title {
-  font-size: var(--pad-fs-14);
+  font-size: var(--pad-fs-13);
   font-weight: var(--pad-fw-medium);
   color: var(--pad-fg-primary);
   flex: 1;
@@ -152,8 +152,8 @@ async function respond(allow: boolean) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   border-radius: var(--pad-radius-sm);
   background: transparent;
   border: none;
@@ -166,13 +166,13 @@ async function respond(allow: boolean) {
   color: var(--pad-fg-primary);
 }
 .perm-dialog__body {
-  padding: 16px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 .perm-dialog__desc {
-  font-size: var(--pad-fs-13);
+  font-size: var(--pad-fs-12);
   color: var(--pad-fg-secondary);
   line-height: 1.5;
   margin: 0;
@@ -191,11 +191,11 @@ async function respond(allow: boolean) {
   background: var(--pad-muted);
   border: 1px solid var(--pad-divider);
   border-radius: var(--pad-radius-md);
-  padding: 10px 12px;
+  padding: 8px 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 200px;
+  gap: 4px;
+  max-height: 140px;
   overflow-y: auto;
 }
 .perm-dialog__arg {
@@ -224,7 +224,7 @@ async function respond(allow: boolean) {
 .perm-dialog__foot {
   display: flex;
   gap: 8px;
-  padding: 12px 16px;
+  padding: 10px 14px;
   border-top: 1px solid var(--pad-divider);
   background: var(--pad-bg-input);
   justify-content: flex-end;
@@ -233,10 +233,10 @@ async function respond(allow: boolean) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 32px;
-  padding: 0 14px;
+  height: 30px;
+  padding: 0 12px;
   border-radius: var(--pad-radius-md);
-  font-size: var(--pad-fs-13);
+  font-size: var(--pad-fs-12);
   font-weight: var(--pad-fw-medium);
   border: 1px solid transparent;
   cursor: pointer;
@@ -265,13 +265,17 @@ async function respond(allow: boolean) {
   border-color: var(--pad-accent-hover);
 }
 
-/* enter / leave transition */
-.perm-fade-enter-active,
-.perm-fade-leave-active {
-  transition: opacity var(--pad-dur-base) var(--pad-ease-in-out);
+/* v0.5.0: 从输入框上方"滑出"动画. 不用 fade, 用 translateY 表现"从下面冒出来"  */
+.perm-slide-up-enter-active,
+.perm-slide-up-leave-active {
+  transition:
+    opacity var(--pad-dur-base) var(--pad-ease-out-soft),
+    transform var(--pad-dur-base) var(--pad-ease-out-soft);
+  transform-origin: bottom center;
 }
-.perm-fade-enter-from,
-.perm-fade-leave-to {
+.perm-slide-up-enter-from,
+.perm-slide-up-leave-to {
   opacity: 0;
+  transform: translateY(8px);
 }
 </style>
