@@ -550,14 +550,11 @@ function removeSession(id: string) {
   /* v0.3.8.3: 选中态左边加一条 3px 圆角 accent 高亮条, 不再是纯矩形背景 */
   box-shadow: inset 3px 0 0 var(--pad-accent);
 }
-/* v0.4.1.7+1: streaming 流光 — 整 item 区域一道 shine 软波, 永远在容器内
-   (v0.4.1.7 用 50% 宽 + no-repeat + 200% 移位, 数学无缝但 shine 只在容器内一半时间,
-    剩下 50% 时间容器全空, 边界循环时明显"亮→空→亮"顿挫)
-   新方案: 100% 宽渐变 + repeat + 7-stop 软过渡 (transparent 头尾 + 中间 60% 渐亮渐暗波峰)
-   - 整张 tile 始终覆盖容器, shine 永远在容器内某处, 没有"空"阶段
-   - animation 移位正好 100% = 一格, 数学无缝
-   - 软过渡 (15% / 30% / 50% / 70% / 85% 5 个非透明 stop) 让 shine 出入边缘是淡入淡出而不是硬切
-   - 慢一档到 1.8s, 让视觉更"流淌"而不是"刷刷" */
+/* v0.4.1.7+2: streaming 流光 — 整 item 区域 shine 软波, peak 提到 accent-400 更明显
+   (v0.4.1.7+1 peak 用 accent-300 #d4d4d8 在 accent-soft #f4f4f5 底色上对比度太小, 截图看不出来)
+   - peak 颜色 accent-300 → accent-400 (#a1a1aa), light 模式对比度 +1 档, dark 模式 #404040 也更明显
+   - 透明 padding 15% / 85% → 10% / 90%, 波带更宽 (60% → 80% 实际宽度)
+   - 保留 1.8s 时长 + 100% 移位无缝循环, 整张 tile 始终覆盖容器 */
 .pad-wstree__session.is-streaming {
   position: relative;
   overflow: hidden;
@@ -570,11 +567,11 @@ function removeSession(id: string) {
   background: linear-gradient(
     90deg,
     transparent 0%,
-    transparent 15%,
-    var(--pad-accent-200) 30%,
-    var(--pad-accent-300) 50%,
-    var(--pad-accent-200) 70%,
-    transparent 85%,
+    transparent 10%,
+    var(--pad-accent-300) 25%,
+    var(--pad-accent-400) 50%,
+    var(--pad-accent-300) 75%,
+    transparent 90%,
     transparent 100%
   );
   background-size: 100% 100%;
