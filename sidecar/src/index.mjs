@@ -1,313 +1,116 @@
-// Sidecar entrypoint — wires stdin/stdout JSON Lines to the Pi Agent runtime.
+// Pi Agent Desktop — Sidecar (v0.5.0)
 //
-// v0.4 重写: 集成 @earendil-works/pi-ai + pi-agent-core + pi-coding-agent.
-// v0.4.1+ 加 tool permission confirm (ask/smart/allow 3 模式, 通过 Extension API).
-// v0.4.2 step 1 切 createAgentSession + SessionManager + per-workspace 隔离:
-//   - 切 new Agent → createAgentSession (自动 persistence + compaction + auto-retry)
-//   - 切 beforeToolCall hook → Extension pi.on("tool_call", handler) (AgentSession 内部桥接)
-//   - 切 sidecar 自写 retry 状态机 → 订阅 AgentSession auto_retry_start/_end (跟 SDK 对齐)
-//   - 加 4 个 IPC 事件: compaction_start / compaction_end / auto_retry_start / auto_retry_end
-//   - 加 1 个 IPC 入口: compact_session (手动压缩)
-//   - 加 per-workspace 隔离: ~/.pi/agent/sessions/<sha256(workspace).slice(0,16)>/<sessionId>.jsonl
-//   - sessionId 走 stdin config, FE 端 perWorkspaceSessionId Map 持久化
+// v0.5.0 重大重构: 不再手写 stdin/stdout 协议、不再手写 5x retry / 30s hang / permission
+// Extension / event mapping. 全部走 @earendil-works/pi-coding-agent 0.84.2 提供的
+// runRpcMode() + createAgentSessionRuntime() 轮子.
 //
-// IPC: stdin/stdout JSON lines.
-//   - input:  { type: 'config', provider, model, baseUrl?, apiKey, thinkingLevel?, workspacePath?, permissionMode?, sessionId? }
-//             { type: 'prompt', content }                                  (sessionId 走 config 时的 sessionId)
-//             { type: 'abort' }
-//             { type: 'permission_response', toolCallId, allow, reason? }  // 走 Extension permission hook
-//             { type: 'set_permission_mode', mode }
-//             { type: 'compact_session' }                                  // v0.4.2 step 1
-//   - output: { type: 'config_ok' | 'config_error' | 'agent_start' | 'message_start'
-//             | 'message_update' | 'tool_start' | 'tool_update' | 'tool_end'
-//             | 'message_end' | 'agent_end' | 'error'
-//             | 'permission_request'
-//             | 'auto_retry_start' | 'auto_retry_end'                      // v0.4.2 step 1 (替代 retry_*)
-//             | 'compaction_start' | 'compaction_end' }                    // v0.4.2 step 1
+// 协议 (stdin/stdout 都是 strict LF-only JSONL):
+//   - 第 1 行 (one-shot config): 初始化 runtime (workspacePath / provider / model /
+//     apiKey / baseUrl / sessionId / thinkingLevel / tools / permissionMode)
+//   - 第 2 行起: Pi SDK RpcCommand 协议 (prompt/steer/follow_up/abort/set_model/
+//     cycle_model/set_thinking_level/compact/fork/clone/switch_session/get_state/
+//     get_messages/...) — 40+ 类型, 完整 list 见 @earendil-works/pi-coding-agent/modes/rpc/rpc-types
+//   - stdout: Pi SDK RpcResponse + RpcEvent (AgentSessionEvent 全套) + extension_ui_request
+//     (permission 弹窗走这条)
 //
-// Security:
-//   - apiKey 走 stdin (Tauri 端从 OS keychain 读, 不进 FE)
-//   - 错误信息 sanitize 401/403 含 key 模式
-//   - 一次 prompt 进程结束即丢 (sidecar 一次 spawn 模型, ADR-0009)
-import readline from 'node:readline';
+// 跟之前 v0.4.2 step 1 相比:
+//   - 836 行 → ~180 行 (-78%)
+//   - 不再手写 40+ case event 映射
+//   - 不再手写 5x retry (Pi SDK AgentSession 内置 auto_retry_*)
+//   - 不再手写 30s hang watch (Pi SDK AgentSession 内置)
+//   - 不再手写 permission Extension (Pi SDK 内置 extension UI, 走 RPC 协议)
+//   - 不再手写 backpressure (Pi SDK output-guard takeOverStdout)
+//   - 不再手写 strict JSONL (Pi SDK attachJsonlLineReader)
+//
+// Tauri 端 (sidecar.rs) 改动:
+//   - 之前: 写 config + prompt 2 行, 写 permission_response / set_permission_mode /
+//     compact_session 3 个 stdin 命令
+//   - 现在: 写 config 1 行, 后续 RpcCommand 走 passthrough (Tauri 不用解析)
+
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
-  createAgentSession,
-  DefaultResourceLoader,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
   getAgentDir,
+  runRpcMode,
   SessionManager,
 } from '@earendil-works/pi-coding-agent';
+import { createProvider } from '@earendil-works/pi-ai';
+import {
+  stream as openaiCompletionsStream,
+  streamSimple as openaiCompletionsStreamSimple,
+} from '@earendil-works/pi-ai/api/openai-completions';
 
-import { createModels, createProvider } from '@earendil-works/pi-ai';
+// ====== 0. 读 config from process.argv[2] ======
+// v0.5.0 fix: 之前用 raw stdin 读 line 1 (config) + 后续 stdin 走 RpcCommand 模式, 但:
+//   - readline 模式: rl.close() 触发 stdin 'end' → runRpcMode.onInputEnd → 立即 shutdown
+//   - raw on('data') 模式: flowing → paused → flowing 多次 mode switch, Windows + Node pipe
+//     在 runRpcMode 接管时容易丢 line 2+ data 事件, 沉默 30s 没任何 output
+//   - paused on('readable') + unshift() 模式: 也是 unshift 后让 runRpcMode 接管, 但 runRpcMode
+//     内部 attachJsonlLineReader 注册 on('data') 时 stream 状态可能异常, 同样收不到 data
+// **改用 process.argv[2] 传 config JSON** — 跟 Pi SDK main.ts 的 pattern 一致, 完全绕开
+//   stdin pipe mode switch 问题. stdin 100% 归 runRpcMode 接管, 接 line 1 = RpcCommand.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-// v0.4: pi-ai 0.84.2 顶层不 re-export provider factory, 走 './providers/*' 子路径
-import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
-import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
-import { deepseekProvider } from '@earendil-works/pi-ai/providers/deepseek';
-import { moonshotaiProvider } from '@earendil-works/pi-ai/providers/moonshotai';
-import { groqProvider } from '@earendil-works/pi-ai/providers/groq';
-import { googleProvider } from '@earendil-works/pi-ai/providers/google';
-import { minimaxProvider } from '@earendil-works/pi-ai/providers/minimax';
+const configArg = process.argv[2];
+if (!configArg) {
+  console.error('[sidecar] no config arg in process.argv[2], exiting');
+  process.exit(1);
+}
+const config = JSON.parse(configArg);
 
-// OpenAI-compatible API stream 函数 (用于 createProvider 通用 endpoint, 如商汤/任意 OpenAI-compatible)
-import { stream as openaiCompletionsStream, streamSimple as openaiCompletionsStreamSimple } from '@earendil-works/pi-ai/api/openai-completions';
-
-// v0.4.1+ 测试用: PI_FAUX=1 环境变量时, 额外注册 faux provider (smoke test 用).
-// 跟 7 内置 + user-custom 互不影响. 不设 PI_FAUX 时不 import 不 register, 0 副作用.
-if (process.env.PI_FAUX === '1') {
-  const { fauxProvider, fauxText, fauxThinking, fauxToolCall, fauxAssistantMessage } = await import('@earendil-works/pi-ai');
-  // @ts-ignore
-  globalThis.__piFauxProvider = fauxProvider({
-    models: [{
-      id: 'faux-model',
-      name: 'Faux Test Model',
-      api: 'faux',
-      contextWindow: 8000,
-      maxTokens: 4000,
-    }],
-  });
-  // v0.4.2 step 1: AgentSession 走 ModelRuntime → 读 auth.json 验证 hasConfiguredAuth(providerId).
-  // PI_FAUX 时自动写 fake auth.json 让 ModelRuntime 通过验证. 写到 agentDir (PI_CODING_AGENT_DIR
-  // 或 ~/.pi/agent/), 字段 'faux' (api_key type, key='faux-fake-key'). 不污染 production 因为
-  // 'faux' provider 在 production 不存在. test 结束不需要清理 (faux 字段不会被 production 用).
-  try {
-    const { writeFileSync, existsSync, readFileSync, mkdirSync } = await import('node:fs');
-    const agentDir = getAgentDir();
-    const authPath = join(agentDir, 'auth.json');
-    if (!existsSync(agentDir)) mkdirSync(agentDir, { recursive: true });
-    let authData = {};
-    if (existsSync(authPath)) {
-      try { authData = JSON.parse(readFileSync(authPath, 'utf-8')); } catch {}
-    }
-    if (!authData.faux) {
-      authData.faux = { type: 'api_key', key: 'faux-fake-key' };
-      writeFileSync(authPath, JSON.stringify(authData, null, 2), 'utf-8');
-      console.error(`[sidecar] PI_FAUX=1: wrote fake 'faux' credential to ${authPath}`);
-    }
-  } catch (e) {
-    console.error(`[sidecar] PI_FAUX auth.json setup failed: ${e.message}`);
-  }
-  if (process.env.PI_FAUX_RESPONSES) {
-    try {
-      const responsesJson = JSON.parse(process.env.PI_FAUX_RESPONSES);
-      const responses = responsesJson.map((r) => () => fauxAssistantMessage([
-        ...(r.thinking ? [fauxThinking(r.thinking)] : []),
-        ...(r.text ? [fauxText(r.text)] : []),
-        ...(r.toolCall ? [fauxToolCall(r.toolCall.name, r.toolCall.args, { id: r.toolCall.id })] : []),
-      ]));
-      if (process.env.PI_FAUX_HANG === '1' && responses.length > 0) {
-        const lastIdx = responses.length - 1;
-        responses[lastIdx] = () => new Promise(() => { /* never resolves - hang */ });
-        console.error(`[sidecar] PI_FAUX_HANG=1: last response replaced with never-resolving Promise (simulates stream hang)`);
-      }
-      globalThis.__piFauxProvider.setResponses(responses);
-      console.error(`[sidecar] PI_FAUX_RESPONSES loaded: ${responses.length} responses`);
-    } catch (e) {
-      console.error(`[sidecar] PI_FAUX_RESPONSES parse failed: ${e.message}`);
-    }
-  }
-  console.error('[sidecar] PI_FAUX=1 detected, faux provider registered (test mode)');
+if (config.type !== 'config') {
+  console.error(`[sidecar] first stdin line must be {type: "config"}, got ${config.type}`);
+  process.exit(1);
 }
 
-// v0.4.2 step 1: 7 tool 不再显式注册, AgentSession._buildRuntime 自动调 createAllToolDefinitions(cwd)
-//   (agent-session.ts:2571) 注册全部 7 个. 但 active tool 走 options.tools 显式传 (sdk.ts:247-254
-//   默认只 4 个 read/bash/edit/write, grep/find/ls 不会激活). 所以 createAgentSession 时传
-//   tools: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'].
+console.error(`[sidecar] config: provider=${config.provider} model=${config.model} workspace=${config.workspacePath ?? process.cwd()} sessionId=${config.sessionId?.slice(0, 16) ?? 'new'} baseUrl=${config.baseUrl ? 'set' : 'none'} tools=${(config.tools ?? []).join(',') || 'default'}`);
 
-/** @type {any} 当前 config (从 stdin { type: 'config' } 写入) */
-let globalConfig = null;
+// ====== 1. workspace + session 隔离 ======
+const workspacePath = config.workspacePath || process.cwd();
+const sessionId = config.sessionId || `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-/** @type {any | null} 当前 AgentSession, 用于 prompt / subscribe / compact / abort */
-let currentSession = null;
+// per-workspace 隔离: workspace 路径 → sha256 前 16 位 → 目录
+//   <agentDir>/sessions/<hash>/<timestamp>_<sessionId>.jsonl
+const agentDir = getAgentDir();
+const hash = createHash('sha256').update(workspacePath).digest('hex').slice(0, 16);
+const sessionDir = join(agentDir, 'sessions', hash);
 
-/** @type {string | null} 当前 session 的 sessionId (FE 给的 stable id, 用来 per-workspace 持久化) */
-let currentSessionId = null;
-
-/** v0.4.1.4+ module-level 暴露 finishUp 给 watchdog (session.subscribe 内的 closure 没法被 setInterval 访问) */
-let currentFinishUp = null;
-
-/** v0.4.1.4+ stream hang watchdog.
- * 商汤 deepseek-v4-flash 偶尔在 tool_call 之后不 emit 'done' event,
- * 让 Pi SDK `for await` 永远 hang, sidecar 永远不 emit message_end,
- * FE 永远 "生成中". watchdog 检测 30s 没新 event 强制 finishUp.
- */
-const STREAM_HANG_TIMEOUT_MS = 30_000;
-const STREAM_HANG_CHECK_MS = 5_000;
-let lastStreamEventTime = 0;
-let hangWatchdog = null;
-function resetHangWatchdog() {
-  lastStreamEventTime = Date.now();
-}
-function startHangWatchdog() {
-  stopHangWatchdog();
-  resetHangWatchdog();
-  hangWatchdog = setInterval(() => {
-    const idle = Date.now() - lastStreamEventTime;
-    if (idle > STREAM_HANG_TIMEOUT_MS) {
-      console.error(`[sidecar] WATCHDOG: ${Math.round(idle / 1000)}s no stream event, force finish`);
-      if (currentSession) {
-        try { currentSession.abort(); } catch (e) { console.error('[sidecar] WATCHDOG abort threw:', e); }
-      }
-      setTimeout(() => {
-        if (currentFinishUp) {
-          console.error('[sidecar] WATCHDOG: emit finishUp manually (Pi SDK not responding to abort)');
-          currentFinishUp();
-        }
-      }, 1000);
-      stopHangWatchdog();
-    }
-  }, STREAM_HANG_CHECK_MS);
-}
-function stopHangWatchdog() {
-  if (hangWatchdog) {
-    clearInterval(hangWatchdog);
-    hangWatchdog = null;
-  }
-}
-
-/** v0.4.1+ tool permission 模式. 初始走 config.permissionMode, 运行时可被 set_permission_mode 改.
- *  - 'ask'   每次都 confirm (最安全, 默认)
- *  - 'smart' 读类 (read/ls/find/grep) 自动放行, 写/命令/编辑 confirm
- *  - 'allow' 全部放行 (最危险, 不推荐)
- * @type {'ask' | 'smart' | 'allow'}
- */
-let currentPermissionMode = 'ask';
-
-/** v0.4.1+ 把 permission request 跟 response 配对.
- *  - key: toolCallId
- *  - value: { resolve: (result: { block?: boolean, reason?: string } | undefined) => void }
- *  pi.on("tool_call") handler 把 resolve 存这里, 等 FE permission_response 来了再 resolve.
- * @type {Map<string, { resolve: any }>}
- */
-const pendingPermissionRequests = new Map();
-
-/** smart 模式自动放行的读类工具 (看东西, 不改东西) */
-const SMART_READ_ONLY_TOOLS = new Set(['read', 'ls', 'find', 'grep']);
-
-function send(event) {
-  // v0.4.1+ fix: Node.js 在 pipe (stdio: 'pipe') 模式下, process.stdout.write 默认
-  // 异步 flush + 内部 highWaterMark buffer. 当 tool.execute() 之后并发 emit 多个
-  // event 可能在同一个 microtask 内串行 write, 但 Node.js 内部会把部分 write 合并
-  // 到下一个 chunk, 导致 readline 收不到完整 line 报 timeout.
-  // 修法: process.stdout.cork() 包裹 write, uncork() 强制 flush.
-  process.stdout.cork();
-  const line = JSON.stringify(event) + '\n';
-  process.stdout.write(line);
-  process.stdout.uncork();
-}
-
-// R4: 401/403 错误信息可能含 key 字面量 (e.g. "Invalid API key sk-AB***").
-// sanitize 去掉常见 key 模式 + bearer 头, 跟 Rust 端 mask 风格一致.
-const KEY_PATTERNS = [
-  /\bsk-[A-Za-z0-9_\-]{4,}/g,
-  /\bsk-proj-[A-Za-z0-9_\-]{4,}/g,
-  /\bAKIA[0-9A-Z]{4,}/g,
-  /\bghp_[A-Za-z0-9]{4,}/g,
-  /\bxai-[A-Za-z0-9_\-]{4,}/g,
-  /\bAIza[0-9A-Za-z_\-]{4,}/g,
-  /Bearer\s+[A-Za-z0-9_\-\.]{8,}/gi,
-];
-function sanitizeErrBody(text) {
-  let out = String(text || '');
-  for (const re of KEY_PATTERNS) {
-    out = out.replace(re, (m) => (m.length > 4 ? `${m.slice(0, 2)}***` : '***'));
-  }
-  return out.slice(0, 300);
-}
-
-/**
- * v0.4.2 step 1: per-workspace 隔离 session 目录.
- * workspace 路径 → sha256 前 16 位 → 目录 <agentDir>/sessions/<hash>/<sessionId>.jsonl.
- * 不同 workspace 走不同目录, sessionId 复用, 互不污染.
- *
- * 走 getAgentDir() 而不是 homedir() 是因为 getAgentDir() 接受 PI_CODING_AGENT_DIR env var 覆盖
- * (smoke test 用临时目录隔离 production data, 见 test-smoke-session-persistence.mjs).
- */
-function sessionDirFor(workspacePath) {
-  const hash = createHash('sha256').update(workspacePath || process.cwd()).digest('hex').slice(0, 16);
-  return join(getAgentDir(), 'sessions', hash);
-}
-
-/**
- * v0.4.2 step 1: 找 dir 里匹配 sessionId 的现有 session file (走 resume).
- * Pi SDK 0.84.2 SessionManager.create({id}) 每次用新 timestamp 创 file, 不支持用 id resume.
- * 修法: sidecar 启动时先扫 dir 找旧 file, 找到就 setSessionFile() 走 load 模式.
- *
- * @param {string} dir
- * @param {string} sessionId
- * @returns {string|null} 旧 file path, 或 null
- */
-function findExistingSessionFile(dir, sessionId) {
-  if (!sessionId || !existsSync(dir)) return null;
-  const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
-  // 文件名格式: <timestamp>_<sessionId>.jsonl
+// Pi SDK 0.84.2 SessionManager.create(cwd, sessionDir, {id}) 每次用新 timestamp 创 file,
+// 不支持用 id resume. 走跟 v0.4.2 step 1 一样 setSessionFile() 走 load 模式.
+let sessionManager = SessionManager.create(workspacePath, sessionDir, { id: sessionId });
+if (existsSync(sessionDir)) {
+  const files = readdirSync(sessionDir).filter((f) => f.endsWith('.jsonl'));
   const matchSuffix = `_${sessionId}.jsonl`;
   const matched = files.find((f) => f.endsWith(matchSuffix));
-  return matched ? join(dir, matched) : null;
+  if (matched) {
+    console.error(`[sidecar] resume existing session file: ${matched}`);
+    sessionManager.setSessionFile(join(sessionDir, matched));
+  } else {
+    console.error(`[sidecar] new session, file will be at ${sessionManager.getSessionFile()}`);
+  }
 }
 
-/**
- * 根据 config 构建 pi-ai Models 集合.
- *
- * - 7 内置 provider 用 Pi SDK 工厂 (anthropic/openai/deepseek/moonshotai/groq/google/minimax)
- * - 自定义 (config.baseUrl) 用 createProvider({ baseUrl, api: openaiCompletionsApi })
- *   覆盖商汤/任意 OpenAI-compatible 端点
- */
-function buildModels(config) {
-  const models = createModels();
-  models.setProvider(anthropicProvider());
-  models.setProvider(openaiProvider());
-  models.setProvider(deepseekProvider());
-  models.setProvider(moonshotaiProvider());
-  models.setProvider(groqProvider());
-  models.setProvider(googleProvider());
-  models.setProvider(minimaxProvider());
-
-  if (globalThis.__piFauxProvider) {
-    const fauxProviderObj = globalThis.__piFauxProvider;
-    if (process.env.PI_FAUX === '1') {
-      console.error(`[sidecar] PI_FAUX: fauxProviderObj.provider.id=${fauxProviderObj.provider.id} models count=${fauxProviderObj.provider.getModels().length}`);
-    }
-    models.setProvider(fauxProviderObj.provider);
-  }
-
-  if (config.baseUrl) {
-    models.setProvider(buildUserCustomProvider(config));
-  }
-
-  return models;
-}
-
-/**
- * v0.4.2 step 1 fix: 抽 buildUserCustomProvider 出来, buildModels() + case 'config' 都用.
- *
- * 历史: v0.4.1 走 `new Agent({streamFn: models.streamSimple.bind(models)})`,
- *   user-custom 走 sidecar 自己 `MutableModels.setProvider`, hasConfiguredAuth 走通.
- * v0.4.2 走 `createAgentSession` → `modelRuntime.streamSimple`, 走 modelRuntime 自己的
- *   `MutableModels`, **不知道** user-custom (因为只 setProvider 到 sidecar MutableModels),
- *   抛 "No API key found for user-custom".
- * 修法: case 'config' 调 `session.modelRuntime.registerNativeProvider(userCustomProvider)`,
- *   让 modelRuntime 知道 user-custom. (PI_FAUX 模式同款修法, 走 registerNativeProvider.)
- */
-function buildUserCustomProvider(config) {
+// ====== 2. user-custom provider (FE 用 baseUrl 走 OpenAI-compatible 时) ======
+let userCustomProvider = null;
+if (config.baseUrl) {
+  // v0.4.2.x fix 保留: resolver 接 credential 参数 (Pi SDK 0.84.2 resolveProviderAuth 会
+  // 调 apiKey.resolve({ ctx, credential, signal })), 优先用 credential?.key (来自
+  // RuntimeCredentials override = setRuntimeApiKey 写的真 key), 退到 config.apiKey (closure 初始).
   const initialApiKey = config.apiKey || '';
-  return createProvider({
+  userCustomProvider = createProvider({
     id: 'user-custom',
     name: config.providerLabel || 'Custom',
     baseUrl: config.baseUrl,
     auth: {
       apiKey: {
         name: 'Custom OpenAI-compatible API key',
-        // v0.4.2.x fix (issue "No API key found for user-custom"): 之前 resolver 只 return closure
-        //   捕获的 customApiKey, 完全忽略 Pi SDK 传进来的 credential 参数. 后果:
-        //   RuntimeCredentials.setRuntimeApiKey('user-custom', realKey) 把真 key 存到 override,
-        //   resolveProviderAuth 读 credential 时 resolver 拿到的还是空 customApiKey (closure 捕获时
-        //   config.apiKey 可能是空) → getAuth return 空 apiKey → LLM 抛 "No API key found".
-        // 修法: 优先用 credential?.key (来自 RuntimeCredentials, 包含 setRuntimeApiKey 写的真 key),
-        //   退到 initialApiKey (closure 初始值, 兼容没调 setRuntimeApiKey 的 fallback 路径).
         resolve: async ({ credential }) => {
           const apiKey = credential?.key || initialApiKey;
           return { auth: { apiKey }, source: 'sidecar config' };
@@ -332,529 +135,106 @@ function buildUserCustomProvider(config) {
   });
 }
 
-/**
- * v0.4.2 step 1: Extension factory 接管 tool permission 3 模式.
- *
- * 走 Extension API `pi.on("tool_call", handler)`:
- *  - AgentSession 创建时自动装 `agent.beforeToolCall = runner.emitToolCall` 桥接
- *  - 我们注册 handler 后, 所有 tool call 自动走这里
- *  - 返回 `undefined` = 放行, 返回 `{ block: true, reason }` = 阻止 (Pi SDK emit error tool result)
- *
- * mode 决策:
- *  - 'allow' → undefined (全部放行)
- *  - 'smart' + 读类工具 (read/ls/find/grep) → undefined (自动放行)
- *  - 'ask' / 'smart' + 写类工具 → emit permission_request 给 FE, 等 permission_response
- */
-function permissionExtensionFactory(pi) {
-  pi.on('tool_call', async (event, ctx) => {
-    const toolName = event.toolName;
-    const toolCallId = event.toolCallId;
-    const mode = currentPermissionMode;
-
-    if (mode === 'allow') {
-      return;
-    }
-    if (mode === 'smart' && SMART_READ_ONLY_TOOLS.has(toolName)) {
-      return;
-    }
-
-    console.error(`[sidecar] permission_request: tool=${toolName} id=${toolCallId} mode=${mode} args=${JSON.stringify(event.input).slice(0, 200)}`);
-
-    return new Promise((resolve) => {
-      const signal = ctx?.signal;
-      if (signal) {
-        signal.addEventListener('abort', () => {
-          pendingPermissionRequests.delete(toolCallId);
-          resolve({ block: true, reason: 'Aborted by user' });
-        }, { once: true });
-      }
-      pendingPermissionRequests.set(toolCallId, { resolve });
-      send({
-        type: 'permission_request',
-        toolCallId,
-        toolName,
-        args: event.input,
-        sessionId: currentSessionId,
-      });
-    });
+// ====== 3. createAgentSessionRuntime factory ======
+// 跟 Pi SDK main.ts 的 createRuntime 一样, 走完整 services + modelRuntime + sessionManager 流程.
+// 我们的 factory 注入 user-custom provider + setRuntimeApiKey.
+const createRuntime = async ({
+  cwd,
+  agentDir: dir,
+  sessionManager: sm,
+}) => {
+  const services = await createAgentSessionServices({
+    cwd,
+    agentDir: dir,
+    modelRuntimeSignal: AbortSignal.timeout(15_000),
   });
-}
 
-/**
- * v0.4.2 step 1: 把 AgentSessionEvent 映射到 v0.4.x JSON Lines 协议.
- * FE 端协议增量: 旧事件 (agent_start / message_start / ... / retry_*) + 4 新事件
- * (auto_retry_start / auto_retry_end / compaction_start / compaction_end).
- *
- * event.type 列表 (agent-session.ts:140+):
- *  - 'agent_start' | 'agent_end' | 'agent_settled'
- *  - 'turn_start' | 'turn_end'
- *  - 'message_start' | 'message_update' | 'message_end'
- *  - 'tool_execution_start' | 'tool_execution_update' | 'tool_execution_end'
- *  - 'compaction_start' | 'compaction_end'         // v0.4.2 step 1 新
- *  - 'auto_retry_start' | 'auto_retry_end'         // v0.4.2 step 1 新 (替代 retry_*)
- *  - 'entry_appended'                              // v0.4.2 step 1 跳过 (sidecar 内部用)
- *  - 'bash_execution_update' | 'queue_update' | 'session_info_changed' | 'thinking_level_changed' | 'summarization_*'
- *    — 未实现, 跳过 (PI_FAUX_RESPONSES 不依赖这些)
- */
-function mapAgentSessionEventToIPC(event, sessionId) {
-  switch (event.type) {
-    case 'agent_start':
-      send({ type: 'agent_start', sessionId });
-      return;
-    case 'turn_start':
-      send({ type: 'turn_start', sessionId });
-      return;
-    case 'turn_end':
-      send({ type: 'turn_end', sessionId });
-      return;
-    case 'message_start':
-      send({ type: 'message_start', sessionId, role: event.message?.role });
-      return;
-    case 'message_update': {
-      const inner = event.assistantMessageEvent;
-      if (!inner) return;
-      if (inner.type === 'text_delta') {
-        send({ type: 'message_update', kind: 'content', delta: inner.delta, sessionId });
-      } else if (inner.type === 'thinking_delta') {
-        send({ type: 'message_update', kind: 'thinking', delta: inner.delta, sessionId });
-      }
-      return;
-    }
-    case 'tool_execution_start':
-      send({
-        type: 'tool_start',
-        toolName: event.toolName,
-        toolCallId: event.toolCallId,
-        args: event.args,
-        sessionId,
-      });
-      console.error(`[sidecar] mapAgentSessionEventToIPC: tool_start ${event.toolName} ${event.toolCallId}`);
-      return;
-    case 'tool_execution_update':
-      send({
-        type: 'tool_update',
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        partialResult: event.partialResult,
-        sessionId,
-      });
-      return;
-    case 'tool_execution_end': {
-      console.error(`[sidecar] mapAgentSessionEventToIPC: tool_execution_end ${event.toolName} ${event.toolCallId} isError=${event.isError}`);
-      const isError = event.isError === true;
-      const result = event.result;
-      let errorText;
-      if (isError) {
-        const first = Array.isArray(result?.content) ? result.content[0] : null;
-        errorText = first?.text || 'Tool execution failed';
-      }
-      try {
-        send({
-          type: 'tool_end',
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          result: isError ? undefined : result,
-          error: errorText,
-          sessionId,
-        });
-      } catch (e) {
-        console.error('[sidecar] SEND tool_end threw:', e);
-      }
-      return;
-    }
-    case 'message_end': {
-      // AgentSession 把 LLM error 写到 assistant message 的 errorMessage 字段 (跟 v0.4.1 Agent 一致)
-      if (event.message?.stopReason === 'error' && event.message?.errorMessage) {
-        send({
-          type: 'error',
-          message: sanitizeErrBody(String(event.message.errorMessage)),
-          sessionId,
-        });
-      }
-      // 由 finishUp 统一发 message_end, 这里不重复
-      return;
-    }
-    case 'agent_end':
-      // 由 finishUp 统一发
-      return;
-    case 'error': {
-      // 顶层 error event (rare, AgentSession 通常走 message_end + errorMessage)
-      const assistantMessage = event.error;
-      const errorMessage = assistantMessage?.errorMessage
-        || event.reason
-        || 'Unknown error from Pi SDK';
-      send({ type: 'error', message: sanitizeErrBody(String(errorMessage)), sessionId });
-      return;
-    }
-    case 'auto_retry_start': {
-      // v0.4.2 step 1: AgentSession 内置 retry 状态机 emit
-      send({
-        type: 'auto_retry_start',
-        attempt: event.attempt,
-        maxAttempts: event.maxAttempts,
-        delayMs: event.delayMs,
-        errorMessage: event.errorMessage,
-        sessionId,
-      });
-      return;
-    }
-    case 'auto_retry_end': {
-      send({
-        type: 'auto_retry_end',
-        success: event.success,
-        attempts: event.attempt,
-        finalError: event.finalError,
-        sessionId,
-      });
-      return;
-    }
-    case 'compaction_start': {
-      // reason: 'manual' | 'threshold' | 'overflow'
-      send({ type: 'compaction_start', reason: event.reason, sessionId });
-      return;
-    }
-    case 'compaction_end': {
-      // result 是 CompactionResult | undefined, aborted boolean, willRetry boolean
-      send({
-        type: 'compaction_end',
-        reason: event.reason,
-        success: !!event.result && !event.aborted,
-        willRetry: event.willRetry,
-        errorMessage: event.errorMessage,
-        sessionId,
-      });
-      return;
-    }
-    case 'entry_appended':
-      // v0.4.2 step 1: SessionManager 内部持久化事件, FE 不需要, 跳过
-      return;
-    default:
-      // 其他 event (queue_update / session_info_changed / thinking_level_changed / agent_settled / bash_execution_update / summarization_*)
-      // v0.4.2 step 1 暂不实现, log 后忽略
-      console.error(`[sidecar] unmapped AgentSessionEvent type: ${event.type}`);
-      return;
-  }
-}
+  const providerId = config.baseUrl ? 'user-custom' : config.provider;
 
-/**
- * v0.4.2 step 1: 跑一次 LLM 调用. 用 currentSession.prompt() (不是 agent.prompt, 那是 v0.4.1 旧 API).
- * session 已经在 createSession 阶段建好了, 这里只跑 prompt + 订阅事件.
- *
- * abort / retry / compaction 都由 AgentSession 内部管理:
- *  - abort: 调 currentSession.abort() (IPC abort 入口)
- *  - retry: AgentSession auto_retry_* 事件自动 emit, 我们转发给 FE
- *  - compaction: AgentSession 内部 shouldCompact 检查, 或 FE 调 compact_session
- *
- * @param {string} userContent
- * @param {string} sessionId
- */
-async function runPrompt(userContent, sessionId) {
-  if (!currentSession) {
-    send({ type: 'error', message: 'No session — send { type: "config" } first', sessionId });
-    return;
-  }
-
-  // v0.4.2.x fix: permissionExtensionFactory 的 closure 引用 module-level currentSessionId.
-  //   case 'config' IIFE 设的 currentSessionId = msg.sessionId || new timestamp id
-  //   (FE 经常不传 msg.sessionId 所以走 timestamp 分支).
-  //   但 runPrompt 走的 sessionId 是 'msg.sessionId || currentSessionId',
-  //   当 FE 传了 msg.sessionId 时 (e.g. chat sessionId 'sess-mswvsv49-xppk') 跟 case 'config'
-  //   设的 currentSessionId (e.g. 'sess-1786952789941-00ne5l') 不一致.
-  //   后果: permission_request 用 currentSessionId, 其他 events (message_start 等) 用
-  //   runPrompt 的 sessionId, FE 端 chat store 检查 'sessionId' in event && !== sessionId
-  //   会把 permission_request 丢弃 (弹窗不开). 之前 commit 7fe2959 修 race 修到了 prompt
-  //   await, 但 sessionId 不一致是另一个 race.
-  //   修法: 在 runPrompt 开头覆盖 currentSessionId = sessionId, 让 permission_request 跟
-  //   其他 events 用同一 sessionId. (一个 sidecar 进程一次只处理一个 prompt, 覆盖安全.)
-  currentSessionId = sessionId;
-
-  let agentEndSent = false;
-  const finishUp = () => {
-    if (!agentEndSent) {
-      send({ type: 'message_end', sessionId });
-      send({ type: 'agent_end', sessionId });
-      agentEndSent = true;
-    }
-  };
-  currentFinishUp = finishUp;
-  startHangWatchdog();
-
-  // 订阅 AgentSession 事件 → 映射 IPC
-  const unsubscribe = currentSession.subscribe((event) => {
+  // 1) 写真 key 到 ModelRuntime (走 RuntimeCredentials override, 不写文件)
+  if (config.apiKey) {
     try {
-      resetHangWatchdog();  // 任何 event 都 reset watchdog
-      mapAgentSessionEventToIPC(event, sessionId);
-      if (event.type === 'agent_end') {
-        finishUp();
-      }
+      await services.modelRuntime.setRuntimeApiKey(providerId, config.apiKey);
+      console.error(`[sidecar] setRuntimeApiKey ok: ${providerId} key_len=${config.apiKey.length}`);
     } catch (e) {
-      console.error('[sidecar] session event handler threw:', e);
+      console.error(`[sidecar] setRuntimeApiKey failed:`, e instanceof Error ? e.message : String(e));
     }
+  }
+
+  // 2) 注册 user-custom provider (modelRuntime 不知道 user-custom, 走 registerNativeProvider)
+  if (userCustomProvider) {
+    try {
+      services.modelRuntime.registerNativeProvider(userCustomProvider);
+      await services.modelRuntime.refresh({ allowNetwork: false });
+      console.error(`[sidecar] user-custom provider registered, hasConfiguredAuth=${services.modelRuntime.hasConfiguredAuth('user-custom')}`);
+    } catch (e) {
+      console.error(`[sidecar] registerNativeProvider failed:`, e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // 3) 选 model. 优先用 resolveModelScope 走标准 pipeline, 失败 fallback 到 modelRuntime.getModel.
+  let model;
+  try {
+    const scoped = await services.modelRuntime.getAvailable();
+    model = scoped.find((m) => m.provider === providerId && m.id === config.model);
+  } catch (e) {
+    console.error(`[sidecar] getAvailable failed:`, e instanceof Error ? e.message : String(e));
+  }
+  if (!model) {
+    model = services.modelRuntime.getModel(providerId, config.model);
+  }
+  if (!model) {
+    throw new Error(`Model not found: ${providerId}/${config.model}`);
+  }
+
+  // 4) tools: 7 内置 (read/bash/edit/write/grep/find/ls), 跟 v0.4.2 step 1 一致
+  const tools = config.tools ?? ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'];
+
+  console.error(`[sidecar] creating agent session: model=${model.provider}/${model.id} thinking=${config.thinkingLevel ?? 'medium'} tools=${tools.join(',')}`);
+
+  return createAgentSessionFromServices({
+    services,
+    sessionManager: sm,
+    model,
+    thinkingLevel: config.thinkingLevel,
+    tools,
   });
+};
 
-  try {
-    await currentSession.prompt(userContent);
-  } catch (e) {
-    console.error('[sidecar] session.prompt threw:', e);
-    if (!agentEndSent) {
-      send({
-        type: 'error',
-        message: sanitizeErrBody(e instanceof Error ? e.message : String(e)),
-        sessionId,
-      });
-      finishUp();
-    }
-  }
-
-  try { unsubscribe?.(); } catch {}
-  stopHangWatchdog();
-  currentFinishUp = null;
-  // v0.4.1+ abort 时清掉所有 pending permission request, 避免 FE 弹窗卡死
-  for (const [toolCallId, { resolve }] of pendingPermissionRequests) {
-    resolve({ block: true, reason: 'Aborted' });
-  }
-  pendingPermissionRequests.clear();
-}
-
-// ===== IPC: stdin JSON Lines =====
-const rl = readline.createInterface({ input: process.stdin });
-// v0.4.2 step 1 fix: race condition — Rust 端写完 config + prompt 不等 sidecar 处理 config,
-//   case 'config' IIFE 异步 build session (~150-300ms), readline 立即处理下一行 (case 'prompt'),
-//   currentSession 还是 null → emit "No session" 错误. 修复:
-//   1. case 'config' capture promise 到 sessionBuildPromise
-//   2. case 'prompt' 看到 sessionBuildPromise 时 await 它, 等 session ready
-let sessionBuildPromise = null;
-rl.on('line', (line) => {
-  let msg;
-  try {
-    msg = JSON.parse(line.replace(/^\uFEFF/, ''));
-  } catch (e) {
-    send({ type: 'error', message: `IPC parse error: ${e instanceof Error ? e.message : String(e)}` });
-    return;
-  }
-  try {
-    switch (msg.type) {
-      case 'config': {
-        if (!msg.provider || !msg.model) {
-          send({ type: 'config_error', message: 'Missing provider or model in config' });
-          return;
-        }
-        if (msg.baseUrl && !msg.apiKey) {
-          send({ type: 'config_error', message: 'baseUrl provided but apiKey missing' });
-          return;
-        }
-        globalConfig = msg;
-        // v0.4.2.x 诊断 log: 验证 stdin 真的进了 (apiKey 长度 / baseUrl 值), 排查 issue 1
-        //   "No API key found for user-custom" 用. 下一轮确认后删.
-        console.error(`[sidecar] raw stdin: apiKeyLen=${msg.apiKey?.length ?? 'undef'} baseUrl=${msg.baseUrl ? 'set' : 'undef'} provider=${msg.provider} sessionId=${msg.sessionId?.slice(0, 16) ?? 'undef'}`);
-        if (msg.permissionMode === 'ask' || msg.permissionMode === 'smart' || msg.permissionMode === 'allow') {
-          currentPermissionMode = msg.permissionMode;
-        } else {
-          currentPermissionMode = 'ask';
-        }
-
-        // v0.4.2 step 1: 创建 SessionManager + customResourceLoader + createAgentSession
-        const workspacePath = msg.workspacePath || process.cwd();
-        const sessionId = msg.sessionId || `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const sessionDir = sessionDirFor(workspacePath);
-
-        console.error(`[sidecar] config: provider=${msg.provider} model=${msg.model} workspace=${workspacePath} sessionId=${sessionId} permissionMode=${currentPermissionMode}`);
-
-        // 异步 build (createAgentSession 内部可能 fetch 模型列表 / 加载 resource)
-        // v0.4.2 step 1 fix: capture promise 给后续 'prompt' case await, 避免 race
-        sessionBuildPromise = (async () => {
-          try {
-            const models = buildModels(globalConfig);
-            const providerId = globalConfig.baseUrl ? 'user-custom' : globalConfig.provider;
-            const model = models.getModel(providerId, globalConfig.model);
-            if (!model) {
-              send({ type: 'config_error', message: `Model not found: ${providerId}/${globalConfig.model}` });
-              return;
-            }
-
-            // 1. SessionManager: per-workspace 隔离 + 稳定 sessionId
-            //    Pi SDK 0.84.2 SessionManager.create({id}) 每次创新 file (新 timestamp), 不支持 resume.
-            //    走 setSessionFile 走 load 模式: 先扫 dir 找旧 file
-            let sessionManager = SessionManager.create(workspacePath, sessionDir, { id: sessionId });
-            const existingFile = findExistingSessionFile(sessionDir, sessionId);
-            if (existingFile) {
-              console.error(`[sidecar] session manager: resume existing file ${existingFile}`);
-              sessionManager.setSessionFile(existingFile);
-            } else {
-              console.error(`[sidecar] session manager: new session, file will be at ${sessionManager.getSessionFile()}`);
-            }
-
-            // 2. ResourceLoader: 注入 permission Extension
-            const customResourceLoader = new DefaultResourceLoader({
-              cwd: workspacePath,
-              agentDir: getAgentDir(),
-              extensionFactories: [
-                { name: 'pi-agent-permission', factory: permissionExtensionFactory, hidden: true },
-              ],
-            });
-            await customResourceLoader.reload();
-
-            // 3. createAgentSession: 7 tool 全激活 + sessionManager + resourceLoader
-            const { session } = await createAgentSession({
-              cwd: workspacePath,
-              agentDir: getAgentDir(),
-              model,
-              tools: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'],
-              sessionManager,
-              resourceLoader: customResourceLoader,
-            });
-
-            currentSession = session;
-            currentSessionId = sessionId;
-
-            // v0.4.2 step 1 fix: user-custom provider (config.baseUrl 模式) 不在 Pi SDK 内置 catalog,
-            //   modelRuntime._models (独立 MutableModels) 查不到. 走跟 PI_FAUX 一样的 2 步:
-            //   1. registerNativeProvider 让 modelRuntime 知道这个 provider 存在
-            //   2. setRuntimeApiKey 注入 stdin 来的 apiKey, 走 RuntimeCredentials override (不写 auth.json,
-            //      in-memory, 每次 send_prompt 都重新 set). 不写文件避免污染 production auth.json
-            //   3. refresh 触发 modelRuntime 重新算 configuredProviders, 走通 hasConfiguredAuth check
-            if (msg.apiKey) {
-              const providerId = globalConfig.baseUrl ? 'user-custom' : globalConfig.provider;
-              if (providerId === 'user-custom') {
-                const customProvider = models.getProvider('user-custom');
-                if (customProvider) {
-                  try {
-                    session.modelRuntime.registerNativeProvider(customProvider);
-                  } catch (e) {
-                    console.error('[sidecar] registerNativeProvider(user-custom) failed:', e);
-                  }
-                }
-              }
-              try {
-                await session.modelRuntime.setRuntimeApiKey(providerId, msg.apiKey);
-                console.error(`[sidecar] setRuntimeApiKey ok: ${providerId} key_len=${msg.apiKey.length}`);
-              } catch (e) {
-                console.error('[sidecar] setRuntimeApiKey failed:', e);
-              }
-              try {
-                await session.modelRuntime.refresh({ allowNetwork: false });
-              } catch (e) {
-                console.error('[sidecar] modelRuntime.refresh after setRuntimeApiKey failed:', e);
-              }
-              console.error(`[sidecar] auth state: hasConfiguredAuth(${providerId})=${session.modelRuntime.hasConfiguredAuth(providerId)}`);
-            }
-
-            // v0.4.2 step 1 PI_FAUX: faux provider 不在 Pi SDK 内置 catalog, 必须显式注册.
-            // registerNativeProvider 走 ModelRuntime._nativeExtensionProviders + recomposeProvider,
-            // 让 MutableModels 知道 faux provider, hasConfiguredAuth('faux') 走通.
-            if (process.env.PI_FAUX === '1' && globalThis.__piFauxProvider) {
-              try {
-                session.modelRuntime.registerNativeProvider(globalThis.__piFauxProvider.provider);
-                // 触发 async refresh, 等 configuredProviders 包含 faux
-                await session.modelRuntime.refresh({ allowNetwork: false });
-                console.error(`[sidecar] PI_FAUX: registered faux provider, hasConfiguredAuth(faux)=${session.modelRuntime.hasConfiguredAuth('faux')}`);
-              } catch (e) {
-                console.error('[sidecar] PI_FAUX registerNativeProvider failed:', e);
-              }
-            }
-            // v0.4.2 step 1 fix: user-custom provider (config.baseUrl 走 OpenAI-compatible) 同理需要 register
-            //   到 modelRuntime, 否则 modelRuntime 不知道 user-custom, 抛 "No API key found for user-custom".
-            //   跟 PI_FAUX 修法一致, registerNativeProvider 走 ModelRuntime._nativeExtensionProviders.
-            if (globalConfig.baseUrl) {
-              try {
-                const userCustomProvider = buildUserCustomProvider(globalConfig);
-                session.modelRuntime.registerNativeProvider(userCustomProvider);
-                await session.modelRuntime.refresh({ allowNetwork: false });
-                console.error(`[sidecar] user-custom: registered provider, hasConfiguredAuth(user-custom)=${session.modelRuntime.hasConfiguredAuth('user-custom')}`);
-              } catch (e) {
-                console.error('[sidecar] user-custom registerNativeProvider failed:', e);
-              }
-            }
-
-            send({ type: 'config_ok', provider: msg.provider, model: msg.model, sessionId });
-          } catch (e) {
-            console.error('[sidecar] createAgentSession failed:', e);
-            send({
-              type: 'config_error',
-              message: sanitizeErrBody(e instanceof Error ? `${e.message}\n${e.stack?.split('\n').slice(0, 3).join('\n')}` : String(e)),
-            });
-            sessionBuildPromise = null;  // build 失败, 清 promise 避免后续 prompt 永久 hang
-          }
-        })();
-        return;
-      }
-      case 'prompt': {
-        // v0.4.2 step 1 fix: session 还在 build 时 await sessionBuildPromise (race fix 详细见 line 583 area 注释)
-        (async () => {
-          if (!currentSession && sessionBuildPromise) {
-            try { await sessionBuildPromise; } catch (e) { console.error('[sidecar] sessionBuildPromise failed:', e); }
-          }
-          if (!currentSession) {
-            send({ type: 'error', message: 'No session — send { type: "config" } first', sessionId: msg.sessionId });
-            return;
-          }
-          // 不 await — 协议是异步流, 事件通过 session.subscribe 持续发
-          runPrompt(msg.content, msg.sessionId || currentSessionId).catch((e) => {
-            console.error('[sidecar] runPrompt unhandled:', e);
-          });
-        })();
-        return;
-      }
-      case 'abort': {
-        if (currentSession) {
-          try { currentSession.abort(); } catch (e) { console.error('[sidecar] abort threw:', e); }
-          send({ type: 'agent_end', sessionId: msg.sessionId || currentSessionId });
-        }
-        return;
-      }
-      case 'permission_response': {
-        const pending = pendingPermissionRequests.get(msg.toolCallId);
-        if (!pending) {
-          console.warn(`[sidecar] permission_response for unknown toolCallId: ${msg.toolCallId}`);
-          return;
-        }
-        pendingPermissionRequests.delete(msg.toolCallId);
-        if (msg.allow) {
-          pending.resolve(undefined);
-        } else {
-          pending.resolve({ block: true, reason: msg.reason || 'User denied' });
-        }
-        console.error(`[sidecar] permission_response: toolCallId=${msg.toolCallId} allow=${msg.allow}`);
-        return;
-      }
-      case 'set_permission_mode': {
-        if (msg.mode === 'ask' || msg.mode === 'smart' || msg.mode === 'allow') {
-          currentPermissionMode = msg.mode;
-          console.error(`[sidecar] permission mode updated: ${currentPermissionMode}`);
-        } else {
-          console.warn(`[sidecar] set_permission_mode invalid: ${msg.mode}`);
-        }
-        return;
-      }
-      case 'compact_session': {
-        // v0.4.2 step 1: FE 端手动触发压缩
-        if (!currentSession) {
-          send({ type: 'error', message: 'No session — send { type: "config" } first', sessionId: msg.sessionId });
-          return;
-        }
-        const sid = msg.sessionId || currentSessionId;
-        (async () => {
-          try {
-            await currentSession.compact();
-            // compaction_start / compaction_end 由 AgentSession 自动 emit
-            // 不需要额外 send, 也不需要 finishUp (compaction 不是 agent run)
-          } catch (e) {
-            console.error('[sidecar] session.compact threw:', e);
-            send({
-              type: 'error',
-              message: sanitizeErrBody(e instanceof Error ? e.message : String(e)),
-              sessionId: sid,
-            });
-          }
-        })();
-        return;
-      }
-      default:
-        send({ type: 'error', message: `Unknown IPC type: ${msg.type}` });
-    }
-  } catch (e) {
-    send({ type: 'error', message: `IPC handler error: ${e instanceof Error ? e.message : String(e)}` });
-  }
+// ====== 4. 创 runtime ======
+const runtime = await createAgentSessionRuntime(createRuntime, {
+  cwd: workspacePath,
+  agentDir,
+  sessionManager,
 });
 
-console.error('[sidecar] booted, listening on stdin (Pi Agent v0.4.2 — createAgentSession + Extension API + auto_retry_*)');
+console.error(`[sidecar] runtime ready, model=${runtime.session.model?.provider}/${runtime.session.model?.id}`);
+
+// ====== 5. (无 readline 要关) ======
+// v0.5.0 fix: 不需要 rl.close() — 我们用 raw process.stdin 读了 line 1, 没用 readline.
+//   runRpcMode 用 attachJsonlLineReader 从 line 2 开始接管 stdin.
+
+// ====== 6. 启动 RPC mode ======
+// runRpcMode 接管 stdin (attachJsonlLineReader 严格 LF-only JSONL) + stdout (takeOverStdout
+// backpressure). 后续 RpcCommand 走 stdin, RpcResponse + RpcEvent + extension_ui_request
+// 走 stdout. 我们不再 parse 任何 events.
+//
+// 包含但不限:
+//   - prompt / steer / follow_up / abort / new_session
+//   - set_model / cycle_model / set_thinking_level / set_steering_mode
+//   - compact / set_auto_compaction / set_auto_retry
+//   - fork / clone / switch_session / get_messages / get_tree / get_state
+//   - extension_ui_response (permission 弹窗响应走这个)
+//
+// 5x retry / 30s hang watch / auto_compaction / backpressure 都 Pi SDK 内置.
+// runRpcMode 返回 Promise<never> (永远不 resolve), 用 IIFE 避免 Node v22 top-level await
+// 警告让进程退出.
+
+(async () => {
+  try {
+    await runRpcMode(runtime);
+  } catch (e) {
+    console.error('[sidecar] runRpcMode failed:', e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
+})();
