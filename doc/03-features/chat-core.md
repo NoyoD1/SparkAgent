@@ -1,7 +1,7 @@
 # Chat 核心 (Chat Core)
 
 > 状态: 🟢 95%
-> 最后更新: 2026-08-16 (v0.4 Pi SDK 集成端到端跑通)
+> 最后更新: 2026-08-17 (v0.4.1.3 step 累加 + 跑马灯 + max-width 720)
 > spec 涉及: `app/src/components/ChatMain/` + `app/src/stores/chat.ts` + `sidecar/src/index.mjs`
 
 ---
@@ -21,7 +21,9 @@
 - ✅ 复制消息 / 复制代码块
 - ✅ 重试（regenerate）— 单条消息级别
 - ✅ **Pi SDK 集成 v0.4** — sidecar 用 `@earendil-works/pi-ai` + `@earendil-works/pi-agent-core`,7 内置 provider + 自定义 openai-compatible (商汤等) 全跑通
-- 🟡 中断生成（Stop 按钮）— **v0.4.1 必做**
+- ✅ **7 tool 集成 v0.4.1** — sidecar 用 `@earendil-works/pi-coding-agent`, `createReadTool`/`createWriteTool`/`createEditTool`/`createBashTool`/`createLsTool`/`createFindTool`/`createGrepTool` 全跑通（fauxProvider 烟测 PASS, 真 key 端到端 OK）
+- ✅ **Step 累加 UI v0.4.1** — 1 turn = 1 step group, Cursor 风格, 默认全折叠 (current step 也折叠), isActive 走 accent 边 + spinner. final body 渲染 `lastStep.stepText` 防跨 turn 重复
+- 🟡 中断生成（Stop 按钮）— **v0.4.1 必做（未做）**
 - ❌ 编辑用户消息后重发（edit & resend）
 - ❌ 引用回复（quote & reply）
 - ❌ 消息分支（fork from message N）
@@ -47,28 +49,49 @@
 | `app/src/components/ChatMain/Composer.vue` | 输入框 + 附件 + 工具栏 |
 | `app/src/components/ChatMain/MarkdownContent.vue` | marked 渲染 + 代码高亮 + v-html |
 | `app/src/components/ChatMain/ChatMessageNav.vue` | 消息间导航（上下条 / 跳到最新）|
-| `app/src/stores/chat.ts` | 消息状态机 + 事件订阅 + 流式 append |
-| `sidecar/src/index.mjs` | Pi SDK `Agent` + `createModels` 集成 → JSON Lines 事件 (v0.4 重写) |
+| `app/src/stores/chat.ts` | 消息状态机 + 事件订阅 + 流式 append + step 累加 state (v0.4.1) |
+| `app/src/components/ChatMain/StepGroup.vue` | 单 step 渲染（标题 + thinking + tool_calls, 默认全折叠）**v0.4.1 新建** |
+| `sidecar/src/index.mjs` | Pi SDK `Agent` + `createModels` + 7 tool 工厂集成 → JSON Lines 事件 (v0.4 重写, v0.4.1 加 tool + turn 边界) |
 
-### 2.1 事件流（v0.3.8.6+）
+### 2.1 事件流（v0.4.1 扩展）
 
 ```
-agent_start → message_start → message_update(N) → tool_start / tool_update / tool_end → message_end → agent_end
+agent_start → turn_start → message_start → message_update(N) → [tool_start / tool_update / tool_end] → message_end → turn_end → ... → agent_end
 ```
 
 每个事件含 `sessionId`，多 session 并发不串。
+
+**v0.4.1 新增 turn 边界事件**：
+- `turn_start` — 标一个新 turn 起点（Pi SDK Agent.prompt 一次可能跑 N turn, tool_call 链）
+- `turn_end` — 标 turn 终点，payload `{ message, toolResults }`
+- FE 用来做 step 累加 UI（1 turn = 1 step group），不需要新协议
+
+**v0.4.1 修复 event name**：
+- ❌ `tool_call_*`（v0.4 集成时凭印象写错）
+- ✅ `tool_execution_*`（v0.84+ 实际命名）→ sidecar 映射成 JSON Lines `tool_*`
 
 ### 2.2 折叠行为
 
 - `thinking` block 默认折叠（v0.3.8.11）
 - `tool_call` block 默认折叠，但 tool 列表展开
 - 折叠时不能"漏出"内容（v0.3.8.11 leak 修复）
+- **Step group 默认全折叠**（v0.4.1.1）— 包括 current step，isActive 走左边 accent 边 + spinner 提示，不强制展开
+- **thinking 样式**（v0.4.1.2）— fs-11 italic fg-tertiary + 灰底 + 6px padding，跟正文 14px 区分
+- **tool_call 样式**（v0.4.1.2）— fs-11 mono 紧凑 padding (2px)
 
 ### 2.3 颜色（v0.3.8.26+）
 
 - `thinking` 内 markdown 用 `fg-tertiary`（区别于正文 `fg-primary`）
 - `tool_call` name 用 `fg-secondary` + mono 字体
 - 通过 `:deep(.pad-md)` 穿透 scoped 到 v-html 子元素
+- **Step 标题**（v0.4.1.2）— 12px fg-tertiary 无 emoji
+- **session 跑马灯**（v0.4.1.3）— `.is-streaming::after` 2px 底部 accent gradient + 0.8s linear infinite（marching ants），不依赖 is-active
+
+### 2.4 ChatMain max-width（v0.4.1.3）
+
+- `.pad-chatmain__list-inner` max-width 880px → **720px**（居中, 两侧留白）
+- `.pad-chatmain__composer-area` max-width 880px → **720px**（跟 list-inner 同步）
+- `.pad-hero__composer` + `.pad-hero__tabstrip` 已经 720px, 不动
 
 ---
 
@@ -103,6 +126,11 @@ agent_start → message_start → message_update(N) → tool_start / tool_update
 
 ## 5. Changelog
 
+- **2026-08-17 · v0.4.1.3 polish** · session 跑马灯 marching ants（别人 agent session 跑时也能看到）+ chat 内容收窄 880→720. user feedback "session 跑马灯效果 (别人 agent 界面)" + "中间回复内容的区域还是太宽了"
+- **2026-08-17 · v0.4.1.2 fix** · final body 渲染 `lastStep.stepText`（per-turn 隔离, 不跨 turn 重复）+ step UI 美化（标题 12px fg-tertiary, thinking fs-11 italic + 灰底, tool_call fs-11 mono 紧凑）. user feedback "内容重复" + "step UI 不够精致"
+- **2026-08-17 · v0.4.1.1 fix** · step 默认全折叠 (current step 也折叠) + 删 stepText 在 step 内重复渲染. user feedback "内容重复" + "默认展开太占地方"
+- **2026-08-17 · v0.4.1 step 累加 UI** · 新建 `StepGroup.vue`, 1 turn = 1 step group 可折叠累加. sidecar 透传 `turn_start` / `turn_end` 标 step 边界. types.ts 加 `Step` interface + `ChatMessage.steps?`. ChatMessage 改用 steps prop. user feedback "步骤流式回复能不能再美化好看一些"
+- **2026-08-17 · v0.4.1 7 tool 集成** · 改用 `@earendil-works/pi-coding-agent` 7 tool 工厂 (D102 反转, "直接使用 pi-coding-agent 包的"). 修了 2 个 bug: event name `tool_call_*` → `tool_execution_*` + cost 必填 (`pi-ai/src/models.ts:882` calculateCost 假设 `model.cost` 已定义). fauxProvider 烟测 PASS
 - **2026-08-16 · v0.4 (Pi SDK 集成)** · sidecar 重写用 `@earendil-works/pi-ai` + `@earendil-works/pi-agent-core`,支持 7 内置 provider + 自定义 openai-compatible (商汤 deepseek-v4-flash 真 key 端到端跑通). 修了 5 字段必填 + 错误 emit + event 去重 + import 路径. ADR-0012 记录决策
 - **2026-08-16 · v0.3.8.27** · 移除 composer 上方 fade mask（用户反馈"膏药贴"）
 - **2026-08-16 · v0.3.8.26** · thinking/tools 文字色区分（`:deep(.pad-md)` + `fg-secondary`）

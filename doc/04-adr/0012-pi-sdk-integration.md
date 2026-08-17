@@ -62,24 +62,28 @@ v0.3 阶段 sidecar 完全裸跑（手写 fetch + SSE 解析，0 依赖）。问
 
 ## 决策
 
-**方案 A：集成 pi-ai + pi-agent-core**（用户明确选择"两个核心包"）。
+**方案 A：集成 pi-ai + pi-agent-core**（v0.4 拍板，2026-08-16 用户明确选择"两个核心包"）
+
+**v0.4.1 反转（2026-08-17, D102）**: 7 tool + session 改为直接使用 `pi-coding-agent` 包（不是自写）。用户原话："直接使用 pi-coding-agent 包的"。所以最终依赖是 **3 个包**（pi-ai + pi-agent-core + pi-coding-agent）。
 
 ```json
-// sidecar/package.json
+// sidecar/package.json (v0.4.1 最终版)
 {
   "dependencies": {
-    "@earendil-works/pi-ai": "file:../pi-sdk/packages/ai",
-    "@earendil-works/pi-agent-core": "file:../pi-sdk/packages/agent"
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-agent-core": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "^0.84.2"
   }
 }
 ```
 
 **集成方式**：
-- sidecar `src/index.mjs` 用 `Agent` (pi-agent-core) + `createModels` (pi-ai)
+- sidecar `src/index.mjs` 用 `Agent` (pi-agent-core) + `createModels` (pi-ai) + `createReadTool` 等 7 工具 (pi-coding-agent)
 - 7 个内置 provider 工厂调用（`anthropicProvider()` / `openaiProvider()` / `deepseekProvider()` / `groqProvider()` / `moonshotaiProvider()` / `googleProvider()` / `minimaxProvider()`）
 - 自定义 provider 用 `createProvider({ id, baseUrl, auth, models, api: openaiCompletionsApi })`
 - 现有 JSON Lines IPC 协议（`chat:event`）保留 — **只换 LLM 调用底层实现**，不改 FE
-- Tool / session 抽象自己实现（基于 `Agent.subscribe` + `Agent.prompt` + `AgentTool` 接口）
+- 7 个工具用 pi-coding-agent 的 `createReadTool` / `createWriteTool` / `createEditTool` / `createBashTool` / `createLsTool` / `createFindTool` / `createGrepTool`（不是自写）
+- Session 用 pi-coding-agent 的 `createAgentSession` / `SessionManager` / `compact` / `shouldCompact` / `estimateContextTokens`（v0.4.2 待集成）
 
 ## Provider 映射（v0.3.x 7 内置 → Pi SDK）
 
@@ -102,13 +106,15 @@ v0.3 阶段 sidecar 完全裸跑（手写 fetch + SSE 解析，0 依赖）。问
 | LLM 客户端 | 自写 fetch + SSE | 复用 pi-ai |
 | 流式协议 | 自写 event 协议 | 复用 pi-ai AssistantMessageEventStream |
 | Thinking 协议 | 自写字段名兼容 | 复用 pi-ai unified thinking |
-| 7 个 tool | 全自写 | **仍自写**（pi-agent-core 不含 tool 实现） |
-| Session 管理 | 自写 | **仍自写**（core 不含 SessionManager） |
+| 7 个 tool | 全自写 | **v0.4 自写 → v0.4.1 反转用 pi-coding-agent createReadTool/...** |
+| Session 管理 | 自写 | **v0.4 自写 → v0.4.2 用 pi-coding-agent SessionManager** |
 | Auth 存储 | 已有 OS keychain | **复用**（pi-ai 自带 auth 注入点） |
 | Tool call 协议 | 自写事件 | **复用** pi-agent-core Agent.subscribe |
 | Provider 抽象 | 已有 store | **替换** createProvider-based |
 
-**总工作量**：v0.4 路线图 10 项 → 6 项（节省 40%）。**7 个 tool + session 仍要自己写**（pi-agent-core 故意保持 core 极简，不含业务能力）。
+**总工作量**：v0.4 路线图 10 项 → 6 项（节省 40%）。v0.4.1 反转后 7 tool 也白送，整体节省约 60%。
+
+**反转原因**：用户原话 "直接使用 pi-coding-agent 包的"（2026-08-17 中途明确指示），不再纠结"core 极简保持掌控"。代价是接受 pi-coding-agent 的 .pi 配置假设（v0.4 不暴露给 FE，v0.4.2 集成 session 时再处理）。
 
 ## 后果
 
@@ -117,35 +123,35 @@ v0.3 阶段 sidecar 完全裸跑（手写 fetch + SSE 解析，0 依赖）。问
   - 协议标准化 — FE 跟 sidecar 协议可对接 SDK 未来 Skills / Subagent
   - Tool call / 流式 / thinking 一行实现
   - 跟 earendil-works/pi 主线对齐（v1.0 商业化时可深度集成）
+  - **v0.4.1 反转后** 7 tool + session 也白送，整体维护成本再降 60%
 - 负面:
-  - 7 个 tool 自己写（read/write/edit/bash/ls/find/grep）— 预计 800-1200 行 TS
-  - Session 持久化自己写 — 预计 300-500 行
-  - pi-sdk 必须 build 出 dist（需要 npm install + npm run build 在 pi-sdk 仓库）
+  - pi-sdk 必须 npm install 出 dist（已用 npm registry 版本，无需本地 build）
   - pi-ai 的 anthropic/openai 协议细节要学习（不是 LLM API 直觉）
+  - pi-coding-agent 自带 .pi 配置假设（v0.4.2 session 集成时需评估要不要吸收）
 - 中性:
-  - sidecar 0 依赖 → 3 依赖（pi-ai + pi-agent-core + 各自 transitive）
-  - pi-sdk clone 到 `pi-sdk/` 不进 git（.gitignore 已加）
+  - sidecar 0 依赖 → 3 直接依赖（pi-ai + pi-agent-core + pi-coding-agent）+ ~140 transitive
+  - pi-sdk clone 到 `pi-sdk/` 不进 git（.gitignore 已加，作为 reference only）
   - v0.3 mock 工具调用 UI 全部保留 — 协议层不动
 
 ## 何时 Revisit
 
-- pi-coding-agent 升级到提供"可插拔 core"（把 tool / session 拆出来）
-- 用户要更多内置 tool（web search / browser use / image gen）
+- 用户要更多内置 tool（web search / browser use / image gen）→ v0.6+ 评估
 - pi-ai 主线 breaking change 频繁（依赖锁版本）
 - Pi SDK 出 v1.x 商业版要付费
 - 性能 / 启动速度问题（pi-ai 包大，启动慢）
 
-## v0.4 集成踩坑 (2026-08-16)
+## v0.4 集成踩坑 (2026-08-16 → v0.4.1 累计)
 
-`createProvider` 工厂**不**自动给 model 注入以下必填字段，调用方**必须手动加**：
+`createProvider` 工厂**不**自动给 model 注入以下 6 个必填字段，调用方**必须手动加**：
 
 1. **`provider: 'id'`** — line 631 `getAuth` 抛 "Unknown provider: undefined"
 2. **`baseUrl: '...'`** — line 510 `new OpenAI({ baseURL: model.baseUrl })`，否则 OpenAI SDK fallback 到 `https://api.openai.com/v1`
 3. **`input: ['text']` 或 `['text', 'image']`** — line 1021 `model.input.includes("image")` 假设 array，否则 `undefined.includes(...)` 抛错
 4. **`auth: { apiKey: { name, resolve } }`** — auth.apiKey 是对象（ApiKeyAuth）不是字符串
-5. **anthropic 工厂要 env var 或 keychain credential**，user-custom 工厂能注入 apiKey
+5. **`cost: { input, output, cacheRead, cacheWrite }` (number)** — `pi-ai/src/models.ts:882` `calculateCost()` 读 `model.cost.tiers`，但 caller 必须给 `cost` 自身（哪怕全 0）。**v0.4.1.2 加**（修 "Cannot read properties of undefined (reading 'tiers')"）
+6. **anthropic 工厂要 env var 或 keychain credential**，user-custom 工厂能注入 apiKey
 
-**user-custom provider 工厂** template（v0.4.2 完整版）：
+**user-custom provider 工厂** template（v0.4.1 完整版 — 6 字段必填）：
 
 ```javascript
 createProvider({
@@ -159,13 +165,56 @@ createProvider({
   },
   models: [{
     id: '...',
-    provider: 'user-custom',       // <-- 必填
+    provider: 'user-custom',       // 必填 1
     api: 'openai-completions',
-    baseUrl: '...',               // <-- 必填 (line 510)
-    input: ['text'],              // <-- 必填 (line 1021)
+    baseUrl: '...',                 // 必填 2 (line 510)
+    input: ['text'],                // 必填 3 (line 1021)
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },  // 必填 5 (line 882)
     contextWindow: 128000,
     maxTokens: 8192,
   }],
   api: { stream, streamSimple },  // from @earendil-works/pi-ai/api/openai-completions
 });
 ```
+
+## v0.4.1 集成踩坑 (2026-08-17)
+
+**Pi SDK agent 事件名 (v0.84+)**：
+
+集成时按印象写错事件名前缀，正确是：
+- ❌ `tool_call_start` / `tool_call_update` / `tool_call_end`（v0.4 集成时 AI 凭印象写的）
+- ✅ `tool_execution_start` / `tool_execution_update` / `tool_execution_end`（v0.84+ 实际命名）
+
+v0.4 没有 tool 可调没暴露问题，v0.4.1 集成 7 tool 后立即冒泡，commit `0bcc856` 修。
+
+**每个 turn 的事件序列**：
+```
+turn_start → message_start → message_update(N) → [tool_execution_start → tool_execution_update → tool_execution_end] → message_end → turn_end
+```
+
+- `turn_start` / `turn_end` 标 step 边界（1 turn = 1 step group，FE 用来做 step 累加 UI）
+- `turn_end` payload `{ message, toolResults }`（无独立字段，纯边界信号）
+- `message_start` 是 partial message，role + 初始 content；最终 message 在 `message_end` 后才会到
+
+**pi-coding-agent 7 工具工厂签名**（不是自写时假设的"self-name"）：
+
+```javascript
+import { createBashTool, createEditTool, createFindTool, createGrepTool,
+         createLsTool, createReadTool, createWriteTool } from '@earendil-works/pi-coding-agent';
+
+// 接受 (cwd, options?) → AgentTool<any>[]
+function buildTools(workspacePath) {
+  const cwd = workspacePath || process.cwd();
+  return [
+    createReadTool(cwd),
+    createWriteTool(cwd),
+    createEditTool(cwd),
+    createBashTool(cwd),
+    createLsTool(cwd),
+    createFindTool(cwd),
+    createGrepTool(cwd),
+  ];
+}
+```
+
+LLM 调用的工具名是 `read` / `write` / `edit` / `bash` / `ls` / `find` / `grep`（**不是** `read_file` / `list_dir`）。AI 改 tool UI 时一定要 grep 实际 emit 的 `toolName`，不要按 self-name 假设。

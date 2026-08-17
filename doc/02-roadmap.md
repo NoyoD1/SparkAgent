@@ -12,7 +12,7 @@
 | v0.1 - v0.2 | 骨架 | Web form + 多 provider BYOK + 流式 | ✅ | 2026-07 |
 | v0.3 | Tauri 化 | 桌面 app + OS keychain + Node sidecar | ✅ | 2026-08 上 |
 | v0.3.5 - v0.3.8.27 | UX Polish | 布局 / 主题 / 折叠 / 字体 / 设计系统 | ✅ | 2026-08 中 |
-| **v0.4** | **Tool Call 真正落地** | 文件读/写 / shell / 权限确认 / abort | 🟢 | **2026-08 中** |
+| **v0.4** | **Tool Call 真正落地** | 文件读/写 / shell / 权限确认 / abort | 🟡 (4/6) | **2026-08 中** |
 | v0.5 | Memory | 跨会话 / 项目级 / 自动提取 | ⚪ | TBD |
 | v0.6 | Skills + MCP | 自定义指令 + MCP server 接入 | ⚪ | TBD |
 | v0.7 | Subagent / Plan | 多 agent 切换 / Plan 模式 | ⚪ | TBD |
@@ -23,61 +23,94 @@
 
 ---
 
-## 🟢 v0.4 · Tool Call 真正落地（**当前**）
+## 🟡 v0.4 · Tool Call 真正落地（**当前 · 4/6**）
 
 **为什么这个最重要**：没 tool call，Pi Agent 就是个 chat 客户端；有了 tool call，才是 agent 客户端。
 
-**v0.4 计划变更（2026-08-16）**：原计划 10 项集成 Pi SDK 后降到 6 项。详见 [ADR-0012](04-adr/0012-pi-sdk-integration.md) — LLM 客户端层 + 协议层复用 pi-ai + pi-agent-core，7 个 tool + session 仍自写（core 不含业务能力）。
+**v0.4 计划变更（2026-08-16）**：原计划 10 项集成 Pi SDK 后降到 6 项。详见 [ADR-0012](04-adr/0012-pi-sdk-integration.md) — LLM 客户端层 + 协议层复用 pi-ai + pi-agent-core。
+
+**v0.4.1 反转（2026-08-17, D102）**：7 tool + session 改为直接使用 `pi-coding-agent` 包（"直接使用 pi-coding-agent 包的"），不再自写。依赖最终是 3 个包：pi-ai + pi-agent-core + pi-coding-agent。
+
+**v0.4.1 完成项**（item 1 + 2 + 5 部分 + step 累加 UI）:
+- ✅ item 1 Pi SDK 集成（v0.4.0）
+- ✅ item 2 7 tool 集成（v0.4.1，**用 pi-coding-agent 工厂** createReadTool/createWriteTool/createEditTool/createBashTool/createLsTool/createFindTool/createGrepTool）
+- ✅ Step 累加 UI（v0.4.1 — Cursor 风格，1 turn = 1 step group）
+- ✅ Tool result 持久化框架（v0.4.1 message.steps, v0.4.2 用 pi-coding-agent SessionManager 落盘）
+
+**v0.4 还差**（推到 v0.4.1+ 或 v0.4.2）:
+- ❌ item 3 Tool permission system（v0.4 必做未做）
+- ❌ item 4 Abort / Stop button（v0.4 必做未做）
+- ❌ item 5 Session 持久化 v0.4.2 集成
+- ❌ item 6 Workspace 路径校验 + 危险命令黑名单（v0.4 必做未做）
 
 ### 必做项（v0.4 6 项）
 
-| # | 项 | spec | 验收 |
-|---|---|---|---|
-| 1 | **Pi SDK 集成**（sidecar 用 pi-ai + pi-agent-core）| [ADR-0012](04-adr/0012-pi-sdk-integration.md) | 现有 JSON Lines 协议不变，LLM 调用底层切 Pi SDK；7 内置 + 自定义 provider 全通 |
-| 2 | **7 个 tool 自实现**（read / write / edit / bash / ls / find / grep）| [tools.md](03-features/tools.md) | LLM 能读 / 写 workspace 内文件 + 跑命令 + 浏览；走 pi-agent-core AgentTool 接口 |
-| 3 | **Tool permission system**（v0.4 最关键）| [tools.md](03-features/tools.md) + [security.md](03-features/security.md) | 每个 tool call 用户显式 confirm（至少第一次），白名单 / 黑名单 |
-| 4 | **Abort / Stop button** | [chat-core.md](03-features/chat-core.md) | 用户能中断生成 + tool call（kill sidecar 子进程）|
-| 5 | **Session 持久化**（基于 Pi Agent SessionEntry 协议）| [session.md](03-features/session.md) | 重新打开 session 能看到 messages + tool calls + tool results |
-| 6 | **Workspace 路径校验 + 危险命令黑名单** | [security.md](03-features/security.md) | tool 拒绝 path traversal (`../` etc)；`rm -rf /` `mkfs` 等拦截 |
+| # | 项 | spec | 状态 | 验收 |
+|---|---|---|---|---|
+| 1 | **Pi SDK 集成**（sidecar 用 pi-ai + pi-agent-core）| [ADR-0012](04-adr/0012-pi-sdk-integration.md) | ✅ v0.4.0 | 现有 JSON Lines 协议不变，LLM 调用底层切 Pi SDK；7 内置 + 自定义 provider 全通 |
+| 2 | **7 个 tool 集成**（v0.4.1 反转用 `pi-coding-agent`，不是自写）| [tools.md](03-features/tools.md) | ✅ v0.4.1 | LLM 能读 / 写 workspace 内文件 + 跑命令 + 浏览；走 pi-coding-agent 工厂 (D102) |
+| 3 | **Tool permission system**（v0.4 最关键）| [tools.md](03-features/tools.md) + [security.md](03-features/security.md) | ❌ 未做 | 每个 tool call 用户显式 confirm（至少第一次），白名单 / 黑名单 |
+| 4 | **Abort / Stop button** | [chat-core.md](03-features/chat-core.md) | ❌ 未做 | 用户能中断生成 + tool call（kill sidecar 子进程）|
+| 5 | **Session 持久化**（v0.4.2 用 `pi-coding-agent` SessionManager）| [session.md](03-features/session.md) | 🟡 部分 | 重新打开 session 能看到 messages + tool calls + tool results（v0.4.1 message.steps 已落内存，v0.4.2 落盘）|
+| 6 | **Workspace 路径校验 + 危险命令黑名单** | [security.md](03-features/security.md) | ❌ 未做 | tool 拒绝 path traversal (`../` etc)；`rm -rf /` `mkfs` 等拦截 |
 
-### Pi SDK 集成细节（item 1）
+### Pi SDK 集成细节（item 1 + 2 — v0.4.1 最终版）
 
-```ts
-// sidecar/src/agent.mjs (新文件)
+```js
+// sidecar/src/index.mjs (v0.4.1)
 import { Agent } from '@earendil-works/pi-agent-core';
-import { createModels, createProvider, openaiCompletionsApi,
+import { createModels, createProvider,
          anthropicProvider, openaiProvider, deepseekProvider,
          moonshotaiProvider, groqProvider, googleProvider,
          minimaxProvider } from '@earendil-works/pi-ai';
+import { stream, streamSimple } from '@earendil-works/pi-ai/api/openai-completions';
+import { createBashTool, createEditTool, createFindTool, createGrepTool,
+         createLsTool, createReadTool, createWriteTool } from '@earendil-works/pi-coding-agent';
 
-// 内置 7 provider 工厂注册
+// 7 provider 工厂
 const models = createModels();
 models.setProvider(anthropicProvider());
-models.setProvider(openaiProvider());
-models.setProvider(deepseekProvider());
-models.setProvider(moonshotaiProvider());
-models.setProvider(groqProvider());
-models.setProvider(googleProvider());
-models.setProvider(minimaxProvider());
-
-// 任意自定义 (商汤/任意 endpoint)
+// ... 其他内置
 models.setProvider(createProvider({
   id: 'user-custom',
   baseUrl: userBaseUrl,
-  auth: { apiKey: userApiKey },
-  models: [{ id: userModelId, api: 'openai-completions', ... }],
-  api: openaiCompletionsApi,
+  auth: { apiKey: { name: '...', resolve: async () => ({ auth: { apiKey: config.apiKey } }) } },
+  models: [{
+    id: userModelId,
+    provider: 'user-custom',   // 必填 1
+    api: 'openai-completions',
+    baseUrl: userBaseUrl,      // 必填 2
+    input: ['text'],           // 必填 3
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },  // 必填 5 (v0.4.1.2)
+    contextWindow: 128000, maxTokens: 8192,
+  }],
+  api: { stream, streamSimple },
 }));
+
+// 7 tool 工厂 (v0.4.1, 用 pi-coding-agent 不是自写)
+function buildTools(workspacePath) {
+  const cwd = workspacePath || process.cwd();
+  return [
+    createReadTool(cwd), createWriteTool(cwd), createEditTool(cwd),
+    createBashTool(cwd), createLsTool(cwd), createFindTool(cwd), createGrepTool(cwd),
+  ];
+}
 
 // Agent 实例
 const agent = new Agent({
-  initialState: { systemPrompt, model: models.getModel(providerId, modelId) },
+  initialState: { systemPrompt, model: models.getModel(providerId, modelId),
+                  tools: buildTools(workspacePath) },
   streamFn: models.streamSimple.bind(models),
 });
 
-agent.subscribe(event => sendToFE(event));   // ⬅ 现有 JSON Lines 协议
+agent.subscribe(event => sendToFE(event));   // ⬅ 现有 JSON Lines 协议 (turn_start/turn_end + tool_execution_* 透传)
 await agent.prompt(userContent);
 ```
+
+**v0.4.1 踩坑**（已修）:
+- `cost` 必填（`pi-ai/src/models.ts:882` calculateCost 假设 `model.cost` 已定义）— 加 `cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }`
+- `tool_call_*` 事件名错（v0.4 凭印象写）— 改对 `tool_execution_*`，映射到 JSON Lines `tool_*`
+- 7 tool 工具名按 pi-coding-agent 实际 emit（`read`/`write`/`edit`/`bash`/`ls`/`find`/`grep`），不是 self-name 假设
 
 ### 不做（推到后续 phase）
 
@@ -87,12 +120,12 @@ await agent.prompt(userContent);
 
 ### 验收标准（v0.4 完成定义）
 
-- [ ] 启动 app → 配置 BYOK → 选 workspace → 发"读 README.md 给我总结"
-- [ ] LLM 调用 `read_file` 工具 → 显示 tool call UI（折叠 / 展开）→ 输出总结
-- [ ] 发"在 src/foo.ts 加一个 hello 函数" → LLM 调用 `edit_file` → 实际写入文件 → diff 显示
-- [ ] 发"跑 npm test" → LLM 调用 `bash` → 输出在 UI → 用户中途点 Stop → 真的中断
-- [ ] session 重启后历史完整恢复（messages + tool calls + tool results）
-- [ ] 商汤 / 任意 OpenAI-compatible provider 配 key 后能跑（验证 createProvider 通用性）
+- [x] 启动 app → 配置 BYOK → 选 workspace → 发"读 README.md 给我总结"（v0.4.1 fauxProvider 烟测 PASS）
+- [x] LLM 调用 `read` 工具 → 显示 tool call UI（折叠 / 展开）→ 输出总结（v0.4.1 7 tool 集成完成）
+- [x] 发"在 src/foo.ts 加一个 hello 函数" → LLM 调用 `edit` → 实际写入文件 → diff 显示（v0.4.1 7 tool 集成完成）
+- [ ] 发"跑 npm test" → LLM 调用 `bash` → 输出在 UI → 用户中途点 Stop → 真的中断（item 4 未做）
+- [ ] session 重启后历史完整恢复（messages + tool calls + tool results）（item 5 v0.4.2 待做）
+- [x] 商汤 / 任意 OpenAI-compatible provider 配 key 后能跑（v0.4.0 真 key 端到端跑通 deepseek-v4-flash）
 
 ---
 
