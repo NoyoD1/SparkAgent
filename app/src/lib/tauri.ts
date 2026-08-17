@@ -388,6 +388,17 @@ class PiTauriClient {
     return (await invoke('ensure_default_workspace')) as string;
   }
 
+  // ====== v0.4.4 Skills: 写自定义 SKILL.md (scope: 'workspace' | 'global') ======
+  async writeSkillFile(args: {
+    scope: 'workspace' | 'global';
+    name: string;
+    body: string;
+    workspacePath?: string | null;
+    agentDir?: string | null;
+  }): Promise<string> {
+    return (await invoke('write_skill_file', { args })) as string;
+  }
+
   // ====== App config (v0.3.8+: 持久化到 Rust 文件, 替代 localStorage) ======
   // 走 Rust 持久化是因为 WebView2 缓存被清时 localStorage 也被擦, provider 配置会丢.
   // 文件位置: %APPDATA%\com.piagent.desktop\config.json

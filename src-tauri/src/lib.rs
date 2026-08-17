@@ -12,6 +12,7 @@ mod sidecar;
 
 use serde::Deserialize;
 use tauri::{AppHandle, Manager};
+use std::path::PathBuf;
 
 /// Debug log to <project>/.tauri-debug.log (DEBUG ONLY).
 /// 用 file 而非 stderr 是因为 cargo tauri dev 的 stderr 被 bash task pipe 吃了看不见.
@@ -114,6 +115,88 @@ async fn list_api_keys(app: AppHandle) -> Result<Vec<KeychainInfoDto>, String> {
 #[tauri::command]
 async fn has_api_key(provider_id: String) -> Result<bool, String> {
     Ok(keyring::get(&provider_id)?.is_some())
+}
+
+// ====== v0.4.4 Skills (Pi SDK 暴露) ======
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteSkillFileArgs {
+    /// "workspace" 写到 <workspacePath>/.pi/skills/<name>.md
+    /// "global"   写到 <agentDir>/skills/<name>.md (跟 Pi SDK 0.84.2 loadSkills 默认路径一致)
+    scope: String,
+    /// Skill name (a-zA-Z0-9._-), 跟 Pi SDK 0.84.2 frontmatter.name 一致
+    name: String,
+    /// SKILL.md 完整内容 (含 frontmatter), UTF-8 markdown
+    body: String,
+    /// workspace scope 必填, global scope 不需要
+    workspace_path: Option<String>,
+    /// global scope 必填, workspace scope 不需要
+    agent_dir: Option<String>,
+}
+
+#[tauri::command]
+async fn write_skill_file(args: WriteSkillFileArgs) -> Result<String, String> {
+    // 1. name 校验: 1-64 char, [a-zA-Z0-9._-], 不含路径分隔符 / .. 防 path traversal
+    if args.name.is_empty() || args.name.len() > 64 {
+        return Err(format!("skill name 长度必须 1-64, got {}", args.name.len()));
+    }
+    if !args.name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        return Err(format!(
+            "skill name 只能含 [a-zA-Z0-9._-], got '{}'",
+            args.name
+        ));
+    }
+    if args.name == "." || args.name == ".." {
+        return Err("skill name 不能是 '.' 或 '..'".to_string());
+    }
+    if args.body.is_empty() {
+        return Err("skill body 不能为空 (至少要 frontmatter + 内容)".to_string());
+    }
+
+    // 2. scope → 路径
+    let target_path: PathBuf = match args.scope.as_str() {
+        "workspace" => {
+            let ws = args.workspace_path.as_ref().ok_or("workspace scope 需要 workspacePath")?;
+            if ws.is_empty() {
+                return Err("workspace path 不能为空".to_string());
+            }
+            PathBuf::from(ws).join(".pi").join("skills").join(format!("{}.md", args.name))
+        }
+        "global" => {
+            // global scope: agentDir 走 Pi SDK 0.84.2 getAgentDir() 默认路径
+            //   Windows: %USERPROFILE%/.pi/agent
+            //   macOS/Linux: $HOME/.pi/agent
+            // FE 可以不传 (None), Rust 端 fallback 算. 跟 sidecar 启动时 getAgentDir() 一致.
+            let dir = match args.agent_dir.as_ref().filter(|s| !s.is_empty()) {
+                Some(d) => PathBuf::from(d),
+                None => {
+                    // Fallback: USERPROFILE/HOME + .pi/agent (跟 Pi SDK 0.84.2 getAgentDir 一致)
+                    let home = std::env::var("USERPROFILE")
+                        .ok()
+                        .or_else(|| std::env::var("HOME").ok())
+                        .or_else(|| std::env::var("HOMEDRIVE").ok().zip(std::env::var("HOMEPATH").ok()).map(|(d, p)| format!("{}\\{}", d, p)))
+                        .ok_or("global scope 没传 agentDir, 也找不到 USERPROFILE/HOME env")?;
+                    PathBuf::from(home).join(".pi").join("agent")
+                }
+            };
+            dir.join("skills").join(format!("{}.md", args.name))
+        }
+        other => return Err(format!("scope 必须是 'workspace' 或 'global', got '{}'", other)),
+    };
+
+    // 3. 安全: target 必须在 base 之内 (防 path traversal 即使已经过滤 name)
+    let base_path = target_path.parent().map(|p| p.to_path_buf()).ok_or("invalid target path")?;
+    if !base_path.exists() {
+        std::fs::create_dir_all(&base_path).map_err(|e| format!("创建目录失败 {:?}: {}", base_path, e))?;
+    }
+
+    // 4. 写文件
+    std::fs::write(&target_path, args.body.as_bytes()).map_err(|e| format!("写文件失败 {:?}: {}", target_path, e))?;
+
+    // 5. 返回绝对路径
+    let abs = std::fs::canonicalize(&target_path).unwrap_or(target_path);
+    Ok(abs.to_string_lossy().to_string())
 }
 
 // ====== LLM command ======
@@ -401,6 +484,8 @@ pub fn run() {
             ensure_default_workspace,
             load_app_config,
             save_app_config,
+            // v0.4.4 Skills: 写自定义 SKILL.md 到 workspace 或 global agentDir
+            write_skill_file,
             // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
             sidecar::send_rpc_command,
         ])

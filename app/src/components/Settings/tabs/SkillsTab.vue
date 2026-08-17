@@ -6,20 +6,25 @@
  * .appendSystemPromptOverride. 数据从 sidecar 启动时 emit 的 skills_snapshot 拿 (走
  * chat:event channel, type 'skills_snapshot'), 存在 skills store.
  *
- * UI 设计: 跟 ProviderTab 风格一致 (页面 header + 内容卡片), 但 v0.4.4 是"管理"
- * 性质 (勾选启用) 不是"配置"性质 (填 baseUrl + key), 所以 list 走 SkillsButton
- * 同 pattern: name + description + baseDir + 原生 checkbox.
+ * UI 设计: 跟 ProviderTab 风格一致 (页面 header + 内容卡片 + viewMode: 'list' | 'add').
+ *   - 'list': 显示已加载的 skills + "+ 添加自定义" 按钮 (跟 Provider 的"添加自定义"同 pattern)
+ *   - 'add': AddSkillForm 子组件, 收 name + description + body + scope (workspace / global)
  *
  * toggle 改 localStorage (skills store), 但 sidecar 没重启 → system prompt 还没注入
  * 新 enabled skills. user 必须重启 release .exe (D165 systemPrompt 不可动态改).
  * 完整"toggle 后自动重启 sidecar"是 v0.4.4.x polish.
  */
+import { ref } from 'vue';
 import { storeToRefs } from 'pinia';
-import { Sparkles, AlertCircle, Info } from 'lucide-vue-next';
+import { Sparkles, Plus, AlertCircle, Info, Check } from 'lucide-vue-next';
 import { useSkillsStore } from '@/stores/skills';
+import AddSkillForm from './AddSkillForm.vue';
 
 const skillsStore = useSkillsStore();
 const { skills, hasSnapshot, diagnostics } = storeToRefs(skillsStore);
+
+const viewMode = ref<'list' | 'add'>('list');
+const toast = ref<{ type: 'ok' | 'fail'; message: string } | null>(null);
 
 function onToggle(name: string, value: boolean) {
   if (value) skillsStore.enable(name);
@@ -28,85 +33,127 @@ function onToggle(name: string, value: boolean) {
   //   user 必须重启 release .exe (kill 当前 sidecar + send_prompt 触发新 spawn) 才生效.
   console.warn(`[skills] toggled "${name}" → ${value}. 记得重启 release .exe 让 sidecar 重新加载 skills 注入 system prompt (D165 systemPrompt 不可动态改).`);
 }
+
+function openAdd() {
+  viewMode.value = 'add';
+  toast.value = null;
+}
+function closeAdd() {
+  viewMode.value = 'list';
+}
+function onCreated(filePath: string) {
+  // 写完文件, 切回 list, 显示 toast
+  viewMode.value = 'list';
+  toast.value = {
+    type: 'ok',
+    message: `已写入 ${filePath} — 记得重启 release .exe 让 sidecar 重新加载 skills`,
+  };
+  // 5s 后清掉 toast
+  setTimeout(() => {
+    if (toast.value?.message.includes(filePath)) toast.value = null;
+  }, 5000);
+}
 </script>
 
 <template>
   <div class="pad-skillstab">
-    <div class="pad-skillstab__header">
-      <h2 class="pad-skillstab__title">Skills</h2>
-      <p class="pad-skillstab__subtitle">
-        管理 Pi SDK 启用的 skills (走 <code>loadSkills</code> + <code>formatSkillsForPrompt</code> +
-        <code>appendSystemPromptOverride</code>). 启用的 skills 会在每次 send_prompt 时
-        注入 system prompt, 让 LLM 自动调用.
-      </p>
-    </div>
+    <!-- viewMode: 'list' → 显示 skills 列表 -->
+    <template v-if="viewMode === 'list'">
+      <div class="pad-skillstab__header">
+        <h2 class="pad-skillstab__title">Skills</h2>
+        <p class="pad-skillstab__subtitle">
+          管理 Pi SDK 启用的 skills (走 <code>loadSkills</code> + <code>formatSkillsForPrompt</code> +
+          <code>appendSystemPromptOverride</code>). 启用的 skills 会在每次 send_prompt 时
+          注入 system prompt, 让 LLM 自动调用.
+        </p>
+      </div>
 
-    <div class="pad-skillstab__card">
-      <div class="pad-skillstab__card-head">
-        <Sparkles :size="14" :stroke-width="1.75" />
-        <span class="pad-skillstab__card-title">
-          {{ skills.length }} skills 加载
-          <span v-if="hasSnapshot" class="pad-skillstab__count">
-            · 启用 {{ skills.filter((s) => skillsStore.isEnabled(s.name)).length }} 个
+      <div v-if="toast" class="pad-skillstab__toast" :class="`is-${toast.type}`">
+        <Check v-if="toast.type === 'ok'" :size="14" :stroke-width="1.75" />
+        <AlertCircle v-else :size="14" :stroke-width="1.75" />
+        <span>{{ toast.message }}</span>
+        <button class="pad-skillstab__toast-close" @click="toast = null">×</button>
+      </div>
+
+      <div class="pad-skillstab__card">
+        <div class="pad-skillstab__card-head">
+          <Sparkles :size="14" :stroke-width="1.75" />
+          <span class="pad-skillstab__card-title">
+            {{ skills.length }} skills 加载
+            <span v-if="hasSnapshot" class="pad-skillstab__count">
+              · 启用 {{ skills.filter((s) => skillsStore.isEnabled(s.name)).length }} 个
+            </span>
           </span>
+          <button class="pad-skillstab__add-btn" @click="openAdd">
+            <Plus :size="14" :stroke-width="1.75" />
+            <span>添加自定义</span>
+          </button>
+        </div>
+
+        <div v-if="!hasSnapshot" class="pad-skillstab__empty">
+          <Sparkles :size="20" :stroke-width="1.5" />
+          <div class="pad-skillstab__empty-title">⏳ 等待 sidecar 加载 skills...</div>
+          <div class="pad-skillstab__empty-desc">
+            第一次 <code>send_prompt</code> 后 sidecar 才会 emit <code>skills_snapshot</code> (走
+            <code>chat:event</code> channel, 来自 stdout 启动时一次 emit).
+            如果一直不显示, 检查 sidecar stderr 是否有 loadSkills 报错.
+          </div>
+        </div>
+
+        <div v-else-if="skills.length === 0" class="pad-skillstab__empty">
+          <Sparkles :size="20" :stroke-width="1.5" />
+          <div class="pad-skillstab__empty-title">📭 暂 无 skills</div>
+          <div class="pad-skillstab__empty-desc">
+            在 <strong>workspace</strong> 的 <code>.pi/skills/</code> 或 <strong>全局</strong>
+            <code>~/.pi/agent/skills/</code> 创建 <code>SKILL.md</code> (带 frontmatter:
+            <code>name</code> + <code>description</code> + 可选 <code>disable-model-invocation</code>).
+            <button class="pad-skillstab__inline-link" @click="openAdd">点此添加</button> 或
+            详见 <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">Pi SDK 文档</a>.
+          </div>
+        </div>
+
+        <ul v-else class="pad-skillstab__list">
+          <li v-for="s in skills" :key="s.name" class="pad-skillstab__item">
+            <div class="pad-skillstab__item-body">
+              <div class="pad-skillstab__item-name">
+                <span>{{ s.name }}</span>
+                <span v-if="s.disableModelInvocation" class="pad-skillstab__tag" title="disable-model-invocation: true, 只走 /skill:name 手动调用">manual</span>
+              </div>
+              <div class="pad-skillstab__item-desc">{{ s.description || '(no description)' }}</div>
+              <div class="pad-skillstab__item-path">{{ s.baseDir }}</div>
+            </div>
+            <label class="pad-skillstab__item-toggle" :class="{ 'is-disabled': s.disableModelInvocation }">
+              <input
+                type="checkbox"
+                :checked="skillsStore.isEnabled(s.name)"
+                :disabled="s.disableModelInvocation"
+                @change="(e: Event) => onToggle(s.name, (e.target as HTMLInputElement).checked)"
+              />
+            </label>
+          </li>
+        </ul>
+
+        <div v-if="diagnostics.length > 0" class="pad-skillstab__diag">
+          <AlertCircle :size="12" :stroke-width="1.75" />
+          <span>{{ diagnostics.length }} skill 加载诊断 (e.g. collision / path 不存在)</span>
+        </div>
+      </div>
+
+      <div class="pad-skillstab__hint">
+        <Info :size="12" :stroke-width="1.75" />
+        <span>
+          toggle 后 <strong>重启 release .exe</strong> 让 sidecar 重新加载 skills 注入 system prompt
+          (D165 systemPrompt 不可动态改). 后续 v0.4.4.x 会做"toggle 后自动重启 sidecar" polish.
         </span>
       </div>
+    </template>
 
-      <div v-if="!hasSnapshot" class="pad-skillstab__empty">
-        <Sparkles :size="20" :stroke-width="1.5" />
-        <div class="pad-skillstab__empty-title">⏳ 等待 sidecar 加载 skills...</div>
-        <div class="pad-skillstab__empty-desc">
-          第一次 <code>send_prompt</code> 后 sidecar 才会 emit <code>skills_snapshot</code> (走
-          <code>chat:event</code> channel, 来自 stdout 启动时一次 emit).
-          如果一直不显示, 检查 sidecar stderr 是否有 loadSkills 报错.
-        </div>
-      </div>
-
-      <div v-else-if="skills.length === 0" class="pad-skillstab__empty">
-        <Sparkles :size="20" :stroke-width="1.5" />
-        <div class="pad-skillstab__empty-title">📭 暂 无 skills</div>
-        <div class="pad-skillstab__empty-desc">
-          在 <strong>workspace</strong> 的 <code>.pi/skills/</code> 或 <strong>全局</strong>
-          <code>~/.pi/agent/skills/</code> 创建 <code>SKILL.md</code> (带 frontmatter:
-          <code>name</code> + <code>description</code> + 可选 <code>disable-model-invocation</code>).
-          详见 <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">Pi SDK 文档</a>.
-        </div>
-      </div>
-
-      <ul v-else class="pad-skillstab__list">
-        <li v-for="s in skills" :key="s.name" class="pad-skillstab__item">
-          <div class="pad-skillstab__item-body">
-            <div class="pad-skillstab__item-name">
-              <span>{{ s.name }}</span>
-              <span v-if="s.disableModelInvocation" class="pad-skillstab__tag" title="disable-model-invocation: true, 只走 /skill:name 手动调用">manual</span>
-            </div>
-            <div class="pad-skillstab__item-desc">{{ s.description || '(no description)' }}</div>
-            <div class="pad-skillstab__item-path">{{ s.baseDir }}</div>
-          </div>
-          <label class="pad-skillstab__item-toggle" :class="{ 'is-disabled': s.disableModelInvocation }">
-            <input
-              type="checkbox"
-              :checked="skillsStore.isEnabled(s.name)"
-              :disabled="s.disableModelInvocation"
-              @change="(e: Event) => onToggle(s.name, (e.target as HTMLInputElement).checked)"
-            />
-          </label>
-        </li>
-      </ul>
-
-      <div v-if="diagnostics.length > 0" class="pad-skillstab__diag">
-        <AlertCircle :size="12" :stroke-width="1.75" />
-        <span>{{ diagnostics.length }} skill 加载诊断 (e.g. collision / path 不存在)</span>
-      </div>
-    </div>
-
-    <div class="pad-skillstab__hint">
-      <Info :size="12" :stroke-width="1.75" />
-      <span>
-        toggle 后 <strong>重启 release .exe</strong> 让 sidecar 重新加载 skills 注入 system prompt
-        (D165 systemPrompt 不可动态改). 后续 v0.4.4.x 会做"toggle 后自动重启 sidecar" polish.
-      </span>
-    </div>
+    <!-- viewMode: 'add' → AddSkillForm -->
+    <AddSkillForm
+      v-else
+      @close="closeAdd"
+      @created="onCreated"
+    />
   </div>
 </template>
 
@@ -298,5 +345,75 @@ function onToggle(name: string, value: boolean) {
   color: var(--pad-fg-tertiary);
   font-size: 11px;
   line-height: 1.5;
+}
+
+/* v0.4.4.2 添加自定义按钮 (跟 ProviderTab "添加自定义" 同 pattern) */
+.pad-skillstab__add-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--pad-fg-secondary);
+  background: var(--pad-card);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.pad-skillstab__add-btn:hover {
+  background: var(--pad-bg-hover, rgba(0, 0, 0, 0.04));
+  color: var(--pad-fg-primary);
+  border-color: var(--pad-accent-primary, #6366f1);
+}
+
+.pad-skillstab__inline-link {
+  background: none;
+  border: none;
+  color: var(--pad-accent-primary, #6366f1);
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+.pad-skillstab__inline-link:hover {
+  text-decoration: none;
+}
+
+/* Toast (创建成功提示) */
+.pad-skillstab__toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: var(--pad-radius-md);
+  font-size: 12px;
+}
+.pad-skillstab__toast.is-ok {
+  background: var(--pad-bg-success-soft, rgba(34, 197, 94, 0.08));
+  color: var(--pad-fg-success, #16a34a);
+  border: 1px solid var(--pad-fg-success-soft, rgba(34, 197, 94, 0.2));
+}
+.pad-skillstab__toast.is-fail {
+  background: var(--pad-bg-warning-soft, rgba(217, 119, 6, 0.08));
+  color: var(--pad-fg-warning, #d97706);
+  border: 1px solid var(--pad-fg-warning-soft, rgba(217, 119, 6, 0.2));
+}
+.pad-skillstab__toast-close {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  opacity: 0.6;
+}
+.pad-skillstab__toast-close:hover {
+  opacity: 1;
 }
 </style>
