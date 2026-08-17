@@ -401,7 +401,7 @@ export const useConfigStore = defineStore('config', () => {
     }
   }
 
-  // ====== v0.4.2 step 1+: per-workspace sessionId getter/setter ======
+  // ====== v0.4.2 step 1+: per-workspace sessionId getter/setter =====
   /**
    * 拿 workspace 关联的 sessionId. 第一次没设过 → 返回 undefined (sidecar 会自动生成新 id).
    * 注意: 切 workspace 时用 setSessionIdForWorkspace 同步写回去 (即使 undefined 也要清旧值, 防 workspace 改名残留).
@@ -422,6 +422,36 @@ export const useConfigStore = defineStore('config', () => {
       perWorkspaceSessionId.value = { ...perWorkspaceSessionId.value, [workspacePath]: sessionId };
     }
   }
+  /**
+   * v0.5.4 hotfix: lazy create + persist per-workspace sessionId.
+   *
+   * 背景: v0.4.2 step 1 加了 per-workspace stable sessionId 机制 (config store getter/setter,
+   *   config_store.rs 持久化, sidecar 接收 id 走 setSessionFile 走 load 模式),
+   *   但整个项目**没人调** setSessionIdForWorkspace 写回, 也没人调 getSessionIdForWorkspace
+   *   拿值 (v0.4.2 step 1 commit message 自己承认"没跑端到端真实 LLM 验证", 用 PI_FAUX mock 跳过).
+   *
+   * 后果: sendPrompt 时 getSessionIdForWorkspace() 永远返回 undefined → Tauri 传 None → sidecar
+   *   SessionManager.create({id: undefined}) 内部 createSessionId() 创 `sess-${Date.now()}-${random}`
+   *   随机 id → 每次 prompt 一个新 file, AI 永远"第一次对话" (user 截图里 .pi 目录 24 个 .jsonl).
+   *
+   * 修法: sendPrompt 调 ensureSessionIdForWorkspace 拿一个保证存在的 id (没就生成 v4 UUID
+   *   写回 store 立即 persist). 之后所有 prompt 走同一个 id → sidecar 扫到 `${ts}_${sid}.jsonl`
+   *   → setSessionFile 走 load → AI 看到 history.
+   *
+   * Pi SDK 0.84.2 不校验 sessionId 格式, 任意 string 都接受 (走 setSessionFile 走 file path 后缀
+   *   匹配 + 内容 parse, 只要 file 是合法 jsonl 就行).
+   */
+  function ensureSessionIdForWorkspace(workspacePath: string): string {
+    let sid = perWorkspaceSessionId.value[workspacePath];
+    if (!sid) {
+      // crypto.randomUUID() 是 v4 UUID (128 bit 熵), 跟 Pi SDK 内部 uuidv7 兼容 (Pi SDK 不校验格式)
+      sid = crypto.randomUUID();
+      perWorkspaceSessionId.value = { ...perWorkspaceSessionId.value, [workspacePath]: sid };
+      void persist();  // 立即落盘, 切回 workspace 时还在
+      console.log('[config] ensureSessionIdForWorkspace: generated new', { workspacePath, sid: sid.slice(0, 16) });
+    }
+    return sid;
+  }
 
   return {
     // state
@@ -440,6 +470,7 @@ export const useConfigStore = defineStore('config', () => {
     // functions
     enabledModels,
     getSessionIdForWorkspace,  // v0.4.2 step 1+
+    ensureSessionIdForWorkspace,  // v0.5.4 hotfix: lazy create + persist per-workspace sessionId
     // actions
     init,
     addProvider,

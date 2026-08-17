@@ -280,6 +280,19 @@ const runtime = await createAgentSessionRuntime(createRuntime, {
 
 console.error(`[sidecar] runtime ready, model=${runtime.session.model?.provider}/${runtime.session.model?.id}`);
 
+// ====== v0.5.4 hotfix: sync sessionManager history → agent.state.messages ======
+// 背景: Pi SDK 0.84.2 createAgentSessionFromServices 不会自动把 sessionManager.loadEntries
+//   加载的 history 同步到 agent.state.messages. Pi SDK 只在 switchSession / newSession 流程
+//   (agent-session-runtime.ts:256) 才同步. 我们的 sidecar 每次 send_prompt 都新 spawn node
+//   进程, 新 Agent 实例 state.messages 默认只有 [system], 即使 setSessionFile 已经 load 了
+//   session file, agent 看不到 history → 答"第一次对话" bug.
+// 修法: sidecar 启动 runtime 后, 手动调 buildSessionContext() 把 sessionManager 的 entries
+//   灌进 agent.state.messages. 这一行解决了单 session 上下文丢失 bug.
+// 同 Pi SDK compaction 流程 (agent-session.ts:1880-1881) 一样的 sync, 只不过我们每次启动都做.
+const initialMessages = runtime.session.sessionManager.buildSessionContext().messages;
+runtime.session.agent.state.messages = initialMessages;
+console.error(`[sidecar] synced ${initialMessages.length} messages from session to agent state`);
+
 // ====== 5. (无 readline 要关) ======
 // v0.5.0 fix: 不需要 rl.close() — 我们用 raw process.stdin 读了 line 1, 没用 readline.
 //   runRpcMode 用 attachJsonlLineReader 从 line 2 开始接管 stdin.

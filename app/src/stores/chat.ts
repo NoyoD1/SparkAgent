@@ -532,8 +532,10 @@ export const useChatStore = defineStore('chat', () => {
       // v0.4.1+: 注入当前 permission mode 作为初始值
       const permissionMode = config.permissionMode;
       // v0.4.2 step 1+: 注入 per-workspace stable sessionId, 让 sidecar 加载同一 session 历史
-      // undefined 时 sidecar 内部生成新 id (跟 v0.4.1 兼容)
-      const piSessionId = workspacePath ? config.getSessionIdForWorkspace(workspacePath) : undefined;
+      // v0.5.4 hotfix: 之前用 getSessionIdForWorkspace 永远返回 undefined (没人调 setSessionIdForWorkspace
+      //   写回), 改用 ensureSessionIdForWorkspace 拿保证存在的 id (没就生成 v4 UUID + persist),
+      //   修"AI 永远第一次对话"bug
+      const piSessionId = workspacePath ? config.ensureSessionIdForWorkspace(workspacePath) : undefined;
       await piTauri.sendPrompt(sessionId, text, () => ({
         providerId: active.id,
         provider: active.type,
