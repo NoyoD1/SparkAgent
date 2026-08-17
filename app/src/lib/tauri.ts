@@ -35,7 +35,9 @@ export type ServerToClient =
   | { type: 'tool_end'; toolCallId: string; result?: unknown; error?: string; sessionId: string }
   | { type: 'message_end'; sessionId: string }
   | { type: 'agent_end'; sessionId: string }
-  | { type: 'error'; message: string; sessionId: string };
+  | { type: 'error'; message: string; sessionId: string }
+  // v0.4.1+ tool permission: sidecar 问 FE "LLM 想跑 X tool, 允许吗"
+  | { type: 'permission_request'; toolCallId: string; toolName: string; args: Record<string, unknown>; sessionId: string };
 
 type Handler = (event: ServerToClient) => void;
 
@@ -99,6 +101,8 @@ class PiTauriClient {
       thinkingLevel: ThinkingLevel;
       /** v0.3.8.11: 当前 workspace 目录绝对路径 (用于 system message 注入 LLM) */
       workspacePath?: string | null;
+      /** v0.4.1+ tool permission mode (ask / smart / allow), 初始值 */
+      permissionMode?: 'ask' | 'smart' | 'allow';
     } | null,
   ): Promise<void> {
     console.log('[pi-tauri] sendPrompt called', { sessionId, contentLen: content.length });
@@ -118,6 +122,7 @@ class PiTauriClient {
           baseUrl: cfg.baseUrl ?? null,
           thinkingLevel: cfg.thinkingLevel,
           workspacePath: cfg.workspacePath ?? null,  // v0.3.8.11
+          permissionMode: cfg.permissionMode ?? 'ask',  // v0.4.1+ tool permission 初始值
         },
       });
       console.log('[pi-tauri] sendPrompt invoke resolved', res);
@@ -125,6 +130,30 @@ class PiTauriClient {
       console.error('[pi-tauri] sendPrompt invoke FAILED', e);
       throw e;
     }
+  }
+
+  // ====== v0.4.1+ tool permission IPC ======
+  /**
+   * FE 端 PermissionDialog 点了 允许/拒绝, 调这个发回 sidecar
+   * - allow=true  → sidecar 放行 tool 执行
+   * - allow=false → sidecar 阻止 tool (Pi SDK emit error tool result)
+   */
+  async sendPermissionResponse(
+    toolCallId: string,
+    allow: boolean,
+    reason?: string,
+  ): Promise<void> {
+    console.log('[pi-tauri] sendPermissionResponse', { toolCallId, allow, reason });
+    await invoke('send_permission_response', { toolCallId, allow, reason: reason ?? null });
+  }
+
+  /**
+   * v0.4.1+ 用户在 Composer 切了 permission mode, 调这个实时同步到 sidecar.
+   * 下次 tool call 用新 mode.
+   */
+  async setPermissionMode(mode: 'ask' | 'smart' | 'allow'): Promise<void> {
+    console.log('[pi-tauri] setPermissionMode', { mode });
+    await invoke('set_permission_mode', { mode });
   }
 
   // ====== Keychain API ======

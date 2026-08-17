@@ -3,13 +3,22 @@
 // v0.4 重写: 不再 import ./openai-compatible.mjs (v0.3 手写 fetch 实现),
 // 改为在 index.mjs 直接集成 @earendil-works/pi-ai + @earendil-works/pi-agent-core.
 //
+// v0.4.1+ 加 tool permission confirm:
+//   - 初始 mode 走 config.permissionMode (FE 端每次 send config 时带上, 默认 'ask')
+//   - 运行时 mode 可改 (FE 发 set_permission_mode)
+//   - 每次 mutating tool 走 beforeToolCall hook → emit permission_request → 等 FE permission_response
+//   - ask 模式每个 tool 都 confirm, smart 模式读类 (read/ls/find/grep) 自动放行, allow 模式全部放行
+//
 // IPC: stdin/stdout JSON lines.
-//   - input:  { type: 'config', provider, model, baseUrl?, apiKey, thinkingLevel?, workspacePath? }
+//   - input:  { type: 'config', provider, model, baseUrl?, apiKey, thinkingLevel?, workspacePath?, permissionMode? }
 //             { type: 'prompt', sessionId, content }
 //             { type: 'abort' }
+//             { type: 'permission_response', toolCallId, allow, reason? }    // v0.4.1+
+//             { type: 'set_permission_mode', mode }                          // v0.4.1+
 //   - output: { type: 'config_ok' | 'config_error' | 'agent_start' | 'message_start'
 //             | 'message_update' | 'tool_start' | 'tool_update' | 'tool_end'
-//             | 'message_end' | 'agent_end' | 'error' }
+//             | 'message_end' | 'agent_end' | 'error'
+//             | 'permission_request' }                                     // v0.4.1+
 //
 // 协议跟 v0.3.x 完全一致 (FE 不感知改动):
 //   - 7 内置 provider 用 Pi SDK 工厂 (anthropic/openai/deepseek/moonshotai/groq/google/minimax)
@@ -43,6 +52,41 @@ import { minimaxProvider } from '@earendil-works/pi-ai/providers/minimax';
 // OpenAI-compatible API stream 函数 (用于 createProvider 通用 endpoint, 如商汤/任意 OpenAI-compatible)
 import { stream as openaiCompletionsStream, streamSimple as openaiCompletionsStreamSimple } from '@earendil-works/pi-ai/api/openai-completions';
 
+// v0.4.1+ 测试用: PI_FAUX=1 环境变量时, 额外注册 faux provider (smoke test 用).
+// 跟 7 内置 + user-custom 互不影响. 不设 PI_FAUX 时不 import 不 register, 0 副作用.
+if (process.env.PI_FAUX === '1') {
+  // fauxProvider 在 @earendil-works/pi-ai 主包导出 (不在 subpath providers/)
+  const { fauxProvider, fauxText, fauxThinking, fauxToolCall, fauxAssistantMessage } = await import('@earendil-works/pi-ai');
+  // 存到 global, buildModels 时按需 register
+  // @ts-ignore
+  globalThis.__piFauxProvider = fauxProvider({
+    models: [{
+      id: 'faux-model',
+      name: 'Faux Test Model',
+      api: 'faux',
+      contextWindow: 8000,
+      maxTokens: 4000,
+    }],
+  });
+  // v0.4.1+ PI_FAUX_RESPONSES env: JSON 数组, 每个元素是 { thinking?, text?, toolCall? } 对象
+  // smoke test 通过 env 注入预设 response, 避免依赖 stdin 时序
+  if (process.env.PI_FAUX_RESPONSES) {
+    try {
+      const responsesJson = JSON.parse(process.env.PI_FAUX_RESPONSES);
+      const responses = responsesJson.map((r) => () => fauxAssistantMessage([
+        ...(r.thinking ? [fauxThinking(r.thinking)] : []),
+        ...(r.text ? [fauxText(r.text)] : []),
+        ...(r.toolCall ? [fauxToolCall(r.toolCall.name, r.toolCall.args, { id: r.toolCall.id })] : []),
+      ]));
+      globalThis.__piFauxProvider.setResponses(responses);
+      console.error(`[sidecar] PI_FAUX_RESPONSES loaded: ${responses.length} responses`);
+    } catch (e) {
+      console.error(`[sidecar] PI_FAUX_RESPONSES parse failed: ${e.message}`);
+    }
+  }
+  console.error('[sidecar] PI_FAUX=1 detected, faux provider registered (test mode)');
+}
+
 // v0.4.1: 用 pi-coding-agent 的 7 个 tool (read / bash / edit / write / grep / find / ls),
 // 不再自实现. cwd = workspace path, 各 tool 内部用 ExecutionEnv 抽象在 Node 跑文件系统.
 import {
@@ -66,8 +110,39 @@ let currentAgent = null;
 /** @type {AbortController | null} 备用 abort (pi-agent-core AbortSignal 走这里) */
 let currentAbortController = null;
 
+/** @type {string | null} 当前 runPrompt 的 sessionId, beforeToolCall hook emit permission_request 时带 */
+let currentSessionId = null;
+
+/** v0.4.1+ tool permission 模式. 初始走 config.permissionMode, 运行时可被 set_permission_mode 改.
+ *  - 'ask'   每次都 confirm (最安全, 默认)
+ *  - 'smart' 读类 (read/ls/find/grep) 自动放行, 写/命令/编辑 confirm
+ *  - 'allow' 全部放行 (最危险, 不推荐)
+ * @type {'ask' | 'smart' | 'allow'}
+ */
+let currentPermissionMode = 'ask';
+
+/** v0.4.1+ 把 permission request 跟 response 配对.
+ *  - key: toolCallId
+ *  - value: { resolve: (result: { block?: boolean, reason?: string } | undefined) => void }
+ *  beforeToolCall hook 把 resolve 存这里, 等 FE permission_response 来了再 resolve.
+ * @type {Map<string, { resolve: any }>}
+ */
+const pendingPermissionRequests = new Map();
+
+/** smart 模式自动放行的读类工具 (看东西, 不改东西) */
+const SMART_READ_ONLY_TOOLS = new Set(['read', 'ls', 'find', 'grep']);
+
 function send(event) {
-  process.stdout.write(JSON.stringify(event) + '\n');
+  // v0.4.1+ fix: Node.js 在 pipe (stdio: 'pipe') 模式下, process.stdout.write 默认
+  // 异步 flush + 内部 highWaterMark buffer. 当 tool.execute() 之后并发 emit 多个
+  // event (e.g. tool_execution_end → toolResult message → turn_end → turn_start
+  // → message_start) 可能在同一个 microtask 内串行 write, 但 Node.js 内部会把
+  // 部分 write 合并到下一个 chunk, 导致 readline 收不到完整 line 报 timeout.
+  // 修法: process.stdout.cork() 包裹 write, uncork() 强制 flush.
+  process.stdout.cork();
+  const line = JSON.stringify(event) + '\n';
+  process.stdout.write(line);
+  process.stdout.uncork();
 }
 
 // R4: 401/403 错误信息可能含 key 字面量 (e.g. "Invalid API key sk-AB***").
@@ -111,6 +186,19 @@ function buildModels(config) {
   models.setProvider(groqProvider());
   models.setProvider(googleProvider());
   models.setProvider(minimaxProvider());
+
+  // v0.4.1+ 测试用: PI_FAUX=1 时 register faux (sidecar 启动时存到 globalThis.__piFauxProvider)
+  if (globalThis.__piFauxProvider) {
+    const fauxProviderObj = globalThis.__piFauxProvider;
+    if (process.env.PI_FAUX === '1') {
+      console.error(`[sidecar] PI_FAUX: fauxProviderObj.provider.id=${fauxProviderObj.provider.id} models count=${fauxProviderObj.provider.getModels().length}`);
+    }
+    models.setProvider(fauxProviderObj.provider);
+    if (process.env.PI_FAUX === '1') {
+      const fauxModels = models.getModels('faux');
+      console.error(`[sidecar] PI_FAUX: after setProvider, faux models=${JSON.stringify(fauxModels.map((m) => m.id))}`);
+    }
+  }
 
   // 自定义: config.baseUrl 存在时, 走 createProvider 通用 OpenAI-compatible
   // (v0.3 阶段叫 "openai-platform", 现在改成 user-custom, FE 端通过 baseUrl 字段判断)
@@ -220,6 +308,7 @@ function mapAgentEventToIPC(event, sessionId) {
         args: event.args,
         sessionId,
       });
+      console.error(`[sidecar] mapAgentEventToIPC: tool_start ${event.toolName} ${event.toolCallId}`);
       return;
     case 'tool_execution_update':
       send({
@@ -231,6 +320,7 @@ function mapAgentEventToIPC(event, sessionId) {
       });
       return;
     case 'tool_execution_end': {
+      console.error(`[sidecar] mapAgentEventToIPC: tool_execution_end ${event.toolName} ${event.toolCallId} isError=${event.isError}`);
       // v0.4.1: pi-agent-core 用 isError 布尔, 我们 v0.3 协议用 error 字符串.
       // 把 AgentToolResult.content[0].text 当 error (tool 自己 throw 也走这里)
       const isError = event.isError === true;
@@ -241,14 +331,21 @@ function mapAgentEventToIPC(event, sessionId) {
         const first = Array.isArray(result?.content) ? result.content[0] : null;
         errorText = first?.text || 'Tool execution failed';
       }
-      send({
-        type: 'tool_end',
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        result: isError ? undefined : result,
-        error: errorText,
-        sessionId,
-      });
+      try {
+        const toolEndEvent = {
+          type: 'tool_end',
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          result: isError ? undefined : result,
+          error: errorText,
+          sessionId,
+        };
+        console.error(`[sidecar:dbg] about to send tool_end, isError=${isError}, event keys=${Object.keys(toolEndEvent).join(',')}`);
+        send(toolEndEvent);
+        console.error('[sidecar:dbg] sent tool_end OK');
+      } catch (e) {
+        console.error('[sidecar] SEND tool_end threw:', e);
+      }
       return;
     }
     case 'message_end': {
@@ -319,8 +416,47 @@ async function runPrompt(config, userContent, sessionId) {
   const agent = new Agent({
     initialState: { systemPrompt, model, tools: buildTools(config.workspacePath) },
     streamFn: models.streamSimple.bind(models),
+    // v0.4.1+ tool permission: beforeToolCall hook 走 Pi SDK 官方接口.
+    // 返回 undefined = 允许执行; 返回 { block: true, reason } = 阻止 (Pi SDK emit error tool result)
+    beforeToolCall: async (ctx, signal) => {
+      const toolName = ctx.toolCall.name;
+      const toolCallId = ctx.toolCall.id;
+      const mode = currentPermissionMode;
+
+      // allow 模式 → 全部放行
+      if (mode === 'allow') {
+        return undefined;
+      }
+      // smart 模式 + 读类工具 → 自动放行 (read/ls/find/grep 不改东西, 安全)
+      if (mode === 'smart' && SMART_READ_ONLY_TOOLS.has(toolName)) {
+        return undefined;
+      }
+      // ask 模式 / smart 模式的写类工具 → 走 confirm 流程
+      // emit permission_request 给 FE, 等 FE 响应 permission_response
+      // (v0.4.1+ 协议, FE 端 chat store + PermissionDialog.vue 处理)
+      console.error(`[sidecar] permission_request: tool=${toolName} id=${toolCallId} mode=${mode} args=${JSON.stringify(ctx.args).slice(0, 200)}`);
+
+      return new Promise((resolve) => {
+        // abort 时直接拒绝 (避免 hang 死)
+        if (signal) {
+          signal.addEventListener('abort', () => {
+            pendingPermissionRequests.delete(toolCallId);
+            resolve({ block: true, reason: 'Aborted by user' });
+          }, { once: true });
+        }
+        pendingPermissionRequests.set(toolCallId, { resolve });
+        send({
+          type: 'permission_request',
+          toolCallId,
+          toolName,
+          args: ctx.args,
+          sessionId,
+        });
+      });
+    },
   });
   currentAgent = agent;
+  currentSessionId = sessionId;  // beforeToolCall closure 用
 
   let agentEndSent = false;
   const finishUp = () => {
@@ -360,6 +496,12 @@ async function runPrompt(config, userContent, sessionId) {
     try { unsubscribe?.(); } catch {}
     if (currentAbortController === ac) currentAbortController = null;
     if (currentAgent === agent) currentAgent = null;
+    if (currentSessionId === sessionId) currentSessionId = null;
+    // v0.4.1+ abort 时清掉所有 pending permission request, 避免 FE 弹窗卡死等永远不来的 response
+    for (const [toolCallId, { resolve }] of pendingPermissionRequests) {
+      resolve({ block: true, reason: 'Aborted' });
+    }
+    pendingPermissionRequests.clear();
   }
 }
 
@@ -391,7 +533,8 @@ const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', (line) => {
   let msg;
   try {
-    msg = JSON.parse(line);
+    // v0.4.1+ 健壮性: 去掉 UTF-8 BOM 头 (PowerShell echo 会注入). Tauri 实际 pipe 不带 BOM, 但本地测试 / 调试会.
+    msg = JSON.parse(line.replace(/^\uFEFF/, ''));
   } catch (e) {
     send({ type: 'error', message: `IPC parse error: ${e instanceof Error ? e.message : String(e)}` });
     return;
@@ -409,6 +552,13 @@ rl.on('line', (line) => {
           return;
         }
         globalConfig = msg;
+        // v0.4.1+ 把 config.permissionMode 同步到运行时, 走默认值 'ask'
+        if (msg.permissionMode === 'ask' || msg.permissionMode === 'smart' || msg.permissionMode === 'allow') {
+          currentPermissionMode = msg.permissionMode;
+        } else {
+          currentPermissionMode = 'ask';
+        }
+        console.error(`[sidecar] config received: provider=${msg.provider} model=${msg.model} permissionMode=${currentPermissionMode}`);
         send({ type: 'config_ok', provider: msg.provider, model: msg.model, sessionId: msg.sessionId });
         return;
       }
@@ -427,6 +577,35 @@ rl.on('line', (line) => {
         if (currentAbortController) {
           currentAbortController.abort();
           send({ type: 'agent_end', sessionId: msg.sessionId });
+        }
+        return;
+      }
+      case 'permission_response': {
+        // v0.4.1+ FE 端 PermissionDialog 点了 允许/拒绝, 走 toolCallId 配对
+        // - allow=true  → resolve(undefined) (Pi SDK 继续执行)
+        // - allow=false → resolve({ block: true, reason }) (Pi SDK 走 error tool result)
+        const pending = pendingPermissionRequests.get(msg.toolCallId);
+        if (!pending) {
+          // 可能 race: abort 后才到; 静默忽略
+          console.warn(`[sidecar] permission_response for unknown toolCallId: ${msg.toolCallId}`);
+          return;
+        }
+        pendingPermissionRequests.delete(msg.toolCallId);
+        if (msg.allow) {
+          pending.resolve(undefined);
+        } else {
+          pending.resolve({ block: true, reason: msg.reason || 'User denied' });
+        }
+        console.error(`[sidecar] permission_response: toolCallId=${msg.toolCallId} allow=${msg.allow}`);
+        return;
+      }
+      case 'set_permission_mode': {
+        // v0.4.1+ FE 端用户从 Composer 切换了 permission mode
+        if (msg.mode === 'ask' || msg.mode === 'smart' || msg.mode === 'allow') {
+          currentPermissionMode = msg.mode;
+          console.error(`[sidecar] permission mode updated: ${currentPermissionMode}`);
+        } else {
+          console.warn(`[sidecar] set_permission_mode invalid: ${msg.mode}`);
         }
         return;
       }

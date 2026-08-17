@@ -45,6 +45,9 @@ pub struct ClientConfig {
     /// v0.3.8.11: 当前 workspace 目录绝对路径, 注入 system message
     #[serde(default)]
     pub workspace_path: Option<String>,
+    /// v0.4.1+ tool permission 初始 mode: 'ask' (默认) | 'smart' | 'allow'
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -155,6 +158,8 @@ async fn send_prompt(
         "send_prompt: dispatching to sidecar, base_url={base_url}, key_len={}",
         api_key.len()
     ));
+    // v0.4.1+ active sidecar map 由 .manage() 注册, 这里 clone Arc 出来 owned (要在 move app 前)
+    let active = app.state::<std::sync::Arc<sidecar::ActiveSidecars>>().inner().clone();
     sidecar::run_prompt(
         app,
         sidecar::SidecarConfig {
@@ -164,11 +169,13 @@ async fn send_prompt(
             api_key,
             thinking_level: config.thinking_level,
             workspace_path: config.workspace_path,  // v0.3.8.11
+            permission_mode: config.permission_mode.unwrap_or_else(|| "ask".to_string()),  // v0.4.1+
         },
         sidecar::PromptMsg {
-            session_id,
+            session_id: session_id.clone(),
             content,
         },
+        active,
     );
     Ok(())
 }
@@ -337,8 +344,13 @@ async fn save_app_config(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // v0.4.1+ active sidecar stdin map, 跨 invoke handler 共享.
+    // Arc 包一层让 spawn task + invoke handler 都能拿到 owned clone.
+    let active_sidecars = std::sync::Arc::new(sidecar::ActiveSidecars::default());
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(active_sidecars.clone())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -366,6 +378,9 @@ pub fn run() {
             ensure_default_workspace,
             load_app_config,
             save_app_config,
+            // v0.4.1+ tool permission
+            sidecar::send_permission_response,
+            sidecar::set_permission_mode,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

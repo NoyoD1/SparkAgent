@@ -139,6 +139,30 @@ export const useUiStore = defineStore('ui', () => {
     viewMode.value = 'chat';
   }
 
+  // ====== v0.4.1+ tool permission dialog ======
+  // sidecar emit permission_request → chat store 调 openPermissionDialog → 弹窗
+  // 用户点允许/拒绝 → 调 closePermissionDialog + tauri.sendPermissionResponse
+
+  /** 当前待确认的 permission request (null = 弹窗隐藏) */
+  const pendingPermission = ref<{
+    toolCallId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+    sessionId: string;
+  } | null>(null);
+
+  function openPermissionDialog(req: {
+    toolCallId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+    sessionId: string;
+  }) {
+    pendingPermission.value = req;
+  }
+  function closePermissionDialog() {
+    pendingPermission.value = null;
+  }
+
   return {
     // state
     sidebarCollapsed,
@@ -148,6 +172,7 @@ export const useUiStore = defineStore('ui', () => {
     viewMode,
     settingsTab,
     themeMode,
+    pendingPermission,  // v0.4.1+
     // actions
     toggleSidebar,
     setSidebarCollapsed,
@@ -160,5 +185,7 @@ export const useUiStore = defineStore('ui', () => {
     closeSettings,
     setThemeMode,
     applyTheme,  // v0.3.8.16: 初始应用 (App.vue 调)
+    openPermissionDialog,  // v0.4.1+
+    closePermissionDialog,  // v0.4.1+
   };
 });

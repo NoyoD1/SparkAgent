@@ -15,6 +15,7 @@ import type { ChatMessage, ThinkingBlock, ToolCallBlock, Step } from '@/lib/mock
 import { piTauri } from '@/lib/tauri';
 import { useConfigStore } from './config';
 import { useSessionStore } from './session';
+import { useUiStore } from './ui';
 
 export type { ChatMessage, ThinkingBlock, ToolCallBlock, Step };
 
@@ -262,6 +263,7 @@ export const useChatStore = defineStore('chat', () => {
         case 'tool_end':
         case 'agent_end':
         case 'error':
+        case 'permission_request':  // v0.4.1+ tool permission 走单独流程, 不在这里处理
           // 这些 case 都需要 idx >= 0 (message_start 之后才走)
           if (idx < 0) {
             console.warn(`[chat] ${event.type} before assistant message created, ignoring`);
@@ -384,6 +386,19 @@ export const useChatStore = defineStore('chat', () => {
               return;
           }
           break;
+        case 'permission_request': {
+          // v0.4.1+ tool permission: sidecar 问 "LLM 想跑 X tool, 允许吗"
+          // 转发给 ui store 弹 PermissionDialog, 弹窗点击后调 tauri.sendPermissionResponse
+          // 弹窗同时缓存 sessionId, 因为 permission_response IPC 需要
+          console.log('[chat] permission_request:', event.toolName, 'args=', event.args);
+          useUiStore().openPermissionDialog({
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            args: event.args,
+            sessionId: event.sessionId,
+          });
+          break;
+        }
         default:
           console.warn('[chat] unhandled event type:', (event as any).type);
           break;
@@ -405,6 +420,8 @@ export const useChatStore = defineStore('chat', () => {
       // (从 sessionStore 取 activeWorkspace.path, 让 LLM 知道在哪个目录下操作)
       const activeWs = sessionStore.activeWorkspace;
       const workspacePath = activeWs?.path ?? null;
+      // v0.4.1+: 注入当前 permission mode 作为初始值
+      const permissionMode = config.permissionMode;
       await piTauri.sendPrompt(sessionId, text, () => ({
         providerId: active.id,
         provider: active.type,
@@ -412,6 +429,7 @@ export const useChatStore = defineStore('chat', () => {
         baseUrl: active.baseUrl,
         thinkingLevel: config.thinkingLevel,
         workspacePath,
+        permissionMode,
       }));
       console.log('[chat] sendPrompt: piTauri.sendPrompt resolved');
     } catch (e) {

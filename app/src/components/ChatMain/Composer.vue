@@ -12,6 +12,7 @@ import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
 import { useConfigStore, PROVIDER_OPTIONS, PERMISSION_MODE_OPTIONS, type PermissionMode } from '@/stores/config';
 import { useUiStore } from '@/stores/ui';
+import { piTauri } from '@/lib/tauri';
 
 const chatStore = useChatStore();
 const sessionStore = useSessionStore();
@@ -44,6 +45,15 @@ function togglePermissionMenu() {
 function pickPermission(mode: PermissionMode) {
   configStore.setPermissionMode(mode);
   showPermissionMenu.value = false;
+  // v0.4.1+ 实时同步到当前在跑的 sidecar 进程 (新 session 启动时自动用最新 mode)
+  // 没有 active session 时不需要发, 下次 sendPrompt 会从 config 读
+  const sessionId = activeSession.value?.id;
+  if (sessionId) {
+    console.log('[Composer] permission mode changed, syncing to sidecar', { mode, sessionId });
+    void piTauri.setPermissionMode(mode).catch((e) => {
+      console.warn('[Composer] setPermissionMode failed (sidecar may be done):', e);
+    });
+  }
 }
 
 // ===== v0.4.1+ 点外部关闭 permission menu =====

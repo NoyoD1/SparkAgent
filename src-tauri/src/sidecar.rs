@@ -8,25 +8,31 @@
  *     → 后台 task 读 stdout, 逐行 parse 成 JSON event, emit 'chat:event' 给 frontend
  *     → 收到 agent_end → 自然结束, child drop 时 kill_on_drop 杀进程
  *
+ * v0.4.1+ tool permission:
+ *   - 写完 config + prompt 后, stdin 移到 ActiveSidecars map
+ *   - FE invoke send_permission_response / set_permission_mode 拿 map 里的 stdin 写后续消息
+ *   - agent_end 后 task 移除 map entry, 进程被杀, stdin 关闭
+ *
  * 路径: dev 模式从 cwd 找 sidecar/src/index.mjs.
  *       production 模式需要 bundle Node + sidecar (Phase 3+ TODO).
  */
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::process::Stdio;
-use tauri::{AppHandle, Emitter};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{ChildStdin, Command};
+use tokio::sync::Mutex;
 
-fn debug_log(msg: &str) {
-    let log_path = std::path::PathBuf::from("D:/UnityWork/Tools/Pi/.tauri-debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
-        use std::io::Write;
-        let ts = chrono::Utc::now().format("%H:%M:%S%.3f");
-        let _ = writeln!(f, "[{ts}] [sidecar] {msg}");
+/// v0.4.1+ active sidecar 进程 stdin 全局表 (per-session).
+/// 让 FE 端 invoke (send_permission_response / set_permission_mode) 能写到指定 session 的 stdin.
+/// task 结束 (agent_end) 时移除 entry, 避免悬空 handle.
+pub struct ActiveSidecars(pub Mutex<HashMap<String, ChildStdin>>);
+
+impl Default for ActiveSidecars {
+    fn default() -> Self {
+        Self(Mutex::new(HashMap::new()))
     }
 }
 
@@ -47,12 +53,35 @@ pub struct SidecarConfig {
     /// 让 LLM 知道在哪个目录下读写文件 (注意: 实际 file system tools 还没接)
     #[serde(default)]
     pub workspace_path: Option<String>,
+    /// v0.4.1+ tool permission 初始 mode: 'ask' (默认) | 'smart' | 'allow'
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
+}
+
+fn default_permission_mode() -> String {
+    "ask".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PromptMsg {
     pub session_id: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PermissionResponseMsg {
+    pub tool_call_id: String,
+    pub allow: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// sessionId 用来定位到指定 sidecar 进程的 stdin
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetPermissionModeMsg {
+    pub mode: String,
+    pub session_id: String,
 }
 
 fn find_sidecar_script() -> Result<std::path::PathBuf, String> {
@@ -92,7 +121,14 @@ fn emit_error(app: &AppHandle, session_id: &str, message: &str) {
 /// Spawn sidecar, send config + prompt, stream events to frontend.
 /// 每个 prompt 一个独立 sidecar 进程 (MVP 简单版).
 /// 进程在收到 'agent_end' 事件后自然结束.
-pub fn run_prompt(app: AppHandle, config: SidecarConfig, prompt: PromptMsg) {
+///
+/// v0.4.1+ 参数 active 必须是 owned Arc<...> 因为 spawn task 跨 await 需要 'static lifetime.
+pub fn run_prompt(
+    app: AppHandle,
+    config: SidecarConfig,
+    prompt: PromptMsg,
+    active: Arc<ActiveSidecars>,
+) {
     let session_id = prompt.session_id;
     debug_log(&format!("run_prompt: session={session_id}"));
     tokio::spawn(async move {
@@ -149,7 +185,7 @@ pub fn run_prompt(app: AppHandle, config: SidecarConfig, prompt: PromptMsg) {
             }
         };
 
-        // 写 config
+        // 写 config (含 v0.4.1+ permissionMode)
         let config_msg = serde_json::json!({
             "type": "config",
             "provider": config.provider,
@@ -158,6 +194,7 @@ pub fn run_prompt(app: AppHandle, config: SidecarConfig, prompt: PromptMsg) {
             "apiKey": config.api_key,
             "thinkingLevel": config.thinking_level,
             "workspacePath": config.workspace_path,
+            "permissionMode": config.permission_mode,
         });
         let line = match serde_json::to_string(&config_msg) {
             Ok(s) => format!("{s}\n"),
@@ -188,17 +225,13 @@ pub fn run_prompt(app: AppHandle, config: SidecarConfig, prompt: PromptMsg) {
             emit_error(&app, &session_id, &format!("write prompt: {e}"));
             return;
         }
-        // v0.3.5+: 不要 drop(stdin) — 关 stdin 会让 sidecar 立即收到 EOF, 触发 close 事件
-        // 导致 readline 调 abort 把正在飞行的 fetch 掐死 (网络请求还没发出去).
-        //
-        // 正确做法: 保持 stdin 打开, sidecar 的 readline 继续等下一行.
-        // fetch 跑完正常 emit agent_end → Rust 这边 stdout reader 收到 → break 退出循环 →
-        // 后续 `drop(child)` 时 `kill_on_drop=true` 触发 TerminateProcess 杀 sidecar,
-        // 这时 OS 才把 stdin 关掉. 整个 fetch / stream 期间 stdin 都保持打开.
-        //
-        // `stdin` 这个变量在 task 结束时 (block 末尾) 会自动 drop, 但那时候 child 已经被杀,
-        // pipe 已经断了, 这里的 drop 只是清理 fd 而已, 不会再触发 sidecar 的 close 事件.
-        debug_log(&format!("run_prompt: wrote config + prompt, keeping stdin open until agent_end"));
+
+        // v0.4.1+ 注册 stdin 到 active map, 让 FE 端 send_permission_response / set_permission_mode 找得到
+        {
+            let mut map = active.0.lock().await;
+            map.insert(session_id.clone(), stdin);
+        }
+        debug_log(&format!("run_prompt: wrote config + prompt, stdin registered to active map"));
 
         // 后台读 stderr → log
         tokio::spawn(async move {
@@ -255,8 +288,80 @@ pub fn run_prompt(app: AppHandle, config: SidecarConfig, prompt: PromptMsg) {
             let _ = app.emit("chat:event", &end);
         }
 
+        // v0.4.1+ 从 active map 移除 stdin (Agent 自然结束, 后续 permission_response 不应到达)
+        {
+            let mut map = active.0.lock().await;
+            map.remove(&session_id);
+        }
         // child 在这里 drop, kill_on_drop 触发
         drop(child);
         log::info!("[sidecar:{session_id}] done");
     });
+}
+
+/// v0.4.1+ FE 端 PermissionDialog 点了允许/拒绝, 写到对应 sidecar stdin
+#[tauri::command]
+pub async fn send_permission_response(
+    msg: PermissionResponseMsg,
+    active: State<'_, Arc<ActiveSidecars>>,
+) -> Result<(), String> {
+    debug_log(&format!(
+        "send_permission_response: session={} tool={} allow={}",
+        msg.session_id, msg.tool_call_id, msg.allow
+    ));
+    let mut map = active.0.lock().await;
+    let stdin = map
+        .get_mut(&msg.session_id)
+        .ok_or_else(|| format!("no active sidecar for session={}", msg.session_id))?;
+    let ipc = serde_json::json!({
+        "type": "permission_response",
+        "toolCallId": msg.tool_call_id,
+        "allow": msg.allow,
+        "reason": msg.reason,
+    });
+    let line = format!("{}\n", serde_json::to_string(&ipc).map_err(|e| format!("ser: {e}"))?);
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| format!("write permission_response: {e}"))?;
+    Ok(())
+}
+
+/// v0.4.1+ FE 端切了 permission mode, 实时同步到 sidecar
+#[tauri::command]
+pub async fn set_permission_mode(
+    msg: SetPermissionModeMsg,
+    active: State<'_, Arc<ActiveSidecars>>,
+) -> Result<(), String> {
+    debug_log(&format!(
+        "set_permission_mode: session={} mode={}",
+        msg.session_id, msg.mode
+    ));
+    let mut map = active.0.lock().await;
+    let stdin = map
+        .get_mut(&msg.session_id)
+        .ok_or_else(|| format!("no active sidecar for session={}", msg.session_id))?;
+    let ipc = serde_json::json!({
+        "type": "set_permission_mode",
+        "mode": msg.mode,
+    });
+    let line = format!("{}\n", serde_json::to_string(&ipc).map_err(|e| format!("ser: {e}"))?);
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| format!("write set_permission_mode: {e}"))?;
+    Ok(())
+}
+
+fn debug_log(msg: &str) {
+    let log_path = std::path::PathBuf::from("D:/UnityWork/Tools/Pi/.tauri-debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        use std::io::Write;
+        let ts = chrono::Utc::now().format("%H:%M:%S%.3f");
+        let _ = writeln!(f, "[{ts}] [sidecar] {msg}");
+    }
 }
