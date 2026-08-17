@@ -582,6 +582,12 @@ async function runPrompt(userContent, sessionId) {
 
 // ===== IPC: stdin JSON Lines =====
 const rl = readline.createInterface({ input: process.stdin });
+// v0.4.2 step 1 fix: race condition — Rust 端写完 config + prompt 不等 sidecar 处理 config,
+//   case 'config' IIFE 异步 build session (~150-300ms), readline 立即处理下一行 (case 'prompt'),
+//   currentSession 还是 null → emit "No session" 错误. 修复:
+//   1. case 'config' capture promise 到 sessionBuildPromise
+//   2. case 'prompt' 看到 sessionBuildPromise 时 await 它, 等 session ready
+let sessionBuildPromise = null;
 rl.on('line', (line) => {
   let msg;
   try {
@@ -616,7 +622,8 @@ rl.on('line', (line) => {
         console.error(`[sidecar] config: provider=${msg.provider} model=${msg.model} workspace=${workspacePath} sessionId=${sessionId} permissionMode=${currentPermissionMode}`);
 
         // 异步 build (createAgentSession 内部可能 fetch 模型列表 / 加载 resource)
-        (async () => {
+        // v0.4.2 step 1 fix: capture promise 给后续 'prompt' case await, 避免 race
+        sessionBuildPromise = (async () => {
           try {
             const models = buildModels(globalConfig);
             const providerId = globalConfig.baseUrl ? 'user-custom' : globalConfig.provider;
@@ -682,19 +689,26 @@ rl.on('line', (line) => {
               type: 'config_error',
               message: sanitizeErrBody(e instanceof Error ? `${e.message}\n${e.stack?.split('\n').slice(0, 3).join('\n')}` : String(e)),
             });
+            sessionBuildPromise = null;  // build 失败, 清 promise 避免后续 prompt 永久 hang
           }
         })();
         return;
       }
       case 'prompt': {
-        if (!currentSession) {
-          send({ type: 'error', message: 'No session — send { type: "config" } first', sessionId: msg.sessionId });
-          return;
-        }
-        // 不 await — 协议是异步流, 事件通过 session.subscribe 持续发
-        runPrompt(msg.content, msg.sessionId || currentSessionId).catch((e) => {
-          console.error('[sidecar] runPrompt unhandled:', e);
-        });
+        // v0.4.2 step 1 fix: session 还在 build 时 await sessionBuildPromise (race fix 详细见 line 583 area 注释)
+        (async () => {
+          if (!currentSession && sessionBuildPromise) {
+            try { await sessionBuildPromise; } catch (e) { console.error('[sidecar] sessionBuildPromise failed:', e); }
+          }
+          if (!currentSession) {
+            send({ type: 'error', message: 'No session — send { type: "config" } first', sessionId: msg.sessionId });
+            return;
+          }
+          // 不 await — 协议是异步流, 事件通过 session.subscribe 持续发
+          runPrompt(msg.content, msg.sessionId || currentSessionId).catch((e) => {
+            console.error('[sidecar] runPrompt unhandled:', e);
+          });
+        })();
         return;
       }
       case 'abort': {
