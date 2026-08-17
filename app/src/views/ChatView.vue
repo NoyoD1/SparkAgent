@@ -19,7 +19,8 @@ import ChatMain from '@/components/ChatMain/ChatMain.vue';
 import TaskDrawer from '@/components/TaskDrawer/TaskDrawer.vue';
 import SettingsDialog from '@/components/Settings/SettingsDialog.vue';
 import ResizeHandle from '@/components/ui/ResizeHandle.vue';
-import PermissionDialog from '@/components/ChatMain/PermissionDialog.vue';  // v0.4.1+ tool permission 弹窗
+// v0.5.0: PermissionDialog 移到 ChatMain 内 inline 渲染 (在 composer-area 内 Composer 正上方),
+//   不再在 ChatView 顶层挂. 旧 import 删掉.
 import { useUiStore } from '@/stores/ui';
 
 const uiStore = useUiStore();
@@ -83,9 +84,6 @@ function onDrawerResize(w: number) {
 
     <!-- settings 整主区 -->
     <SettingsDialog v-else class="pad-app__settings" />
-
-    <!-- v0.4.1+ tool permission 弹窗 (跨 view 一直挂, 跟 SettingsDialog 一样) -->
-    <PermissionDialog />
   </div>
 </template>
 
