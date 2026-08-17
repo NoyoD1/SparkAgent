@@ -15,7 +15,9 @@
 | **v0.4** | **Tool Call 真正落地** | 文件读/写 / shell / 权限确认 / abort | 🟡 (4/6) | **2026-08 中** |
 | **v0.4.2 step 1** | **上下文管理 (createAgentSession + SessionManager per-workspace 隔离)** | 短期记忆 / 跨 workspace 隔离 | 🟢 (4/4 smoke PASS) | **2026-08-17** |
 | **v0.5.0 ~ v0.5.8** | **RPC 模式重构 + Release** | sidecar 重写 + Pi SDK RPC + Tauri 2 标准 sidecar + 端到端验证 | 🟢 (14 commits + 验证 PASS) | **2026-08-17** |
-| **v0.4.3 系列** | **P0 Pi SDK 暴露 (table stakes)** | compaction / skills / slash cmds / rules / usage | ⚪ (规划) | **2026-09 目标** |
+| **v0.5.8 hotfix** | **stale binary 修复** | beforeBuildCommand 路径加 ../ (Tauri 2 cwd = app/) + cargo tauri build 嵌新 dist | 🟢 (1 commit `66e7a9a`) | **2026-08-18** |
+| **v0.4.3** | **Compaction UI (redesign)** | ContextIndicator 紧凑指示器 + popover 二级展开 | 🟢 (commit `681f248` + 嵌入新 binary 待验) | **2026-08-18** |
+| **v0.4.4 系列** | **P0 Pi SDK 暴露 (table stakes)** | skills / slash cmds / rules / usage | ⚪ (规划) | **2026-09 目标** |
 | v0.5.0+ | P1 自建 | Plan mode / sub-agents / MCP 集成 | ⚪ | TBD |
 | v0.6 | Web app + Agent SDK | claude.ai/code 对标 / 编程 API | ⚪ | TBD |
 | v0.7 | 体验增强 | Auto mode / Voice / Hooks / Notepads | ⚪ | TBD |
