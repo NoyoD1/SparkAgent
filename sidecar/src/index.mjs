@@ -554,6 +554,20 @@ async function runPrompt(userContent, sessionId) {
     return;
   }
 
+  // v0.4.2.x fix: permissionExtensionFactory 的 closure 引用 module-level currentSessionId.
+  //   case 'config' IIFE 设的 currentSessionId = msg.sessionId || new timestamp id
+  //   (FE 经常不传 msg.sessionId 所以走 timestamp 分支).
+  //   但 runPrompt 走的 sessionId 是 'msg.sessionId || currentSessionId',
+  //   当 FE 传了 msg.sessionId 时 (e.g. chat sessionId 'sess-mswvsv49-xppk') 跟 case 'config'
+  //   设的 currentSessionId (e.g. 'sess-1786952789941-00ne5l') 不一致.
+  //   后果: permission_request 用 currentSessionId, 其他 events (message_start 等) 用
+  //   runPrompt 的 sessionId, FE 端 chat store 检查 'sessionId' in event && !== sessionId
+  //   会把 permission_request 丢弃 (弹窗不开). 之前 commit 7fe2959 修 race 修到了 prompt
+  //   await, 但 sessionId 不一致是另一个 race.
+  //   修法: 在 runPrompt 开头覆盖 currentSessionId = sessionId, 让 permission_request 跟
+  //   其他 events 用同一 sessionId. (一个 sidecar 进程一次只处理一个 prompt, 覆盖安全.)
+  currentSessionId = sessionId;
+
   let agentEndSent = false;
   const finishUp = () => {
     if (!agentEndSent) {
