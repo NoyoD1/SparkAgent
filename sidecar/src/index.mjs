@@ -78,6 +78,13 @@ if (process.env.PI_FAUX === '1') {
         ...(r.text ? [fauxText(r.text)] : []),
         ...(r.toolCall ? [fauxToolCall(r.toolCall.name, r.toolCall.args, { id: r.toolCall.id })] : []),
       ]));
+      // v0.4.1.4+ PI_FAUX_HANG=1: 让最后一个 response 永远 pending (模拟商汤 stream hang, 不 emit done)
+      // 验证 sidecar 30s watchdog 兜底.
+      if (process.env.PI_FAUX_HANG === '1' && responses.length > 0) {
+        const lastIdx = responses.length - 1;
+        responses[lastIdx] = () => new Promise(() => { /* never resolves - hang */ });
+        console.error(`[sidecar] PI_FAUX_HANG=1: last response replaced with never-resolving Promise (simulates stream hang)`);
+      }
       globalThis.__piFauxProvider.setResponses(responses);
       console.error(`[sidecar] PI_FAUX_RESPONSES loaded: ${responses.length} responses`);
     } catch (e) {
@@ -112,6 +119,50 @@ let currentAbortController = null;
 
 /** @type {string | null} 当前 runPrompt 的 sessionId, beforeToolCall hook emit permission_request 时带 */
 let currentSessionId = null;
+
+/** v0.4.1.4+ module-level 暴露 finishUp 给 watchdog (runPrompt 内的 closure 没法被 setInterval 访问) */
+let currentFinishUp = null;
+
+/** v0.4.1.4+ stream hang watchdog.
+ * 商汤 deepseek-v4-flash 偶尔在 tool_call 之后不 emit 'done' event,
+ * 让 Pi SDK `for await` 永远 hang, sidecar 永远不 emit message_end,
+ * FE 永远 "生成中". watchdog 检测 30s 没新 event 强制 finishUp.
+ */
+const STREAM_HANG_TIMEOUT_MS = 30_000;
+const STREAM_HANG_CHECK_MS = 5_000;
+let lastStreamEventTime = 0;
+let hangWatchdog = null;
+function resetHangWatchdog() {
+  lastStreamEventTime = Date.now();
+}
+function startHangWatchdog() {
+  stopHangWatchdog();
+  resetHangWatchdog();
+  hangWatchdog = setInterval(() => {
+    const idle = Date.now() - lastStreamEventTime;
+    if (idle > STREAM_HANG_TIMEOUT_MS) {
+      console.error(`[sidecar] WATCHDOG: ${Math.round(idle / 1000)}s no stream event, force finish`);
+      // 先 abort, 让 Pi SDK stream 走 error 路径 emit message_end
+      if (currentAbortController) {
+        currentAbortController.abort();
+      }
+      // 兜底: 1s 后如果 Pi SDK 没响应 abort, sidecar 自己 emit finishUp
+      setTimeout(() => {
+        if (currentFinishUp) {
+          console.error('[sidecar] WATCHDOG: emit finishUp manually (Pi SDK not responding to abort)');
+          currentFinishUp();
+        }
+      }, 1000);
+      stopHangWatchdog();
+    }
+  }, STREAM_HANG_CHECK_MS);
+}
+function stopHangWatchdog() {
+  if (hangWatchdog) {
+    clearInterval(hangWatchdog);
+    hangWatchdog = null;
+  }
+}
 
 /** v0.4.1+ tool permission 模式. 初始走 config.permissionMode, 运行时可被 set_permission_mode 改.
  *  - 'ask'   每次都 confirm (最安全, 默认)
@@ -466,10 +517,16 @@ async function runPrompt(config, userContent, sessionId) {
       agentEndSent = true;
     }
   };
+  // v0.4.1.4+ stream hang watchdog: 把 finishUp 暴露给 module-level watchdog 用
+  // (sidecar 30s 没新 stream event 时强制 finishUp, 防商汤 stream 不 emit done)
+  currentFinishUp = finishUp;
+  // 启动 stream hang watchdog (30s 没新 event 强制 finishUp, 防商汤 stream 不 emit done)
+  startHangWatchdog();
 
   // 订阅 Agent 事件 → 映射 IPC
   const unsubscribe = agent.subscribe((event) => {
     try {
+      resetHangWatchdog();  // v0.4.1.4+ 任何 event 都 reset watchdog
       mapAgentEventToIPC(event, sessionId);
       if (event.type === 'agent_end' || event.type === 'error') {
         finishUp();
@@ -494,6 +551,9 @@ async function runPrompt(config, userContent, sessionId) {
     }
   } finally {
     try { unsubscribe?.(); } catch {}
+    // v0.4.1.4+ 停 watchdog, 清理 currentFinishUp 避免下一次 runPrompt 误用
+    stopHangWatchdog();
+    currentFinishUp = null;
     if (currentAbortController === ac) currentAbortController = null;
     if (currentAgent === agent) currentAgent = null;
     if (currentSessionId === sessionId) currentSessionId = null;
