@@ -550,14 +550,21 @@ function removeSession(id: string) {
   /* v0.3.8.3: 选中态左边加一条 3px 圆角 accent 高亮条, 不再是纯矩形背景 */
   box-shadow: inset 3px 0 0 var(--pad-accent);
 }
-/* v0.4.1.7+5: streaming 流光 — 单 shine 横扫 + 更宽 (80% 容器宽)
-   (v0.4.1.7+4 用户反馈: 光斑再宽一些, 一次只有一个)
-   调整:
-   - background-size 50% → 100% (单 tile = 单 shine 永远在容器内)
-   - gradient 拉宽 80% (原来 70% 在 50% tile 里 = 35% 容器, 现在 80% 在 100% tile 里 = 80% 容器)
-   - 100% 平移 (1 个 tile 宽) 数学无缝
-   - 1.4s 时长不变
-   - 仍 5-stop 硬切 (5% 急转质感保留) */
+/* v0.5.2: streaming 流光 seamless loop + 方向修正
+   上一版 (v0.5.1) 实际问题:
+   1. 方向反了 — animation pos 100% → -100% 让 shine 从右向左移动 (用户期望左→右扫过)
+   2. color-mix 在某些 WebView2 版本不支持, gradient 失效 → 看不出 shine
+   3. background-size 200% + repeat 没起无缝 loop 作用, 因为 1 个 tile 已 > 容器宽
+
+   重写思路 (标准 skeleton shimmer + 数学无缝 loop):
+   - background-size 200% 100% (1 个 tile = 2× 容器宽, 内含 1 个 shine 占 image 30-70%)
+   - background-repeat no-repeat (1 个 tile 就够, repeat 反而破坏无缝)
+   - shine 在 image 50% 中心 (透明 30% / accent 50% / 透明 70%) — 边缘柔和
+   - animation: 0% pos=-150% 0 (shine 在 container 左外), 100% pos=50% 0 (shine 在 container 右外)
+     0% 和 100% 都是 "container 透明" (shine 都在容器外), 视觉无缝 loop
+   - 动画总距离 200% container = 1 image 宽, shine 在容器内可见 ~90% 时长, 间隔 ~10% (0.14s 短暂空白, 几乎不可察)
+   - opacity 0.18 让 shine 跟 is-active 的 accent-soft 背景叠加, 提亮但不抢戏
+   - duration 1.4s 不变 */
 .pad-wstree__session.is-streaming {
   position: relative;
   overflow: hidden;
@@ -570,15 +577,14 @@ function removeSession(id: string) {
   background: linear-gradient(
     90deg,
     transparent 0%,
-    transparent 10%,
-    var(--pad-accent-300) 25%,
-    var(--pad-accent-400) 50%,
-    var(--pad-accent-300) 75%,
-    transparent 90%,
+    transparent 30%,
+    var(--pad-accent) 50%,
+    transparent 70%,
     transparent 100%
   );
-  background-size: 100% 100%;
-  background-repeat: repeat;
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  opacity: 0.18;
   animation: pad-wstree-shimmer 1.4s linear infinite;
   pointer-events: none;
   z-index: 0;
@@ -588,8 +594,16 @@ function removeSession(id: string) {
   z-index: 1;
 }
 @keyframes pad-wstree-shimmer {
-  from { background-position: -100% 0; }  /* shine 在容器左侧外 */
-  to   { background-position: 0 0; }     /* 平移 +100% (1 个 tile) shine 从左扫到右, 数学无缝 */
+  /* 数学验证 (image 200% container 宽, shine 30-70% of image = 60% 至 140% of container):
+     pos=-150% 0: image 0% 在 container -150%, shine (50% of image) 在 container -150% + 100% = -50%, 
+                   加上 shine 半宽 40% (image 20% = 40% container) → shine 范围 [-90%, -10%]
+                   全部在 container 左外 → container 透明 ✅
+     pos=50% 0: image 0% 在 container 50%, shine 在 container 50% + 100% = 150%,
+                加上 shine 半宽 40% → shine 范围 [110%, 190%]
+                全部在 container 右外 → container 透明 ✅
+     0% 和 100% 都是 container 透明, loop 回去无 snap. */
+  0%   { background-position: -150% 0; }
+  100% { background-position: 50% 0; }
 }
 .pad-wstree__session-dot {
   width: 6px;

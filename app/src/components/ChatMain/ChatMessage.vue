@@ -14,11 +14,12 @@
  * v0.4.1 step 累加改造: 把 message 级别的 thinking + toolCalls 改到 step 级别
  * 一次 prompt 可能跑 N turn, 每个 turn 是 1 step, 用户能展开/折叠看过程
  */
-import { computed, ref } from 'vue';
-import { ThumbsUp, ThumbsDown, Copy, RefreshCw } from 'lucide-vue-next';
+import { computed, ref, watch, onUnmounted } from 'vue';
+import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2 } from 'lucide-vue-next';
 import type { ChatMessage, Step } from '@/lib/mock/types';
 import MarkdownContent from './MarkdownContent.vue';
 import StepGroup from './StepGroup.vue';
+import { useChatStore } from '@/stores/chat';
 
 interface Props {
   message: ChatMessage;
@@ -43,6 +44,7 @@ const props = withDefaults(defineProps<Props>(), {
   steps: () => [],
 });
 
+const chatStore = useChatStore();
 const isUser = computed(() => props.message.role === 'user');
 
 const hasSteps = computed(() => (props.steps?.length ?? 0) > 0);
@@ -72,6 +74,69 @@ async function copyMessage() {
     console.warn('[msg] copy failed', e);
   }
 }
+
+/**
+ * v0.5.1: phase-based status icon 动画 (替代 v0.3.8.9 的纯 3-dot bounce)
+ *
+ * 用户反馈: "实际当前任务还在后台继续跑, 但是因为是一段一段回复的, 正文可能有多条,
+ *   导致看起来像是卡了, 需要加适当的提示icon动画, 表示当前是在走的.
+ *   比如: 思考中… 创造中… 正在下笔… 等等这种效果切换"
+ *
+ * 实现:
+ * - 跟 chat store 拿当前 phase (thinking / text / tool)
+ * - phase 不同 → 文字列表不同 (各 2-3 个轮换, 表达 "思考"/"写作"/"执行" 不同状态)
+ * - 每 1.8s 切下一个文字, 200ms crossfade (淡出 → 淡入)
+ * - 同时显示旋转的 Loader2 icon (1.4s 旋转, 跟 pad-step__spinner 同步)
+ * - watch phase 变化时立即重置 text index (新 phase 用自己的第一个文字)
+ *
+ * 替代 v0.3.8.9 的 `pad-msg__loading` (3 个灰点 bounce + 静态 "生成中…").
+ *   旧版视觉上太朴素, 用户看不到"AI 正在思考/写作/调工具"的状态切换, 长 stream 时感觉卡.
+ */
+const PHASE_LABELS: Record<string, string[]> = {
+  thinking: ['思考中…', '整理思路…', '推演中…'],
+  text: ['正在下笔…', '创造中…', '书写中…'],
+  tool: ['调用工具…', '执行中…'],
+  idle: ['生成中…'],
+};
+const currentPhase = computed(() => chatStore.getPhase(props.sessionId));
+const textIndex = ref(0);
+let rotateTimer: ReturnType<typeof setInterval> | null = null;
+const ROTATE_INTERVAL = 1800;
+
+function startRotate() {
+  stopRotate();
+  rotateTimer = setInterval(() => {
+    const labels = PHASE_LABELS[currentPhase.value] || PHASE_LABELS.idle;
+    textIndex.value = (textIndex.value + 1) % labels.length;
+  }, ROTATE_INTERVAL);
+}
+function stopRotate() {
+  if (rotateTimer) {
+    clearInterval(rotateTimer);
+    rotateTimer = null;
+  }
+}
+watch(
+  currentPhase,
+  () => {
+    // phase 变化时, 立即重置 textIndex 到 0 (新 phase 自己的第一个文字)
+    textIndex.value = 0;
+  },
+);
+watch(
+  () => props.isStreaming,
+  (s) => {
+    if (s) startRotate();
+    else stopRotate();
+  },
+  { immediate: true },
+);
+onUnmounted(stopRotate);
+
+const statusText = computed(() => {
+  const labels = PHASE_LABELS[currentPhase.value] || PHASE_LABELS.idle;
+  return labels[textIndex.value] || labels[0] || '生成中…';
+});
 </script>
 
 <template>
@@ -104,12 +169,13 @@ async function copyMessage() {
       />
     </div>
 
-    <!-- v0.3.8.9: Streaming loading — 整个 stream 期间一直显示 -->
+    <!-- v0.5.1: Streaming status — phase-based 旋转 icon + 文字轮换
+         替代 v0.3.8.9 的 3-dot bounce (太朴素, 长 stream 时感觉卡) -->
     <div v-if="isStreaming" class="pad-msg__loading">
-      <span class="pad-msg__loading-dot"></span>
-      <span class="pad-msg__loading-dot"></span>
-      <span class="pad-msg__loading-dot"></span>
-      <span class="pad-msg__loading-text">{{ message.content ? '继续生成中…' : '生成中…' }}</span>
+      <Loader2 :size="13" :stroke-width="2" class="pad-msg__spinner" />
+      <Transition name="pad-msg-status" mode="out-in">
+        <span :key="statusText" class="pad-msg__loading-text">{{ statusText }}</span>
+      </Transition>
     </div>
 
     <!-- v0.4.2+: 重试提示 (sidecar 在 5 次重试间 emit retry_start, UI 显示"重试中 1/5...")
@@ -416,26 +482,48 @@ async function copyMessage() {
 }
 .pad-msg__copied { color: var(--pad-accent); }
 
-/* ===== streaming loading ===== */
+/* ===== streaming loading (v0.5.1 phase-based status icon) ===== */
 .pad-msg__loading {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   color: var(--pad-fg-tertiary);
   font-size: var(--pad-fs-13);
   padding: 4px 0;
+  /* 跟 StepGroup 里的 is-active 状态视觉一致: 用 accent 色提亮 spinner,
+     让 user 一眼看到"AI 在工作" */
 }
-.pad-msg__loading-dot {
+/* v0.5.1: 旋转 spinner — 替代 v0.3.8.9 的 3-dot bounce (1.2s → 1.4s 更稳) */
+.pad-msg__spinner {
+  color: var(--pad-accent);
+  flex-shrink: 0;
+  animation: pad-msg-spin 1.4s linear infinite;
+}
+@keyframes pad-msg-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+/* v0.5.1: status 文字 crossfade — 200ms 淡出 → 200ms 淡入, 文字轮换视觉过渡 */
+.pad-msg__loading-text {
+  /* inline-block + min-width 让 crossfade 时文字宽度变化不会让布局跳 */
   display: inline-block;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--pad-fg-tertiary);
-  animation: pad-msg-bounce 1.2s ease-in-out infinite;
+  font-style: italic;
+  color: var(--pad-fg-secondary);
 }
-.pad-msg__loading-dot:nth-child(2) { animation-delay: 0.15s; }
-.pad-msg__loading-dot:nth-child(3) { animation-delay: 0.3s; }
-.pad-msg__loading-text { margin-left: 4px; }
+.pad-msg-status-enter-active,
+.pad-msg-status-leave-active {
+  transition:
+    opacity 200ms ease,
+    transform 200ms ease;
+}
+.pad-msg-status-enter-from {
+  opacity: 0;
+  transform: translateY(3px);
+}
+.pad-msg-status-leave-to {
+  opacity: 0;
+  transform: translateY(-3px);
+}
 
 /* v0.4.2+ LLM 重试提示 (跟 loading 一起出现, 在 loading 下面一行) */
 .pad-msg__retry {
@@ -502,10 +590,5 @@ async function copyMessage() {
   font-size: var(--pad-fs-12);
   font-style: italic;
   color: var(--pad-fg-tertiary);
-}
-
-@keyframes pad-msg-bounce {
-  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-  40% { transform: scale(1); opacity: 1; }
 }
 </style>

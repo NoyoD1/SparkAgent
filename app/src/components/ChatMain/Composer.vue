@@ -7,11 +7,12 @@
  */
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
-import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck } from 'lucide-vue-next';
+import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
 import { useConfigStore, PROVIDER_OPTIONS, PERMISSION_MODE_OPTIONS, type PermissionMode } from '@/stores/config';
 import { useUiStore } from '@/stores/ui';
+import { piTauri } from '@/lib/tauri';
 
 const chatStore = useChatStore();
 const sessionStore = useSessionStore();
@@ -105,6 +106,31 @@ async function send() {
   await chatStore.sendPrompt(text);
 }
 
+/**
+ * v0.5.0+: 中断按钮 (send 变 stop). 走 Pi SDK abort RpcCommand
+ *   透传到 sidecar → AgentSession.abort() → 停 LLM stream + tool call
+ * 期间 (abort → agent_end 之间) userAborted=true, UI 状态保持"停止中"视觉,
+ *   agent_end event 来后 store 翻 streaming=false, button 自动恢复成 send.
+ */
+const userAborted = ref(false);
+async function stop() {
+  const sid = activeSession.value?.id;
+  if (!sid) return;
+  userAborted.value = true;
+  try {
+    await piTauri.sendRpcCommand(sid, { type: 'abort' });
+  } catch (e) {
+    console.error('[Composer] abort RpcCommand failed', e);
+    // 即使失败也清 flag, 让用户能继续操作
+    userAborted.value = false;
+  }
+}
+
+// 监听 streaming 变化: 收到 agent_end 后清 userAborted
+watch(isStreaming, (s) => {
+  if (!s) userAborted.value = false;
+});
+
 /** 外部 (ChatMain quick prompt chips 等) 调用, 填充输入框. 已有内容会追加空格 + 新文本. */
 function setText(text: string) {
   const cur = inputText.value.trimEnd();
@@ -151,7 +177,6 @@ onMounted(() => nextTick(autoResize));
       class="pad-composer__input"
       rows="2"
       :placeholder="hasConfig ? '帮你编写代码、调试 Bug、优化性能等开发工作，交付生产级代码产物。' : '先在 Settings → Providers 加个 provider, 然后回这里发消息'"
-      :disabled="isStreaming"
       @input="autoResize"
       @keydown.enter.exact.prevent="send"
     />
@@ -279,12 +304,21 @@ onMounted(() => nextTick(autoResize));
         </button>
         <button
           class="pad-composer__send"
-          :disabled="!inputText.trim() || isStreaming"
-          :title="hasConfig ? '发送' : '去设置配 provider'"
-          @click="send"
+          :class="{ 'is-stop': isStreaming, 'is-stopping': isStreaming && userAborted }"
+          :disabled="!hasConfig || (!isStreaming && !inputText.trim())"
+          :title="
+            isStreaming
+              ? userAborted
+                ? '正在停止…'
+                : '停止生成 (Esc)'
+              : hasConfig
+                ? '发送'
+                : '去设置配 provider'
+          "
+          @click="isStreaming ? stop() : send()"
         >
           <ArrowUp v-if="!isStreaming" :size="16" :stroke-width="2" />
-          <span v-else class="pad-composer__sending">···</span>
+          <Square v-else :size="12" :stroke-width="2" fill="currentColor" />
         </button>
       </div>
     </div>
@@ -713,5 +747,23 @@ onMounted(() => nextTick(autoResize));
   opacity: 0.4;
   cursor: not-allowed;
   box-shadow: none;
+}
+
+/* v0.5.0+: streaming 时 send 变 stop (Square icon + 红色 bg) */
+.pad-composer__send.is-stop {
+  background: var(--pad-danger);
+  color: var(--pad-fg-inverse);
+  /* hover 不要用 accent-hover, 用 danger 的 hover 态 */
+}
+.pad-composer__send.is-stop:hover:not(:disabled) {
+  background: var(--pad-danger-hover, color-mix(in srgb, var(--pad-danger) 88%, white 12%));
+}
+.pad-composer__send.is-stop.is-stopping {
+  background: var(--pad-fg-tertiary);
+  cursor: wait;
+  /* 阻止连续点击导致多个 abort 命令 */
+}
+.pad-composer__send.is-stop.is-stopping:hover {
+  background: var(--pad-fg-tertiary);
 }
 </style>

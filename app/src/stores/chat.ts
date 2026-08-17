@@ -126,6 +126,18 @@ export const useChatStore = defineStore('chat', () => {
   // v0.4.2+ LLM 错误重试: retryBySession 记录当前 retry 状态 (attempt 进度 + 上次错误)
   // FE UI 可以根据这个显示"重试中 1/5..."提示
   const retryBySession = ref<Record<string, { attempt: number; maxAttempts: number; errorMessage: string } | null>>({});
+  // v0.5.1: 当前 phase (thinking / text / tool / idle) — 用来在 streaming 状态
+  //   显示 "思考中…" / "正在下笔…" / "调用工具…" 等不同文字, 文字轮换 (每 1.8s 换一次).
+  //   用户反馈 "实际当前任务还在后台继续跑, 但是因为是一段一段回复的, 正文可能有多条,
+  //   导致看起来像是卡了, 需要加适当的提示icon动画, 表示当前是在走的"
+  const phaseBySession = ref<Record<string, 'idle' | 'thinking' | 'text' | 'tool'>>({});
+  function setPhase(sessionId: string, phase: 'idle' | 'thinking' | 'text' | 'tool') {
+    if (phaseBySession.value[sessionId] === phase) return;
+    phaseBySession.value = { ...phaseBySession.value, [sessionId]: phase };
+  }
+  function getPhase(sessionId: string): 'idle' | 'thinking' | 'text' | 'tool' {
+    return phaseBySession.value[sessionId] ?? 'idle';
+  }
 
   // ===== Actions ====
 
@@ -263,6 +275,8 @@ export const useChatStore = defineStore('chat', () => {
           }
           streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
           retryBySession.value = { ...retryBySession.value, [sessionId]: null };
+          // v0.5.1: phase 切回 idle
+          setPhase(sessionId, 'idle');
           chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
           console.log(
             '[chat] agent_end: idx=',
@@ -383,11 +397,15 @@ export const useChatStore = defineStore('chat', () => {
                     }
                     tb2.content += ame.delta;
                   }
+                  // v0.5.1: phase 切到 thinking
+                  setPhase(sessionId, 'thinking');
                 } else if (ame.type === 'text_delta') {
                   // text delta: 既累积到 message.content (final reply 兼容旧 UI), 也累积到 currentStep.stepText
                   assistant.content += ame.delta;
                   const step = getCurrentStep();
                   if (step) step.stepText += ame.delta;
+                  // v0.5.1: phase 切到 text (文字生成)
+                  setPhase(sessionId, 'text');
                 }
                 // tool_call_delta: Pi SDK 增量发送 tool call args, 当前 FE 不展示 (tool_execution_start
                 //   事件已经包含完整 args). 这里吞掉, 不弹错.
@@ -407,6 +425,8 @@ export const useChatStore = defineStore('chat', () => {
                   status: 'running',
                   startedAt: new Date().toISOString(),
                 });
+                // v0.5.1: phase 切到 tool (调用工具)
+                setPhase(sessionId, 'tool');
                 console.log('[chat] tool_execution_start', event.toolName, 'routed to', step ? 'step' : 'legacy');
               }
               break;
@@ -436,6 +456,8 @@ export const useChatStore = defineStore('chat', () => {
                   if (typeof event.result === 'string') tc.result = event.result;
                   else if (event.result !== undefined) tc.result = JSON.stringify(event.result, null, 2);
                 }
+                // v0.5.1: tool 跑完, 切回 thinking (等下一个 LLM delta 再切 text)
+                setPhase(sessionId, 'thinking');
               }
               break;
           }
@@ -586,12 +608,14 @@ export const useChatStore = defineStore('chat', () => {
     streamingBySession,
     errorBySession,
     retryBySession, // v0.4.2+ LLM 重试状态 (UI 显示"重试中 1/5...")
+    phaseBySession, // v0.5.1: 当前 phase (thinking/text/tool/idle) — UI status icon 轮换用
     isStreamingSession: isStreaming,
     getSessionData,
     getMessages,
     getThinking,
     getToolCalls,
     getError,
+    getPhase, // v0.5.1 helper
     appendUserMessage,
     clearSession,
     sendPrompt,

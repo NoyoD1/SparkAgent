@@ -109,8 +109,6 @@ function positionPopover(tickEl: HTMLElement) {
   const rect = tickEl.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0) return;
   const POPOVER_W = 260;
-  // 跟 CSS max-height: 280px 对齐; 真实高度 nextTick 测一次再微调
-  const POPOVER_MAX_H = 280;
   const MARGIN = 8;
   const vh = window.innerHeight;
 
@@ -122,37 +120,31 @@ function positionPopover(tickEl: HTMLElement) {
   left = Math.max(MARGIN, left);
 
   // ===== 垂直: 视口自适应 =====
-  // v0.4.2.x fix: 之前用 `transform: translateY(-50%)` 让 popover 居中在 tick 上,
-  //   tick 在视口下半时, popover 下半会覆盖 composer (跟"游标卡尺在 chat 左侧, hover 之后
-  //   tips 默认在底部显示"是一回事 — 用户看到的是 tick + popover 一起, 但 popover 把 composer 盖了).
-  //   修法: tick 在视口上半 → popover 顶部在 tick 下方; tick 在下半 → popover 底部在 tick 上方.
-  //   不用 translateY(-50%) — 改成 top 直接定位, keyframe 同步更新.
+  // v0.5.2: 用 `top` 或 `bottom` 锚定, 不再估算 popover 高度.
+  //   上一版 (v0.5.1) 用估算 POPOVER_MAX_H=280 算 top, 但短内容实际只有 ~120px,
+  //   "above tick" case 算出来 top 偏低, popover 浮在 tick 上方太远.
+  //   修法: "above tick" 用 `bottom: vh - rect.top + MARGIN` 让 popover 底边锚定在
+  //   `rect.top - MARGIN`, 高度由内容 (CSS max-height 280) 自动决定.
+  //   "below tick" 用 `top: rect.bottom + MARGIN` 让 popover 顶边锚定在 tick 下方.
+  //   浏览器自然处理高度, 不依赖 nextTick 测量, 不依赖估算.
   const tickCenter = rect.top + rect.height / 2;
-  // 估算 popover 高度 (nextTick 后可用实际高度再 clamp; 这里先用 max-height)
-  let popoverH = POPOVER_MAX_H;
-  let top: number;
-  if (tickCenter < vh / 2) {
-    // tick 在视口上半 → popover 顶部在 tick 底部 + MARGIN
-    top = rect.bottom + MARGIN;
-  } else {
-    // tick 在视口下半 → popover 底部在 tick 顶部 - MARGIN (避免覆盖 composer)
-    top = rect.top - MARGIN - popoverH;
-  }
-  // 边界兜底: 任何一边超出视口就夹紧 (例如超长 chat 让 tick 自己都在视口外)
-  if (top + popoverH > vh - MARGIN) {
-    top = vh - MARGIN - popoverH;
-  }
-  if (top < MARGIN) {
-    top = MARGIN;
-  }
-  popoverStyle.value = {
+  const style: Record<string, string> = {
     position: 'fixed',
-    top: `${top}px`,
     left: `${left}px`,
     width: `${POPOVER_W}px`,
-    // v0.4.2.x fix: 不再 translateY(-50%), top 已经是 popover 真实上边位置
     zIndex: '99999',
   };
+  if (tickCenter < vh / 2) {
+    // tick 在视口上半 → popover 顶部在 tick 底部 + MARGIN
+    style.top = `${rect.bottom + MARGIN}px`;
+  } else {
+    // tick 在视口下半 → popover 底边在 tick 顶部 - MARGIN
+    //   关键: 这里用 `bottom` (距离视口底部) 代替 `top`, 配合 `top: auto` 覆盖
+    //   CSS 默认的 `top: -9999px` (避免 popover 高度被这两个值强行撑成 vh 大小)
+    style.bottom = `${vh - rect.top + MARGIN}px`;
+    style.top = 'auto';
+  }
+  popoverStyle.value = style;
 }
 
 function onClick(turn: ChatTurn, idx: number) {
@@ -378,7 +370,7 @@ const visible = computed(() => props.turns.length >= 1);
 
     <Teleport to="body">
       <div
-        v-if="hoveredIdx !== null && turns[hoveredIdx] && popoverStyle.top"
+        v-if="hoveredIdx !== null && turns[hoveredIdx] && (popoverStyle.top || popoverStyle.bottom)"
         class="pad-msgnav__popover"
         :style="popoverStyle"
         @mouseenter="onPopoverEnter"
