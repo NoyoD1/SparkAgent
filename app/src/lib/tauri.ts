@@ -77,6 +77,8 @@ export type ServerToClient =
       sessionId: string;
       /** Pi SDK AgentEvent.message_update: { message: AgentMessage; assistantMessageEvent: AssistantMessageEvent } */
       message: AgentMessageLite;
+      /** v0.4.3: cumulative usage (跟 message 嵌套的 usage 一样, 但 v0.5.0 顶层单独 emit 方便 FE 拿) */
+      usage?: AgentMessageLite['usage'];
       /**
        * 嵌套 streaming event. 跟 v0.4.x 直接 delta 字段不一样.
        * - { type: 'text_delta', delta: string }        text 流式
@@ -94,6 +96,8 @@ export type ServerToClient =
       type: 'message_end';
       sessionId: string;
       message: AgentMessageLite;
+      /** v0.4.3: final cumulative usage (跟 message.usage 一样, 顶层 emit 方便 FE 拿) */
+      usage?: AgentMessageLite['usage'];
     }
   // v0.5.0 tool_execution_* (Pi SDK 用 tool_execution_* 不是 v0.4.x 的 tool_*)
   | {

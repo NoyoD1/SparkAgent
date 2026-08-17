@@ -139,6 +139,52 @@ export const useChatStore = defineStore('chat', () => {
     return phaseBySession.value[sessionId] ?? 'idle';
   }
 
+  // v0.4.3: context window 占用跟踪 + compaction 状态
+  // - lastUsageBySession[sessionId] = Pi SDK AgentMessageLite.usage (上次 assistant 消息的 cumulative usage)
+  // - contextTokensBySession[sessionId] = lastUsage.input + lastUsage.cacheRead (LLM 实际看到的 context size)
+  // - compactionBySession[sessionId] = 'idle' | 'in_progress' (Pi SDK 5x 报告的 compaction 状态)
+  // - lastCompactionBySession[sessionId] = { reason, aborted, willRetry, errorMessage, at } (最近一次结果)
+  //
+  // UI 怎么用:
+  // - Composer 显示 "12.5K / 200K" (contextTokens / contextWindow)
+  // - contextTokens 超过 ~70% contextWindow 时高亮 "压缩" 按钮
+  // - 手动点 "压缩" → compact(sessionId) → sendRpcCommand({ type: 'compact' })
+  // - Pi SDK emit compaction_start → 按钮变 "压缩中..." (spinner)
+  // - Pi SDK emit compaction_end → 按钮恢复, lastCompaction 更新 (用于 toast "压缩成功, 节省 X tokens")
+  const lastUsageBySession = ref<Record<string, import('@/lib/mock/types').MessageUsage | undefined>>({});
+  const contextTokensBySession = ref<Record<string, number>>({});
+  const compactionBySession = ref<Record<string, 'idle' | 'in_progress'>>({});
+  const lastCompactionBySession = ref<Record<string, {
+    reason: 'manual' | 'threshold' | 'overflow';
+    aborted: boolean;
+    willRetry: boolean;
+    errorMessage?: string;
+    at: number;  // Date.now()
+  } | undefined>>({});
+
+  // v0.4.3: contextWindow (硬编码 200K, 跟主流 LLM 默认对齐; 后续可走 config)
+  // 为什么不读 Pi SDK 的 contextWindow: Pi SDK 0.84.2 model config 暴露了 model.contextWindow,
+  //   但我们 v0.5.0+ 走 OpenAI-compatible custom provider, FE 端没存. 短期硬编码, 后期 v0.4.7 usage
+  //   完整化时一起处理 (FE 拿 model contextWindow)
+  const DEFAULT_CONTEXT_WINDOW = 200_000;
+
+  function getContextTokens(sessionId: string): number {
+    return contextTokensBySession.value[sessionId] ?? 0;
+  }
+  function getContextWindow(): number {
+    return DEFAULT_CONTEXT_WINDOW;
+  }
+  function isCompacting(sessionId: string): boolean {
+    return compactionBySession.value[sessionId] === 'in_progress';
+  }
+  function getLastCompaction(sessionId: string) {
+    return lastCompactionBySession.value[sessionId];
+  }
+  function isContextHigh(sessionId: string): boolean {
+    const tokens = getContextTokens(sessionId);
+    return tokens > DEFAULT_CONTEXT_WINDOW * 0.7;
+  }
+
   // ===== Actions ====
 
   function appendUserMessage(sessionId: string, content: string) {
@@ -364,6 +410,20 @@ export const useChatStore = defineStore('chat', () => {
           };
           switch (event.type) {
             case 'message_update':
+              // v0.4.3: 跟踪 usage (Pi SDK 0.84.2 message_update 顶层带 usage, 跟 message.usage 一样)
+              //   每次 LLM 增量 update 都会带最新 cumulative usage, 覆盖到 lastUsage
+              //   顺便算 contextTokens (input + cacheRead = LLM 实际看到的 prompt 大小)
+              if (event.usage) {
+                lastUsageBySession.value = {
+                  ...lastUsageBySession.value,
+                  [sessionId]: event.usage,
+                };
+                contextTokensBySession.value = {
+                  ...contextTokensBySession.value,
+                  [sessionId]: event.usage.input + event.usage.cacheRead,
+                };
+              }
+              // v0.5.0: event.assistantMessageEvent 嵌套 + .type 标 kind (text_delta / thinking_delta / tool_call_delta)
               // v0.5.0: event.assistantMessageEvent 嵌套 + .type 标 kind (text_delta / thinking_delta / tool_call_delta)
               // 跟 v0.4.x 的 event.delta + event.kind 不同
               {
@@ -412,6 +472,19 @@ export const useChatStore = defineStore('chat', () => {
               }
               break;
             case 'message_end':
+              // v0.4.3: message_end 时 Pi SDK 给最终 usage, 写到 assistant message.usage (持久化到 store)
+              //   后续切别的 session / 切回这个 session 都能从 message.usage 读回
+              if (event.usage && idx >= 0) {
+                const finalUsage = event.usage;
+                lastUsageBySession.value = { ...lastUsageBySession.value, [sessionId]: finalUsage };
+                contextTokensBySession.value = {
+                  ...contextTokensBySession.value,
+                  [sessionId]: finalUsage.input + finalUsage.cacheRead,
+                };
+                // v0.4.3: 写到 assistant message.usage, 后续从 store 读
+                assistant.usage = finalUsage;
+                console.log(`[chat] message_end: usage=${finalUsage.input}+${finalUsage.cacheRead} (cache) + ${finalUsage.cacheWrite} (write) → contextTokens=${contextTokensBySession.value[sessionId]}`);
+              }
               break;
             case 'tool_execution_start':
               {
@@ -482,10 +555,24 @@ export const useChatStore = defineStore('chat', () => {
         // v0.4.2 step 1: AgentSession 内置 compaction (手动 / 自动 threshold / overflow)
         case 'compaction_start':
           console.log(`[chat] compaction_start: reason=${event.reason}`);
+          // v0.4.3: UI 状态 — 按钮变 "压缩中..." spinner
+          compactionBySession.value = { ...compactionBySession.value, [sessionId]: 'in_progress' };
           break;
         case 'compaction_end':
           // v0.5.0: Pi SDK CompactionResult + aborted + willRetry + errorMessage?
           console.log(`[chat] compaction_end: reason=${event.reason} aborted=${event.aborted} willRetry=${event.willRetry}${event.errorMessage ? ', err=' + event.errorMessage.slice(0, 80) : ''}`);
+          // v0.4.3: UI 状态 — 按钮恢复, 记录结果 (用于 toast / 状态条)
+          compactionBySession.value = { ...compactionBySession.value, [sessionId]: 'idle' };
+          lastCompactionBySession.value = {
+            ...lastCompactionBySession.value,
+            [sessionId]: {
+              reason: event.reason,
+              aborted: event.aborted,
+              willRetry: event.willRetry,
+              errorMessage: event.errorMessage,
+              at: Date.now(),
+            },
+          };
           break;
         case 'extension_ui_request': {
           // v0.5.0: Pi SDK RPC 协议的 extension UI, 替代 v0.4.x 的 permission_request
@@ -562,6 +649,42 @@ export const useChatStore = defineStore('chat', () => {
     return sendPrompt(content);
   }
 
+  /**
+   * v0.4.3: 手动触发 context 压缩 (走 Pi SDK compact RpcCommand).
+   *
+   * - 自动场景: Pi SDK 内部 `shouldCompact()` 检测到 context 超过 70% window, 走 auto compaction
+   *   (event.reason = 'threshold' / 'overflow'). FE 不用管.
+   * - 手动场景: user 点 Composer 上的 "压缩" 按钮, 主动触发, event.reason = 'manual'.
+   *
+   * Pi SDK 0.84.2 compact RpcCommand 走 sidecar runRpcMode → sidecar 调 AgentSession.compact()
+   * → 走 LLM 总结 + 替换 message history. 完成 emit compaction_start / compaction_end 事件.
+   *
+   * 限制: 当前 session 正在 streaming 时不能触发 (会冲突), 调用方自己保证.
+   */
+  async function compact(sessionId?: string) {
+    const sid = sessionId ?? sessionStore.activeSessionId;
+    if (!sid) {
+      console.warn('[chat] compact: no active session, ignoring');
+      return;
+    }
+    if (isStreaming(sid)) {
+      console.warn('[chat] compact: session is streaming, ignoring (用户应先 abort)');
+      return;
+    }
+    if (isCompacting(sid)) {
+      console.warn('[chat] compact: already compacting, ignoring');
+      return;
+    }
+    console.log(`[chat] compact: triggering manual compaction for session=${sid}, currentContextTokens=${getContextTokens(sid)}`);
+    try {
+      await piTauri.sendRpcCommand(sid, { type: 'compact' });
+    } catch (e) {
+      console.error('[chat] compact RpcCommand failed', e);
+      // 失败时清掉 in_progress 状态, 避免 UI 卡住
+      compactionBySession.value = { ...compactionBySession.value, [sid]: 'idle' };
+    }
+  }
+
   // v0.3.8.11: 用户手动切换 thinking 折叠状态
   // v0.3.8.6 引入流式自动展开, message_end 自动收起 — 跟用户预期矛盾,
   // 改为完全由用户控制. ChatMessage toggle 时调这个
@@ -611,6 +734,11 @@ export const useChatStore = defineStore('chat', () => {
     errorBySession,
     retryBySession, // v0.4.2+ LLM 重试状态 (UI 显示"重试中 1/5...")
     phaseBySession, // v0.5.1: 当前 phase (thinking/text/tool/idle) — UI status icon 轮换用
+    // v0.4.3: context window 占用跟踪 + compaction 状态
+    lastUsageBySession,
+    contextTokensBySession,
+    compactionBySession,
+    lastCompactionBySession,
     isStreamingSession: isStreaming,
     getSessionData,
     getMessages,
@@ -618,6 +746,12 @@ export const useChatStore = defineStore('chat', () => {
     getToolCalls,
     getError,
     getPhase, // v0.5.1 helper
+    // v0.4.3: context + compaction helpers
+    getContextTokens,
+    getContextWindow,
+    isContextHigh,
+    isCompacting,
+    getLastCompaction,
     appendUserMessage,
     clearSession,
     sendPrompt,
@@ -625,5 +759,6 @@ export const useChatStore = defineStore('chat', () => {
     setThinkingCollapsed,
     setStepCollapsed, // v0.4.1 step 累加
     setStepThinkingCollapsed,
+    compact, // v0.4.3: 手动触发 context 压缩
   };
 });

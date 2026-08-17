@@ -26,6 +26,22 @@ export interface MockSession {
 
 export type ChatRole = 'user' | 'assistant' | 'system';
 
+/**
+ * v0.4.3: LLM token usage (assistant 消息时填, 跟 message_end 事件一起)
+ * - input: cache miss 新输入的 token 数
+ * - output: assistant 本轮生成的 token 数
+ * - cacheRead: cache hit 命中的 token 数 (DeepSeek V4 Flash / Anthropic 都有 prompt cache)
+ * - cacheWrite: 这次新写入 cache 的 token 数
+ * - cost: 按 provider 实际计费 (input/output/cacheRead/cacheWrite 分别计)
+ */
+export interface MessageUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
@@ -37,6 +53,12 @@ export interface ChatMessage {
    * UI 用 StepGroup 渲染, 默认折叠, 当前正在跑的那个 step 默认展开.
    */
   steps?: Step[];
+  /**
+   * v0.4.3: assistant message 关联的 LLM token usage (message_end 事件填)
+   * FE 用这个计算 context window 占用 (last usage.input + last usage.cacheRead)
+   * UI 在 Composer 显示 + 触发 compaction 按钮高亮
+   */
+  usage?: MessageUsage;
 }
 
 export interface ThinkingBlock {

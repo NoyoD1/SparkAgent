@@ -1,8 +1,8 @@
 # ADR-0022: Sub-agent 架构 — 多个 sidecar 进程 + 主控协调 (短期方案)
 
-**Status**: proposed (2026-08-17, 待 user 拍板)
+**Status**: accepted (2026-08-17 23:33, user 拍板 A 方案)
 **Context**: Pi SDK 0.84.2 没原生 sub-agent 支持, 主流产品 (Claude Code / Trae / Cursor) 都有
-**Decider**: 待 user 拍板
+**Decider**: user 拍板 A 方案 (2026-08-17 23:33) — 多 sidecar 进程 + 主控协调
 
 ## 背景
 
@@ -114,9 +114,9 @@ Pi SDK 0.84.2 0 支持 sub-agent (grep 验证无 `subagent` / `spawnAgent` / `fo
 
 ## 决策点 (user 拍板)
 
-- [ ] 同意 A 方案 (多 sidecar 进程, 推荐)
-- [ ] 或 B 方案 (单进程多 session)
-- [ ] 或 C 方案 (不实现, 等 Pi SDK 演进)
+- [x] ✅ 同意 A 方案 (2026-08-17 23:33, user 拍板) — 多 sidecar 进程, 8-12h 实施, 复用 v0.5.8 Tauri 2 sidecar 机制
+- [ ] v0.5.1 实施 (短期只支持 Explore/Plan 两种)
+- [ ] v0.5.2+ 加 General/Bash/自定义 sub-agent
 
 ### 方案 A vs B 详细对比 (2026-08-17 23:26 user 提问后补充)
 
