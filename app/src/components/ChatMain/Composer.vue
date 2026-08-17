@@ -4,16 +4,18 @@
  * 1:1 mirrors chat.html's bottom composer, 但 model chip 改成 active config.
  * v3: model 菜单视觉跟 PadSelect 弹层统一 (hover 灰底 / active 紫底+左 2px accent / checkmark)
  * v0.4.1+: 加 tool permission 按钮 + dropdown (3 选 1: ask / smart / allow)
- * v0.4.3+: 加 context 计数 + 手动压缩按钮 (走 Pi SDK compact RpcCommand)
+ * v0.4.3 redesign: 删 v0.4.3 旧 text 计数 + 独立压缩按钮, 改用 ContextIndicator 组件
+ *   (compact 83% + click 展开 popover 含 token 来源 breakdown + BYOK 提示 + 压缩按钮)
  */
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
-import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck, Archive, Loader2 } from 'lucide-vue-next';
+import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
 import { useConfigStore, PROVIDER_OPTIONS, PERMISSION_MODE_OPTIONS, type PermissionMode } from '@/stores/config';
 import { useUiStore } from '@/stores/ui';
 import { piTauri } from '@/lib/tauri';
+import ContextIndicator from './ContextIndicator.vue';
 
 const chatStore = useChatStore();
 const sessionStore = useSessionStore();
@@ -25,54 +27,6 @@ const inputText = ref('');
 const showModelMenu = ref(false);
 // v0.4.1+ tool permission 菜单
 const showPermissionMenu = ref(false);
-
-// v0.4.3: context window 占用 + compaction 状态
-//   - contextText: "12.5K / 200K" 格式, 直观显示 LLM 实际看到的 context 大小
-//   - contextHigh: 超过 70% window 时高亮压缩按钮 (视觉提醒)
-//   - compacting: Pi SDK 正在跑 compaction, 按钮变 spinner 不可点
-//   - compactButtonTitle: tooltip 解释按钮作用 + 提示高亮原因
-const contextTokens = computed(() => {
-  const sid = activeSession.value?.id;
-  if (!sid) return 0;
-  return chatStore.getContextTokens(sid);
-});
-const contextWindow = computed(() => chatStore.getContextWindow());
-const contextHigh = computed(() => {
-  const sid = activeSession.value?.id;
-  if (!sid) return false;
-  return chatStore.isContextHigh(sid);
-});
-const isCompacting = computed(() => {
-  const sid = activeSession.value?.id;
-  if (!sid) return false;
-  return chatStore.isCompacting(sid);
-});
-const contextText = computed(() => {
-  const tokens = contextTokens.value;
-  if (tokens === 0) return '';
-  // 格式: "12.5K / 200K" (四舍五入到 0.1K)
-  const fmt = (n: number) => {
-    if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-    return `${n}`;
-  };
-  return `${fmt(tokens)} / ${fmt(contextWindow.value)}`;
-});
-const contextPercent = computed(() => {
-  if (contextWindow.value === 0) return 0;
-  return Math.round((contextTokens.value / contextWindow.value) * 100);
-});
-const compactButtonTitle = computed(() => {
-  if (isCompacting.value) return '正在压缩 context...';
-  if (contextHigh.value) {
-    return `Context 已用 ${contextPercent.value}% (${contextText.value}), 点击手动压缩节省 token`;
-  }
-  return `Context: ${contextText.value} — 点击手动压缩`;
-});
-function onCompactClick() {
-  const sid = activeSession.value?.id;
-  if (!sid) return;
-  chatStore.compact(sid);
-}
 
 const currentPermissionOption = computed(
   () => PERMISSION_MODE_OPTIONS.find((o) => o.value === configStore.permissionMode) ?? PERMISSION_MODE_OPTIONS[0],
@@ -282,23 +236,9 @@ onMounted(() => nextTick(autoResize));
         </div>
       </div>
       <div class="pad-composer__bar-right">
-        <!-- v0.4.3: context 计数 + 手动压缩按钮 (走 Pi SDK compact RpcCommand) -->
-        <!-- 位置: 在 model chip 左边, 跟 permission 按钮 / mic 一起, 组成右侧 toolbar -->
-        <div v-if="contextText" class="pad-composer__context" :class="{ 'is-high': contextHigh }">
-          <span class="pad-composer__context-text">{{ contextText }}</span>
-          <span class="pad-composer__context-pct">{{ contextPercent }}%</span>
-        </div>
-        <button
-          class="pad-composer__compactbtn"
-          :class="{ 'is-high': contextHigh, 'is-loading': isCompacting }"
-          :disabled="isStreaming || isCompacting"
-          :title="compactButtonTitle"
-          @click="onCompactClick"
-        >
-          <Loader2 v-if="isCompacting" :size="14" :stroke-width="1.75" class="pad-composer__compactbtn-spinner" />
-          <Archive v-else :size="14" :stroke-width="1.75" />
-          <span class="pad-composer__compactbtn-label">{{ isCompacting ? '压缩中' : '压缩' }}</span>
-        </button>
+        <!-- v0.4.3 redesign: ContextIndicator 组件 (compact 83% + click 展开 popover) -->
+        <!-- 位置: 切换 model chip 左侧, 跟 model 一体 (UX 原则: 功能逻辑是一体的) -->
+        <ContextIndicator />
         <div class="pad-composer__model-wrap">
           <button
             class="pad-composer__modelchip"
@@ -605,76 +545,8 @@ onMounted(() => nextTick(autoResize));
   color: var(--pad-fg-tertiary);
   font-style: italic;
 }
-/* v0.4.3: context 计数显示 (左侧) */
-.pad-composer__context {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 8px;
-  height: 32px;
-  border-radius: var(--pad-radius-md);
-  font-size: var(--pad-fs-xs);
-  color: var(--pad-fg-tertiary);
-  font-variant-numeric: tabular-nums;
-  user-select: none;
-  transition: color 0.2s, background 0.2s;
-}
-.pad-composer__context.is-high {
-  color: var(--pad-fg-warning, #d97706);
-  background: var(--pad-bg-warning-soft, rgba(217, 119, 6, 0.1));
-}
-.pad-composer__context-text {
-  font-weight: 500;
-}
-.pad-composer__context-pct {
-  font-size: 10px;
-  opacity: 0.75;
-}
-
-/* v0.4.3: 压缩按钮 (走 Pi SDK compact RpcCommand) */
-.pad-composer__compactbtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 10px;
-  height: 32px;
-  border-radius: var(--pad-radius-md);
-  background: transparent;
-  border: 1px solid var(--pad-border-subtle);
-  color: var(--pad-fg-secondary);
-  font-size: var(--pad-fs-sm);
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.pad-composer__compactbtn:hover:not(:disabled) {
-  background: var(--pad-bg-hover, rgba(0, 0, 0, 0.05));
-  border-color: var(--pad-border-medium);
-  color: var(--pad-fg-primary);
-}
-.pad-composer__compactbtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.pad-composer__compactbtn.is-high {
-  border-color: var(--pad-fg-warning, #d97706);
-  color: var(--pad-fg-warning, #d97706);
-  background: var(--pad-bg-warning-soft, rgba(217, 119, 6, 0.08));
-}
-.pad-composer__compactbtn.is-high:hover:not(:disabled) {
-  background: var(--pad-bg-warning-medium, rgba(217, 119, 6, 0.15));
-}
-.pad-composer__compactbtn.is-loading {
-  border-color: var(--pad-accent-primary);
-  color: var(--pad-accent-primary);
-  background: var(--pad-bg-accent-soft, rgba(99, 102, 241, 0.08));
-}
-.pad-composer__compactbtn-spinner {
-  animation: pad-spin 1s linear infinite;
-}
-@keyframes pad-spin {
-  to { transform: rotate(360deg); }
-}
+/* v0.4.3 redesign: ContextIndicator 已拆到独立组件 (ContextIndicator.vue), 它的样式在那边 scoped */
+/* 旧 v0.4.3 text 计数 + 独立压缩按钮 CSS 删除 (D173 UX 原则: 功能逻辑一体, 拆到独立组件) */
 
 .pad-composer__modelchip {
   display: inline-flex;
