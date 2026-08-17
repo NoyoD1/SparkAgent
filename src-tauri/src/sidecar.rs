@@ -1,12 +1,17 @@
 /**
  * Sidecar spawn + IPC bridge.
  *
- * v0.5.0 全量重写: 跟之前 v0.4.x 比, 不再在 Rust 端手写 stdin/stdout 协议解析, 全用
+ * v0.5.8 重写 sidecar 启动机制 (D172 跨项目规则: Tauri 2 sidecar 必须走
+ *   bundle.externalBin + app.shell().sidecar() 标准机制, 不能用 Command::new(&script)
+ *   写死编译时绝对路径, 否则干净 Windows 机器 install MSI/NSIS 后启动 fail).
+ *
+ * v0.5.0 大重构: 跟之前 v0.4.x 比, 不再在 Rust 端手写 stdin/stdout 协议解析, 全用
  *   Pi SDK 0.84.2 提供的 runRpcMode() 轮子.
  *
  * 协议:
- *   - argv[2] = config JSON (one-shot init: workspacePath / provider / model / apiKey /
- *     baseUrl / sessionId / thinkingLevel / tools)
+ *   - argv[1] = config JSON (one-shot init: workspacePath / provider / model / apiKey /
+ *     baseUrl / sessionId / thinkingLevel / tools) — bun compiled .exe 行为:
+ *     process.argv = ["bun", "<compiled .exe path>", <user arg>], 所以 config 是 argv[1]
  *   - stdin line 1+ = Pi SDK RpcCommand (prompt / steer / follow_up / abort / set_model /
  *     cycle_model / set_thinking_level / set_steering_mode / set_follow_up_mode / compact /
  *     set_auto_compaction / set_auto_retry / abort_retry / bash / abort_bash / get_state /
@@ -15,33 +20,28 @@
  *     get_messages / extension_ui_response) — 完整 list 见 @earendil-works/pi-coding-agent/modes/rpc/rpc-types
  *   - stdout = Pi SDK RpcResponse + RpcEvent + extension_ui_request
  *
- * 流式架构 (跟之前一样, 但逻辑简化):
+ * 流式架构:
  *   Tauri command (send_prompt / send_rpc_command)
- *     → tokio::spawn 启动 sidecar .exe (单进程多 RpcCommand, 一次 prompt → agent_end)
- *     → spawn 时 argv[1] 传 config JSON (bun runtime 重新设置 process.argv,
- *       argv[0] = "bun", argv[1] = .exe 路径, argv[2] = user arg = config JSON)
- *     → stdin 写第一个 RpcCommand (prompt)
- *     → 注册 stdin 到 ActiveSidecars map, 让后续 send_rpc_command (e.g. permission_response
- *       → extension_ui_response / set_model / abort / compact) 找得到
- *     → 后台 task 读 stdout 逐行 parse RpcEvent, emit 'chat:event' 给 frontend
- *     → 收到 agent_end → 移除 map entry, child drop 时 kill_on_drop 杀进程
- *
- * 路径: 走 CARGO_MANIFEST_DIR 编译时绝对路径找 sidecar/dist/pi-agent-sidecar.exe
- *       (bun build --compile 产物, D163 跨项目规则: release 不依赖 system Node).
+ *     → app.shell().sidecar("pi-agent-sidecar").spawn() 启动 sidecar .exe
+ *       (走 Tauri 2 标准 sidecar 机制, bundle.externalBin 声明, capabilities shell:allow-spawn 授权)
+ *     → 拿 (Receiver<CommandEvent>, CommandChild), 写初始 RpcCommand 走 child.write()
+ *     → 注册 CommandChild 到 ActiveSidecars map, 让后续 send_rpc_command 找得到
+ *     → 后台 task 循环 rx.recv() 处理 CommandEvent::Stdout (emit 'chat:event') /
+ *       Stderr (log) / Terminated (break)
+ *     → 收到 agent_end → 移除 map entry, child drop 时 kill
  */
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::process::Stdio;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex;
 
-/// v0.5.0 active sidecar 进程 stdin 全局表 (per-session).
+/// v0.5.8 active sidecar 进程 CommandChild 全局表 (per-session).
 /// 让 FE 端 invoke (send_rpc_command) 能写到指定 session 的 stdin.
 /// task 结束 (agent_end) 时移除 entry, 避免悬空 handle.
-pub struct ActiveSidecars(pub Mutex<HashMap<String, ChildStdin>>);
+pub struct ActiveSidecars(pub Mutex<HashMap<String, CommandChild>>);
 
 impl Default for ActiveSidecars {
     fn default() -> Self {
@@ -81,31 +81,6 @@ fn default_permission_mode() -> String {
     "ask".to_string()
 }
 
-fn find_sidecar_script() -> Result<std::path::PathBuf, String> {
-    // v0.5.6: 不再依赖 system node + sidecar/src/index.mjs (D163 / D144 跨项目规则).
-    //   之前调 `Command::new("node") .arg(&script)`, 要求用户机器装 Node.js + 项目内 .mjs
-    //   文件存在, MSI/NSIS installer 不打 .mjs 源码 → release .exe 在用户机器 fail.
-    //   现在调 `pi-agent-sidecar.exe` (bun build --compile 出的 standalone executable),
-    //   108 MB self-contained, 拷任何 Windows 机器都能直接跑, 不依赖 system Node / 项目源码.
-    // dev 模式: bun compile 后产物在 sidecar/dist/pi-agent-sidecar.exe, Tauri .exe 走
-    //   CARGO_MANIFEST_DIR 找.
-    // 路径: <project_root>/sidecar/dist/pi-agent-sidecar.exe
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let project_root = std::path::Path::new(manifest_dir).parent().ok_or_else(|| {
-        format!("CARGO_MANIFEST_DIR ({manifest_dir}) has no parent (cannot find project root)")
-    })?;
-    let exe = project_root.join("sidecar").join("dist").join("pi-agent-sidecar.exe");
-    if !exe.exists() {
-        return Err(format!(
-            "Sidecar executable not found at {}. Run `bun build --compile --target=bun-windows-x64 --outfile {}` first. cwd={:?}",
-            exe.display(),
-            exe.display(),
-            std::env::current_dir().ok()
-        ));
-    }
-    Ok(exe)
-}
-
 fn emit_error(app: &AppHandle, session_id: &str, message: &str) {
     let event = serde_json::json!({
         "type": "error",
@@ -122,9 +97,14 @@ fn emit_error(app: &AppHandle, session_id: &str, message: &str) {
     let _ = app.emit("chat:event", &end);
 }
 
-/// v0.5.0: 启动 sidecar, argv[2] 传 config JSON, stdin 第一个 RpcCommand 是 prompt.
-/// 后续 send_rpc_command 写同一个 stdin.
-/// session 在收到 'agent_end' 事件后自然结束.
+/// v0.5.8: 启动 sidecar 走 Tauri 2 标准 sidecar 机制 (D172).
+///   `app.shell().sidecar("pi-agent-sidecar")` 由 bundle.externalBin 声明,
+///   capabilities/default.json 的 shell:allow-spawn 授权, 自动 resolve 到:
+///     - dev:  <project_root>/sidecar/dist/pi-agent-sidecar.exe (Tauri 开发模式)
+///     - prod: <install_dir>/pi-agent-sidecar-x86_64-pc-windows-msvc.exe (MSI/NSIS 部署)
+///   不再需要 find_sidecar_script() 写死编译时绝对路径 (v0.5.6 commit 115959e 的反模式).
+///
+/// argv[1] 传 config JSON, 初始 RpcCommand 走 child.write() 写到 stdin.
 pub fn run_prompt(
     app: AppHandle,
     config: SidecarConfig,
@@ -133,20 +113,8 @@ pub fn run_prompt(
     active: Arc<ActiveSidecars>,
 ) {
     debug_log(&format!("run_prompt: session={session_id}"));
-    tokio::spawn(async move {
-        let script = match find_sidecar_script() {
-            Ok(s) => {
-                debug_log(&format!("sidecar script: {}", s.display()));
-                s
-            }
-            Err(e) => {
-                debug_log(&format!("sidecar not found: {e}"));
-                emit_error(&app, &session_id, &e);
-                return;
-            }
-        };
-
-        // v0.5.0: config 走 argv[2] (跟 Pi SDK main.ts pattern 一致)
+    tauri::async_runtime::spawn(async move {
+        // v0.5.0: config 走 argv[1] (跟 Pi SDK main.ts pattern 一致)
         let config_arg = match serde_json::to_string(&serde_json::json!({
             "type": "config",
             "provider": config.provider,
@@ -165,17 +133,22 @@ pub fn run_prompt(
             }
         };
 
-        let mut child = match Command::new(&script)
-            .arg(&config_arg)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-        {
-            Ok(c) => {
-                debug_log(&format!("sidecar spawned, pid={}", c.id().unwrap_or(0)));
-                c
+        // v0.5.8: 走 Tauri 2 标准 sidecar API. ShellExt 提供 app.shell(), 返回
+        //   tauri_plugin_shell::Shell struct, .sidecar(name) 返回 Command struct.
+        //   .args([config_arg]) 透传 config JSON 到 argv[1] (bun compiled .exe 行为).
+        //   .spawn() 返回 Result<(Receiver<CommandEvent>, CommandChild), Error>.
+        let (mut rx, mut child) = match app
+            .shell()
+            .sidecar("pi-agent-sidecar")
+            .map_err(|e| format!("get sidecar handle: {e}"))
+            .and_then(|cmd| {
+                cmd.args([config_arg])
+                    .spawn()
+                    .map_err(|e| format!("spawn sidecar: {e}"))
+            }) {
+            Ok(pair) => {
+                debug_log(&format!("sidecar spawned, session={session_id}"));
+                pair
             }
             Err(e) => {
                 debug_log(&format!("spawn sidecar failed: {e}"));
@@ -184,87 +157,87 @@ pub fn run_prompt(
             }
         };
 
-        let mut stdin = match child.stdin.take() {
-            Some(s) => s,
-            None => {
-                emit_error(&app, &session_id, "no stdin pipe");
-                return;
-            }
-        };
-        let stdout = match child.stdout.take() {
-            Some(s) => s,
-            None => {
-                emit_error(&app, &session_id, "no stdout pipe");
-                return;
-            }
-        };
-        let stderr = match child.stderr.take() {
-            Some(s) => s,
-            None => {
-                emit_error(&app, &session_id, "no stderr pipe");
-                return;
-            }
-        };
-
-        // v0.5.0: stdin line 1 = 第一个 RpcCommand (e.g. prompt)
+        // v0.5.8: 写初始 RpcCommand 到 stdin (CommandChild.write 是 sync method,
+        //   内部用 BufWriter flush, 不会阻塞 event loop).
         let line = format!("{initial_command_json}\n");
-        if let Err(e) = stdin.write_all(line.as_bytes()).await {
+        if let Err(e) = child.write(line.as_bytes()) {
             emit_error(&app, &session_id, &format!("write initial command: {e}"));
             return;
         }
 
-        // 注册 stdin 到 active map, 让 FE 端 send_rpc_command (e.g. extension_ui_response /
-        // set_model / abort / compact) 找得到
+        // 注册 CommandChild 到 active map, 让 FE 端 send_rpc_command 找得到.
         {
             let mut map = active.0.lock().await;
-            map.insert(session_id.clone(), stdin);
+            map.insert(session_id.clone(), child);
         }
         debug_log(&format!(
-            "run_prompt: wrote initial RpcCommand, stdin registered to active map"
+            "run_prompt: wrote initial RpcCommand, child registered to active map"
         ));
 
-        // 后台读 stderr → log
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                debug_log(&format!("stderr: {line}"));
-                log::warn!("[sidecar stderr] {line}");
-            }
-        });
-
-        // 主 task: 读 stdout, 逐行 emit RpcEvent 给 frontend
-        let mut reader = BufReader::new(stdout).lines();
+        // v0.5.8: 主 task 循环 Receiver<CommandEvent>, 替代之前 BufReader 读 stdout.
+        //   CommandEvent 枚举: Stdout(Vec<u8>) / Stderr(Vec<u8>) / Error(String) /
+        //   Terminated(TerminatedPayload { code, signal }).
         let mut got_agent_end = false;
         let mut event_count = 0u32;
-        while let Ok(Some(line)) = reader.next_line().await {
+        while let Some(event) = rx.recv().await {
             event_count += 1;
-            debug_log(&format!("stdout[{event_count}]: {line}"));
-            log::info!("[sidecar:{session_id}] {line}");
-            if line.trim().is_empty() {
-                continue;
-            }
-            let mut event: serde_json::Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::warn!("[sidecar:{session_id}] bad json: {e} line={line}");
-                    continue;
+            match event {
+                CommandEvent::Stdout(bytes) => {
+                    let line = String::from_utf8_lossy(&bytes);
+                    debug_log(&format!("stdout[{event_count}]: {line}"));
+                    log::info!("[sidecar:{session_id}] {line}");
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let mut event_json: serde_json::Value =
+                        match serde_json::from_str(line.as_ref()) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                log::warn!("[sidecar:{session_id}] bad json: {e} line={line}");
+                                continue;
+                            }
+                        };
+                    // 注入 sessionId 给 frontend dispatch (RpcEvent 自身没 sessionId 字段)
+                    if let Some(obj) = event_json.as_object_mut() {
+                        obj.insert("sessionId".to_string(), serde_json::json!(session_id));
+                    }
+                    let event_type = event_json
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if let Err(e) = app.emit("chat:event", &event_json) {
+                        log::error!("emit failed: {e}");
+                    }
+                    if event_type == "agent_end" {
+                        got_agent_end = true;
+                        break;
+                    }
                 }
-            };
-            // 注入 sessionId 给 frontend dispatch (RpcEvent 自身没 sessionId 字段)
-            if let Some(obj) = event.as_object_mut() {
-                obj.insert("sessionId".to_string(), serde_json::json!(session_id));
-            }
-            let event_type = event
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if let Err(e) = app.emit("chat:event", &event) {
-                log::error!("emit failed: {e}");
-            }
-            if event_type == "agent_end" {
-                got_agent_end = true;
-                break;
+                CommandEvent::Stderr(bytes) => {
+                    let line = String::from_utf8_lossy(&bytes);
+                    debug_log(&format!("stderr: {line}"));
+                    log::warn!("[sidecar stderr:{session_id}] {line}");
+                }
+                CommandEvent::Error(s) => {
+                    log::error!("[sidecar err:{session_id}] {s}");
+                    debug_log(&format!("CommandEvent::Error: {s}"));
+                }
+                CommandEvent::Terminated(payload) => {
+                    debug_log(&format!(
+                        "sidecar terminated: code={:?} signal={:?}",
+                        payload.code, payload.signal
+                    ));
+                    log::info!(
+                        "[sidecar:{session_id}] terminated code={:?} signal={:?}",
+                        payload.code,
+                        payload.signal
+                    );
+                    break;
+                }
+                _ => {
+                    // 其他 event variant (目前 shell plugin 没暴露更多, 占位)
+                }
             }
         }
 
@@ -278,13 +251,11 @@ pub fn run_prompt(
             let _ = app.emit("chat:event", &end);
         }
 
-        // 从 active map 移除 stdin (Agent 自然结束, 后续 RpcCommand 不应到达)
+        // 从 active map 移除 child (Agent 自然结束, 后续 RpcCommand 不应到达)
         {
             let mut map = active.0.lock().await;
             map.remove(&session_id);
         }
-        // child 在这里 drop, kill_on_drop 触发
-        drop(child);
         log::info!("[sidecar:{session_id}] done");
     });
 }
@@ -298,6 +269,8 @@ pub fn run_prompt(
 /// v0.5.0 fix: 之前用 nested struct `msg: RpcCommandMsg` 让 Tauri 期望 `msg: { ... }` 包裹,
 ///   跟 FE 端 invoke 习惯不一致, 报 'missing required key msg'. 改成两个顶层参数,
 ///   Tauri 2 自动 camelCase 转换 (session_id <-> sessionId, command_json <-> commandJson).
+///
+/// v0.5.8: child.write() 是 sync (CommandChild 内部 BufWriter, 不阻塞).
 #[tauri::command]
 pub async fn send_rpc_command(
     session_id: String,
@@ -310,13 +283,12 @@ pub async fn send_rpc_command(
         command_json.chars().take(120).collect::<String>()
     ));
     let mut map = active.0.lock().await;
-    let stdin = map
+    let child = map
         .get_mut(&session_id)
         .ok_or_else(|| format!("no active sidecar for session={}", session_id))?;
     let line = format!("{}\n", command_json);
-    stdin
-        .write_all(line.as_bytes())
-        .await
+    child
+        .write(line.as_bytes())
         .map_err(|e| format!("write rpc_command: {e}"))?;
     Ok(())
 }

@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../app/dist",
     "devUrl": "http://localhost:5174",
-    "beforeDevCommand": "node ../scripts/dev-fe.mjs",
-    "beforeBuildCommand": "node ../scripts/build-fe.mjs"
+    "beforeDevCommand": "node scripts/dev-fe.mjs",
+    "beforeBuildCommand": "node scripts/build-fe.mjs"
   },
   "app": {
     "windows": [
@@ -35,6 +35,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/pi-agent-sidecar"
     ]
   }
 }

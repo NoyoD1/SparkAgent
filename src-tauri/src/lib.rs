@@ -371,6 +371,7 @@ pub fn run() {
     let active_sidecars = std::sync::Arc::new(sidecar::ActiveSidecars::default());
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())  // v0.5.8: Tauri 2 sidecar 机制 (D172)
         .plugin(tauri_plugin_dialog::init())
         .manage(active_sidecars.clone())
         .setup(|app| {

@@ -20,6 +20,10 @@ tauri-build = { version = "2.6.3", features = [] }
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
+# v0.5.7: tauri-plugin-shell for `app.shell().sidecar("pi-agent-sidecar")` 走 Tauri 2 标准
+#   sidecar 机制 (之前 v0.5.6 commit 115959e 漏了这个, 直接用 `Command::new(&script)` 写死
+#   编译时绝对路径 `D:\UnityWork\Tools\Pi\sidecar\dist\pi-agent-sidecar.exe`, 干净机器找不到)
+tauri-plugin-shell = "2"
 # Logging
 log = "0.4"
 # Serialization

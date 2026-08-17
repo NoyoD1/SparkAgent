@@ -60,13 +60,20 @@ src-tauri/gen/
 src-tauri/WixTools/
 *.app
 *.dmg
-# sidecar/dist/pi-agent-sidecar.exe 是 bun build --compile 产物, 必须 commit (D163
-#   跨项目规则: Tauri release 不依赖 system Node, 必须 ship standalone .exe). 例外:
-!sidecar/dist/pi-agent-sidecar.exe
+# Default ignore executable bundles / installer artifacts
 *.exe
 *.msi
 *.deb
 *.AppImage
+# v0.5.8: src-tauri/binaries/pi-agent-sidecar-<target-triple>.exe 是 bun compile
+#   产物的 Tauri 命名约定拷贝, 必须 commit (Tauri 2 sidecar 机制要求这个名字,
+#   干净 Windows 机器 install MSI/NSIS 时 installer 会自动从 binaries/ 部署
+#   到 install_dir 跟 pi-agent-desktop.exe 配对, 详见 D172). 放在 *.exe 之后
+#   才能 override 默认 ignore.
+!src-tauri/binaries/pi-agent-sidecar-*.exe
+# sidecar/dist/pi-agent-sidecar.exe 是 bun build --compile 产物, 必须 commit (D163
+#   跨项目规则: Tauri release 不依赖 system Node, 必须 ship standalone .exe). 例外:
+!sidecar/dist/pi-agent-sidecar.exe
 
 # ---- 其他仓库 / 临时目录 ----
 # pi/ 是另一份 git 仓库的 clone (不同的项目, 不要混)
