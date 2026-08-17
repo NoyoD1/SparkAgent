@@ -287,29 +287,26 @@ pub fn run_prompt(
 /// 特殊 invoke 全部合并到这一个 — Rust 端不解析 RpcCommand, 直接 JSON.stringify 后
 /// 写一行 stdin. 权限弹窗响应 → extension_ui_response RpcCommand; abort → abort
 /// RpcCommand; set_model → set_model RpcCommand; compact → compact RpcCommand; 等等.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RpcCommandMsg {
-    /// sessionId 用来定位到指定 sidecar 进程的 stdin
-    pub session_id: String,
-    /// RpcCommand 的 JSON 字符串 (FE 端构造, Rust 端不解析)
-    pub command_json: String,
-}
-
+///
+/// v0.5.0 fix: 之前用 nested struct `msg: RpcCommandMsg` 让 Tauri 期望 `msg: { ... }` 包裹,
+///   跟 FE 端 invoke 习惯不一致, 报 'missing required key msg'. 改成两个顶层参数,
+///   Tauri 2 自动 camelCase 转换 (session_id <-> sessionId, command_json <-> commandJson).
 #[tauri::command]
 pub async fn send_rpc_command(
-    msg: RpcCommandMsg,
+    session_id: String,
+    command_json: String,
     active: State<'_, Arc<ActiveSidecars>>,
 ) -> Result<(), String> {
     debug_log(&format!(
         "send_rpc_command: session={} cmd={}",
-        msg.session_id,
-        msg.command_json.chars().take(120).collect::<String>()
+        session_id,
+        command_json.chars().take(120).collect::<String>()
     ));
     let mut map = active.0.lock().await;
     let stdin = map
-        .get_mut(&msg.session_id)
-        .ok_or_else(|| format!("no active sidecar for session={}", msg.session_id))?;
-    let line = format!("{}\n", msg.command_json);
+        .get_mut(&session_id)
+        .ok_or_else(|| format!("no active sidecar for session={}", session_id))?;
+    let line = format!("{}\n", command_json);
     stdin
         .write_all(line.as_bytes())
         .await
