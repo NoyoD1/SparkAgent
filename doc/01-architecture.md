@@ -24,12 +24,13 @@
 │            │ WebView2 (Chromium)          │                 │
 │            │                              │ spawn           │
 │  ┌─────────▼──────────────────────────────▼──────────┐     │
-│  │              Node.js Sidecar                       │     │
-│  │  (per-prompt, stdin/stdout JSON Lines)             │     │
+│  │              Sidecar (.exe, v0.5.6 bun compiled)    │     │
+│  │  (per-prompt, Pi SDK RPC 模式, stdin/stdout JSONL)  │     │
 │  │                                                    │     │
-│  │  - openai-compatible adapter (current)             │     │
-│  │  - tool executor (planned v0.4)                    │     │
-│  │  - memory store (planned v0.5)                     │     │
+│  │  - Pi SDK runRpcMode (40+ RpcCommand + RpcEvent)   │     │
+│  │  - 自动 5x retry + 30s hang watch + auto-compaction │     │
+│  │  - tool executor (v0.4.1: 7 内置 + permission)     │     │
+│  │  - session persistence (per-workspace jsonl)        │     │
 │  └─────────┬──────────────────────────────────────────┘     │
 │            │ HTTPS                                            │
 └────────────┼──────────────────────────────────────────────┘
@@ -86,7 +87,7 @@
 ### Sidecar (Node.js 20+)
 | 模块 | 用途 |
 |---|---|
-| `readline` (builtin) | stdin/stdout JSON Lines |
+| `readline` (builtin) | stdin/stdout JSONL (Pi SDK runRpcMode 接管, v0.5.0+) |
 | `fetch` (Node 20+ builtin) | LLM HTTPS 调用 |
 | 第三方 SDK 暂未引入 | 直接 fetch 简化依赖（见 [04-adr/](../04-adr/)）|
 
@@ -124,21 +125,22 @@
   │
   ▼ (4) Rust 读 OS keychain 拿 apiKey (keychain key = providerId)
   │
-  ▼ (5) Rust spawn sidecar (or reuse existing) — 传 stdin JSON { type: 'config', ..., apiKey, workspacePath }
+  ▼ (5) Rust spawn sidecar .exe (v0.5.6 bun compiled, 108 MB self-contained) — 传 argv[1] = config JSON
   │
-  ▼ (6) Sidecar openai-compatible.mjs fetch LLM API
-  │      (POST {baseUrl}/chat/completions, stream: true)
+  ▼ (6) Sidecar runRpcMode 接管 stdin/stdout (JSONL 严格 LF-only), 创建 AgentSessionRuntime
   │
-  ▼ (7) Sidecar parse SSE → emit JSON Lines events to stdout
-  │      (agent_start / message_start / message_update / message_end / agent_end / tool_*)
+  ▼ (7) LLM stream events → runRpcMode 序列化 AgentSessionEvent JSONL emit 给 stdout
+  │      (agent_start / turn_start / message_start / message_update / message_end / turn_end / agent_end / tool_* / auto_retry_*)
   │
-  ▼ (8) Rust 转发 stdout → Tauri event 'chat:event' → Frontend
+  ▼ (8) Rust 读 stdout 透传 RpcEvent + RpcResponse → Tauri event 'chat:event' → Frontend
   │
-  ▼ (9) Frontend listen('chat:event') 触发 chat store handler
+  ▼ (9) 后续 send_rpc_command (abort / permission_response / set_model / ...) 写同一 stdin, sidecar runRpcMode 路由
+  │
+  ▼ (10) Frontend listen('chat:event') 触发 chat store handler
   │      - 增量更新 ChatMessage (streaming)
   │      - 折叠 / 展开 thinking / tool_call blocks
   │
-  ▼ (10) agent_end 事件触发 → chat store finalize message + auto-save session
+  ▼ (11) agent_end 事件触发 → chat store finalize message + auto-save session (Pi SDK session-manager 写 jsonl)
 ```
 
 **关键设计**：
@@ -184,7 +186,7 @@
 | 边界 | 谁负责 | 策略 |
 |---|---|---|
 | **API Key 存储** | Tauri → OS keychain | 永不进 localStorage / WS / 日志 |
-| **API Key 传输** | Tauri → Sidecar stdin | 短命，prompt 结束即进程退出 |
+| **API Key 传输** | Tauri → Sidecar argv[1] (config JSON) | 短命，agent_end 即 sidecar exit |
 | **API Key 错误脱敏** | Sidecar sanitize | 401/403 错误信息 regex 过滤 key 模式 |
 | **CSP** | Tauri config | 当前 `csp: null`（**待 v0.4+ 严格化**）|
 | **Tool 沙箱**（v0.4+）| Sidecar | workspacePath 内 + 白名单命令 + 用户确认 |
@@ -228,9 +230,10 @@ D:\UnityWork\Tools\Pi\
 │       │   └── ui/               ← 自实现原子组件
 │       ├── views/ChatView.vue
 │       └── assets/styles/{tokens.css, main.css}
-├── sidecar/                      ← Node.js sidecar
-│   ├── package.json
-│   └── src/{index.mjs, openai-compatible.mjs}
+├── sidecar/                      ← Sidecar (v0.5.6 bun compiled, self-contained .exe)
+│   ├── package.json              ← npm dependencies (@earendil-works/pi-* 0.84.2)
+│   ├── src/{index.mjs}           ← wrapper: 200+ lines, 走 Pi SDK runRpcMode
+│   └── dist/pi-agent-sidecar.exe ← bun build --compile 产物, 108 MB, 必须 commit (D163)
 ├── src-tauri/                    ← Rust host
 │   ├── Cargo.toml
 │   ├── tauri.conf.json

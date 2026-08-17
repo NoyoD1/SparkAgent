@@ -140,7 +140,47 @@ await agent.prompt(userContent);
 
 ---
 
-## ⚪ v0.5 · Memory 系统
+## ✅ v0.5.0 → v0.5.6 · RPC 模式重构 + Release (2026-08-17)
+
+11 个 commit 落地 (484de1b / 7ef5b8b / b251e92 / 78b9821 / 4879808 / 40d9b99 / 6b30141 / 16aebb8 / 7247efe / 4d849f1 / 115959e), 详见 [ADR-0017](04-adr/0017-v0.5-rpc-mode-migration.md).
+
+### 必做项 (v0.5 11 项)
+
+| # | 项 | spec | 状态 | 验收 |
+|---|---|---|---|---|
+| 1 | sidecar 全量重写 836→200 行, 走 Pi SDK `runRpcMode` | [ADR-0017](04-adr/0017-v0.5-rpc-mode-migration.md) | ✅ 7ef5b8b | 删手写 40+ case event map / 5x retry / 30s hang / permission Ext / backpressure, 全部走 Pi SDK |
+| 2 | Tauri command 重写 (透传 RpcCommand) | [ADR-0017](04-adr/0017-v0.5-rpc-mode-migration.md) | ✅ b251e92 | `send_prompt` + `send_rpc_command` 通用 invoke, 顶层标量参数 camelCase |
+| 3 | FE chat store 重写 (pull+push, 200 行) | [ADR-0017](04-adr/0017-v0.5-rpc-mode-migration.md) | ✅ b251e92 | 700+ 行手写 event handler → 200 行 pull+push |
+| 4 | PermissionDialog 改 inline 浮层 (贴 Composer 顶) | [chat-core.md](03-features/chat-core.md) | ✅ 40d9b99 | 不挡 workspace, 高度自适应, unscoped CSS |
+| 5 | v0.5.2 polish (6 个真新功能 + 4 个 v0.5.1 没修好的 bug) | [chat-core.md](03-features/chat-core.md) | ✅ 16aebb8 | image tab / streaming 改 MutationObserver / 光标偏移修 |
+| 6 | v0.5.3 polish (跑马灯方向 + 原生 tooltip 清理) | [chat-core.md](03-features/chat-core.md) | ✅ c0c3909 | 跑马灯 D159 二次修正数学; 删 button title 改 aria-label |
+| 7 | **v0.5.4 sync 链 hotfix** (单 session 上下文丢失) | [ADR-D165](../topics/...md) | ✅ 7247efe | 每次 spawn 手动 sync `state.messages = buildSessionContext().messages` + lazy create stable sessionId |
+| 8 | **v0.5.5 model behavior hotfix** (DeepSeek meta-history 幻觉) | [ADR-...TBD](04-adr/) | ✅ 4d849f1 | `appendSystemPromptOverride` 加 `<context_awareness>` 段, LLM 明确知道有 history |
+| 9 | **v0.5.6 bun compile** (D163 跨项目规则) | [D163](../topics/...md) | ✅ 115959e | `bun build --compile` 出 `sidecar/dist/pi-agent-sidecar.exe` (108 MB), Tauri 跑 .exe 不依赖 system Node |
+| 10 | ADR-0017 status `proposed → accepted` | [ADR-0017](04-adr/0017-v0.5-rpc-mode-migration.md) | ✅ (this commit) | 11 个 commit 实际落地, status 改 accepted |
+| 11 | Architecture doc 同步 RPC 模式 | [01-architecture.md](01-architecture.md) | ✅ (this commit) | 流程图 + step 描述 + 目录结构 全部更新 v0.5.0+ 状态 |
+
+### Release 产物 (2026-08-17 22:24)
+
+```
+src-tauri\target\release\pi-agent-desktop.exe         12.77 MB
+src-tauri\target\release\bundle\msi\Pi Agent_0.1.0_x64_en-US.msi   5.17 MB
+src-tauri\target\release\bundle\nsis\Pi Agent_0.1.0_x64-setup.exe  3.94 MB
+sidecar\dist\pi-agent-sidecar.exe                   108 MB  (bun compiled, self-contained)
+```
+
+### 后续 (v0.5.7+ 待做)
+
+- [ ] v0.5.7: 拷 .exe 到干净 Windows 机器 (无 Node + 无项目源码), 验证 release-grade install 完整
+- [ ] v0.4.3: compaction 按钮 (UI 暴露 Pi SDK compact RPC, 跟 context 计数集成)
+- [ ] v0.4.4: 长期记忆 + 向量检索 + Context Manager 中央协调
+- [ ] v0.5.1: image tab 完整化 (multipart upload + drag-drop + preview)
+- [ ] v0.5.2: multi-agent / sub-agent 探索 (Pi SDK sub-agent extension 模式)
+- [ ] v0.5.3: Tauri 2 mobile / iPad / Android 调研 (POC)
+
+---
+
+## ⚪ v0.6 · Memory 系统
 
 ### 必做项
 
