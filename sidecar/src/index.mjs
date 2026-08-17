@@ -144,6 +144,41 @@ const createRuntime = async ({
   agentDir: dir,
   sessionManager: sm,
 }) => {
+  // v0.5.5 hotfix: 修 DeepSeek V4 Flash model 在 user 问 "我们之前聊过什么" 这种 meta 问题时
+  //   主动 assume "this is a new conversation session, no prior history" 的幻觉 bug.
+  //
+  // 背景 (D168 调查):
+  //   - v0.5.4 hotfix 修了 sync 链: 每次 spawn node 进程后, 把 sessionManager.loadEntries 灌
+  //     进 agent.state.messages. LLM 实际收到 5538 tokens (cacheRead=5120), 包含完整 history.
+  //   - 但 AI 在 user 问 "我们之前聊过什么" 时, 自己 assume "this is a new conversation
+  //     session", 答 "这是第一次对话". session file id=1953e8d7 thinking 字段:
+  //     "The user keeps asking the same question... I need to clarify that this is a new
+  //     conversation session and there is no prior chat history."
+  //   - 同一 session 里, AI 在 #4 答了 "工作区目前的状态和之前一样, 没有变化" — AI 知道
+  //     有之前对话 (隐含记忆), 但被 meta-history 问题的训练先验劫持.
+  //
+  // 修法 (Pi SDK 0.84.2 DefaultResourceLoader 接受 appendSystemPromptOverride):
+  //   - 在 system prompt 追加 <context_awareness> 段, 强制 LLM:
+  //     1) 明确知道它有完整 conversation history
+  //     2) 当 user 问 "我们之前聊过什么" / "what did we discuss" 这种 meta-history 问题时,
+  //        必须从 history 里找答案, 不能默认 assume "新 session"
+  //   - 这段是 model behavior 修正, 不影响 sync 链 / session persistence / tool flow.
+  //
+  // 跨项目通用: 任何接 DeepSeek V4 Flash / V3 / R1 这种带强 "stateless assistant" 训练先验的
+  //   model, 都建议加 <context_awareness> 段避免 meta-history 幻觉.
+  const CONTEXT_AWARENESS_INSTRUCTION = `<context_awareness>
+You have full access to the complete conversation history in this session. Every prior user message,
+your previous responses, and all tool calls/results are visible to you in the messages list above.
+
+When the user asks meta-history questions like "我们之前聊过什么", "what did we discuss", "what did
+you do earlier", "上次你做了什么", or refers to prior turns, ground your answer in the actual
+messages above. Read the conversation history and answer based on what actually happened.
+
+Do NOT default to "this is a new conversation session with no prior history" unless the conversation
+history is genuinely empty. Even if a previous turn was a 429 retry or empty response, the user's
+intent across the session is still part of the conversation.
+</context_awareness>`;
+
   const services = await createAgentSessionServices({
     cwd,
     agentDir: dir,
@@ -156,8 +191,15 @@ const createRuntime = async ({
     //   emit extension_ui_request → FE 弹窗 → user 选 → extension_ui_response →
     //   handler 据此 return { block: true } (拒绝) 或 undefined (放行).
     //   mode = 'allow' 时不传 extensionFactories, 走 Pi SDK 默认 (tool 直接放行, 不弹窗).
-    resourceLoaderOptions: config.permissionMode === 'allow' ? {} : {
-      extensionFactories: [createPermissionExtension(config.permissionMode)],
+    // v0.5.5: 同时传 appendSystemPromptOverride, 修 model behavior meta-history 幻觉.
+    resourceLoaderOptions: {
+      // permissionMode === 'allow' 时不传 InlineExtension (Pi SDK 默认 tool 放行),
+      //   但 appendSystemPromptOverride 仍要传 (Context awareness 是 model behavior 修正,
+      //   跟 permission 无关).
+      extensionFactories: config.permissionMode === 'allow'
+        ? []
+        : [createPermissionExtension(config.permissionMode)],
+      appendSystemPromptOverride: (base) => [...base, CONTEXT_AWARENESS_INSTRUCTION],
     },
   });
 
