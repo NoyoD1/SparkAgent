@@ -216,7 +216,7 @@ src-tauri\binaries\pi-agent-sidecar-x86_64-pc-windows-msvc.exe  108 MB  (Tauri �
 
 #### 🥇 P0 — 1 个月内必做 (table stakes for 2026, Pi SDK 暴露, 0 风险)
 
-- [x] ✅ **v0.4.3 Compaction UI** (commit `5d5b536`, 2026-08-17 23:33) — UI 暴露 Pi SDK `core/compaction/` 已有 `compact` RPC, 按钮调 `send_rpc_command` 即完事, 跟 context 计数集成
+- [x] ✅ **v0.4.3 Compaction UI** (commit `5d5b536` + redesign commit `681f248`, 2026-08-18 00:55) — UI 暴露 Pi SDK `core/compaction/` 已有 `compact` RPC, redesign 走 Claude Code 紧凑指示器 + popover 二级展开 (UX 原则: 功能逻辑一体, 不割裂)
 - [ ] **v0.4.4 Skills (Pi SDK 暴露)** (2-3h, 极高 ROI) — Pi SDK 有 `core/skills.ts` (loadSkillsFromDir + formatSkillsForPrompt), UI 加 skill 管理面板
 - [ ] **v0.4.5 Slash commands (内置)** (2-3h, 高 ROI) — 走 Pi SDK `core/slash-commands.ts` 暴露内置 + custom 命令
 - [ ] **v0.4.6 Project rules (类似 CLAUDE.md)** (1-2h, 高 ROI) — 走 UI 让 user 创建/编辑 project memory file, 走 `appendSystemPromptOverride` 注入
