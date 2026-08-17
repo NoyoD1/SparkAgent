@@ -202,8 +202,84 @@ export const useChatStore = defineStore('chat', () => {
       // v0.3.8.12 fix: 之前 `if (idx < 0) return` 在 switch 之前, 导致 message_start
       // 事件永远到不了 case 块 (因为 message_start 时还没 push assistant message, idx=-1).
       // 现在改成: message_start 允许 idx<0 (它负责 push), 其他 case 必须 idx>=0.
-      const idx = d2.messages.findIndex((m) => m.id === assistantId);
+      let idx = d2.messages.findIndex((m) => m.id === assistantId);
+      // v0.4.2.x fix: error / config_error / agent_end / message_end 可能在 message_start
+      //   之前到达 (modelRuntime.checkAuth 失败 → session.prompt 抛错 → sidecar emit error),
+      //   之前 `if (idx < 0) return` 把这些事件全吞了, 用户看不到任何错误, 看起来"没回复".
+      //   修法: 提前 push 一个 placeholder assistant message, 让 ChatMain 的 error banner
+      //   有一个挂载点. placeholder 跟正常 assistant 一样在 messages 数组, 渲染逻辑通用.
+      if (
+        idx < 0 &&
+        (event.type === 'error' ||
+          event.type === 'config_error' ||
+          event.type === 'agent_end' ||
+          event.type === 'message_end')
+      ) {
+        d2.messages.push({
+          id: assistantId,
+          role: 'assistant',
+          content: '',
+          createdAt: new Date().toISOString(),
+        });
+        idx = d2.messages.length - 1;
+        console.log(`[chat] pushed placeholder assistant for early ${event.type}`);
+      }
       switch (event.type) {
+        case 'config_ok':
+          // v0.4.2.x fix: 之前 config_ok 走 default 警告 'unhandled event type: config_ok'.
+          //   实际是 sidecar 启动成功 (createAgentSession 完成) 的信号, 仅日志.
+          console.log('[chat] config_ok: provider=', event.provider, 'model=', event.model);
+          break;
+        case 'config_error':
+          // v0.4.2.x fix: config_error (e.g. Model not found / session build 失败) 必须始终处理,
+          //   跟 error 一样展示给用户, 不能被 idx < 0 吞掉.
+          //   placeholder 已经在前面 push 过了 (如果 idx < 0), 这里直接 set errorBySession.
+          errorBySession.value = { ...errorBySession.value, [sessionId]: event.message };
+          streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
+          retryBySession.value = { ...retryBySession.value, [sessionId]: null };
+          console.error('[chat] config_error:', event.message);
+          chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+          off();
+          return;
+        case 'error':
+          // v0.4.2.x fix: 之前 error 跟其他 message_start 后事件分组, 触发 `if (idx < 0) return`
+          //   吞掉, 看起来"发送没回复". 拉出来独立处理, 始终 set errorBySession.
+          //   placeholder 已经在前面 push 过了 (如果 idx < 0).
+          errorBySession.value = { ...errorBySession.value, [sessionId]: event.message };
+          streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
+          // v0.4.2+ 清 retry 状态 (5 次重试都失败, 终态错误)
+          retryBySession.value = { ...retryBySession.value, [sessionId]: null };
+          console.error('[chat] error event:', event.message);
+          chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+          off();
+          return;
+        case 'agent_end':
+          // v0.4.2.x fix: agent_end 跟 error 一样, 可能在 message_start 之前到达 (error flow),
+          //   placeholder 已经在前面 push 过了 (如果 idx < 0). 这里始终做清理 + auto-name.
+          //   正常 flow 时 placeholder 不会被 push, 走原本的 `assistant.steps` 关闭逻辑.
+          if (idx >= 0) {
+            const assistantMsg = d2.messages[idx];
+            if (assistantMsg.steps) {
+              const lastStep = assistantMsg.steps[assistantMsg.steps.length - 1];
+              if (lastStep && lastStep.isActive) {
+                lastStep.isActive = false;
+                lastStep.collapsed = true;
+              }
+            }
+          }
+          streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
+          // v0.4.2+ 清 retry 状态 (agent_end 正常结束)
+          retryBySession.value = { ...retryBySession.value, [sessionId]: null };
+          chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+          console.log(
+            '[chat] agent_end: idx=',
+            idx,
+            'total msgs=',
+            d2.messages.length,
+          );
+          off();
+          maybeAutoNameSession(sessionId, text);
+          return;
         case 'agent_start':
           // v0.3.8.14: agent_start 之前 v0.3.8.13 漏了, 走 default 警告
           // agent_start 是 sidecar 启动信号, 不需要动 store, 仅日志
@@ -264,9 +340,9 @@ export const useChatStore = defineStore('chat', () => {
         case 'tool_start':
         case 'tool_update':
         case 'tool_end':
-        case 'agent_end':
-        case 'error':
-          // 这些 case 都需要 idx >= 0 (message_start 之后才走)
+          // v0.4.2.x fix: agent_end + error 已经在 switch 开头独立处理 (返回), 不会到这里.
+          //   这里只对 'message_update' / 'tool_*' 等真正需要 assistant message 才有意义的事件
+          //   做 idx < 0 检查. 这些事件 idx < 0 是不正常的, 警告后丢弃.
           if (idx < 0) {
             console.warn(`[chat] ${event.type} before assistant message created, ignoring`);
             return;
@@ -358,38 +434,8 @@ export const useChatStore = defineStore('chat', () => {
                 }
               }
               break;
-            case 'agent_end':
-              // agent 跑完: 标最后一个 step 也 closed (兜底, 万一 turn_end 没 emit)
-              if (assistant.steps) {
-                const lastStep = assistant.steps[assistant.steps.length - 1];
-                if (lastStep && lastStep.isActive) {
-                  lastStep.isActive = false;
-                  lastStep.collapsed = true;
-                }
-              }
-              streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
-              // v0.4.2+ 清 retry 状态 (agent_end 正常结束)
-              retryBySession.value = { ...retryBySession.value, [sessionId]: null };
-              chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
-              console.log(
-                '[chat] agent_end: assistant.content.length=',
-                assistant.content.length,
-                'steps=',
-                assistant.steps?.length ?? 0,
-                'preview=',
-                assistant.content.slice(0, 80),
-              );
-              off();
-              maybeAutoNameSession(sessionId, text);
-              return;  // agent_end 之后直接 return, 不再赋值 chatData
-            case 'error':
-              errorBySession.value = { ...errorBySession.value, [sessionId]: event.message };
-              streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
-              // v0.4.2+ 清 retry 状态 (5 次重试都失败, 终态错误)
-              retryBySession.value = { ...retryBySession.value, [sessionId]: null };
-              console.error('[chat] error event:', event.message);
-              off();
-              return;
+            // v0.4.2.x fix: agent_end + error 已经在外层 case 处理 (外层早 return, 不会到内层 switch),
+            //   这里删掉 dead code 避免误导.
           }
           break;
         // v0.4.2 step 1: AgentSession 内置 retry 5 次指数退避, sidecar 转发 auto_retry_start / auto_retry_end
