@@ -147,14 +147,25 @@ class PiTauriClient {
    * FE 端 PermissionDialog 点了 允许/拒绝, 调这个发回 sidecar
    * - allow=true  → sidecar 放行 tool 执行
    * - allow=false → sidecar 阻止 tool (Pi SDK emit error tool result)
+   *
+   * v0.4.2.x fix: 必须传 sessionId, Rust 端 PermissionResponseMsg.session_id 是 required
+   *   (没 #[serde(default)]), 之前漏传 → Tauri 抛 "missing required key msg" → 整个
+   *   permission 流程崩, sidecar 永远等不到 permission_response → LLM 卡死 → 用户
+   *   只能 abort → 3 个 step 都累积 "This operation was aborted" 错误提示.
    */
   async sendPermissionResponse(
+    sessionId: string,
     toolCallId: string,
     allow: boolean,
     reason?: string,
   ): Promise<void> {
-    console.log('[pi-tauri] sendPermissionResponse', { toolCallId, allow, reason });
-    await invoke('send_permission_response', { toolCallId, allow, reason: reason ?? null });
+    console.log('[pi-tauri] sendPermissionResponse', { sessionId, toolCallId, allow, reason });
+    await invoke('send_permission_response', {
+      sessionId,
+      toolCallId,
+      allow,
+      reason: reason ?? null,
+    });
   }
 
   /**
