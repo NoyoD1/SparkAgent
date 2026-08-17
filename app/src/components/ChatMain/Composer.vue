@@ -3,13 +3,14 @@
  * Composer — textarea + toolbar + 当前 active provider/model chip (可切换) + mic/send.
  * 1:1 mirrors chat.html's bottom composer, 但 model chip 改成 active config.
  * v3: model 菜单视觉跟 PadSelect 弹层统一 (hover 灰底 / active 紫底+左 2px accent / checkmark)
+ * v0.4.1+: 加 tool permission 按钮 + dropdown (3 选 1: ask / smart / allow)
  */
-import { ref, computed, nextTick, onMounted, watch } from 'vue';
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
-import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, AlertTriangle, Star, Check } from 'lucide-vue-next';
+import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
-import { useConfigStore, PROVIDER_OPTIONS } from '@/stores/config';
+import { useConfigStore, PROVIDER_OPTIONS, PERMISSION_MODE_OPTIONS, type PermissionMode } from '@/stores/config';
 import { useUiStore } from '@/stores/ui';
 
 const chatStore = useChatStore();
@@ -20,6 +21,42 @@ const { activeSession } = storeToRefs(sessionStore);
 
 const inputText = ref('');
 const showModelMenu = ref(false);
+// v0.4.1+ tool permission 菜单
+const showPermissionMenu = ref(false);
+
+const currentPermissionOption = computed(
+  () => PERMISSION_MODE_OPTIONS.find((o) => o.value === configStore.permissionMode) ?? PERMISSION_MODE_OPTIONS[0],
+);
+
+/** v0.4.1+ 解析 PERMISSION_MODE_OPTIONS.icon 字符串成 lucide 组件 (因为 store 是纯 TS, 不能直接 import vue 组件) */
+const PERMISSION_ICON_MAP: Record<string, any> = {
+  Hand: Hand,
+  Sparkles: Sparkles,
+  CheckCheck: CheckCheck,
+};
+const currentPermissionIcon = computed(() => PERMISSION_ICON_MAP[currentPermissionOption.value.icon]);
+
+function togglePermissionMenu() {
+  showPermissionMenu.value = !showPermissionMenu.value;
+  if (showPermissionMenu.value) showModelMenu.value = false;  // 二选一开
+}
+
+function pickPermission(mode: PermissionMode) {
+  configStore.setPermissionMode(mode);
+  showPermissionMenu.value = false;
+}
+
+// ===== v0.4.1+ 点外部关闭 permission menu =====
+// 标准 pattern: document.addEventListener('click') + contains 检查. 跟 ChatMain.vue / PadSelect.vue 一致.
+const permMenuRef = ref<HTMLElement | null>(null);
+function onPermClickOutside(e: MouseEvent) {
+  if (!showPermissionMenu.value) return;
+  if (permMenuRef.value && !permMenuRef.value.contains(e.target as Node)) {
+    showPermissionMenu.value = false;
+  }
+}
+onMounted(() => document.addEventListener('click', onPermClickOutside));
+onUnmounted(() => document.removeEventListener('click', onPermClickOutside));
 
 const activeProvider = computed(() => configStore.activeProvider);
 const activeModel = computed(() => configStore.activeModel);
@@ -123,6 +160,46 @@ onMounted(() => nextTick(autoResize));
         <button class="pad-composer__iconbtn" title="附加文件">
           <Paperclip :size="16" :stroke-width="1.75" />
         </button>
+        <!-- v0.4.1+ tool permission 设置按钮: 3 选 1 dropdown (ask / smart / allow) -->
+        <div class="pad-composer__perm-wrap" ref="permMenuRef">
+          <button
+            class="pad-composer__permchip"
+            :class="{ 'is-open': showPermissionMenu }"
+            :title="`工具权限: ${currentPermissionOption.label} — ${currentPermissionOption.hint}`"
+            @click="togglePermissionMenu"
+          >
+            <component :is="currentPermissionIcon" :size="14" :stroke-width="1.75" />
+            <span class="pad-composer__permchip-label">{{ currentPermissionOption.label }}</span>
+            <ChevronDown :size="12" :stroke-width="1.75" :class="['pad-composer__permchip-chev', { 'is-flipped': showPermissionMenu }]" />
+          </button>
+
+          <div v-if="showPermissionMenu" class="pad-composer__perm-menu" @click.stop>
+            <div class="pad-composer__perm-menu-head">
+              <span>工具权限模式</span>
+            </div>
+            <button
+              v-for="opt in PERMISSION_MODE_OPTIONS"
+              :key="opt.value"
+              class="pad-composer__perm-menu-item"
+              :class="{ 'is-active': opt.value === configStore.permissionMode }"
+              @click="pickPermission(opt.value)"
+            >
+              <span class="pad-composer__perm-menu-item-body">
+                <span class="pad-composer__perm-menu-item-label">{{ opt.label }}</span>
+                <span class="pad-composer__perm-menu-item-hint">{{ opt.hint }}</span>
+              </span>
+              <Check
+                v-if="opt.value === configStore.permissionMode"
+                :size="14"
+                :stroke-width="2"
+                class="pad-composer__perm-menu-item-check"
+              />
+            </button>
+            <div class="pad-composer__perm-menu-foot">
+              <span class="pad-composer__perm-menu-foot-text">v0.4.1 占位 — 后端 confirm 弹窗 v0.4.1+ 接</span>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="pad-composer__bar-right">
         <div class="pad-composer__model-wrap">
@@ -283,6 +360,144 @@ onMounted(() => nextTick(autoResize));
 }
 .pad-composer__model-wrap {
   position: relative;
+}
+
+/* ===== v0.4.1+ tool permission 按钮 + dropdown ===== */
+/* 视觉跟 model chip + model menu 完全对齐 (统一 popover 风格) */
+.pad-composer__perm-wrap {
+  position: relative;
+}
+.pad-composer__permchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 4px 0 8px;
+  margin-left: var(--pad-sp-1);
+  border-radius: var(--pad-radius-md);
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    background var(--pad-dur-fast) ease,
+    color var(--pad-dur-fast) ease,
+    border-color var(--pad-dur-fast) ease;
+}
+.pad-composer__permchip:hover {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
+}
+.pad-composer__permchip.is-open {
+  background: var(--pad-bg-active);
+  color: var(--pad-fg-primary);
+  border-color: var(--pad-border);
+}
+.pad-composer__permchip-label {
+  white-space: nowrap;
+}
+.pad-composer__permchip-chev {
+  color: var(--pad-fg-tertiary);
+  transition: transform var(--pad-dur-base) var(--pad-ease-in-out);
+}
+.pad-composer__permchip-chev.is-flipped {
+  transform: rotate(180deg);
+}
+.pad-composer__perm-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 240px;
+  background: var(--pad-popover);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-lg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.10), 0 2px 8px rgba(0, 0, 0, 0.04);
+  padding: 4px 0 6px;
+  z-index: 30;
+}
+.pad-composer__perm-menu-head {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--pad-divider);
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: var(--pad-fw-medium);
+}
+/* item: 跟 model menu item 视觉统一 (8/12 padding + 2px 左侧 active accent) */
+.pad-composer__perm-menu-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: var(--pad-sp-2);
+  min-height: 38px;
+  padding: 8px 12px 8px 14px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--pad-radius-md);
+  cursor: pointer;
+  transition: background var(--pad-dur-fast) ease;
+  font-family: inherit;
+  color: var(--pad-fg-primary);
+}
+.pad-composer__perm-menu-item:hover:not(.is-active) {
+  background: var(--pad-bg-hover);
+}
+.pad-composer__perm-menu-item.is-active {
+  background: var(--pad-accent-soft);
+  color: var(--pad-fg-primary);
+  font-weight: var(--pad-fw-medium);
+}
+.pad-composer__perm-menu-item.is-active::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--pad-accent);
+}
+.pad-composer__perm-menu-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.pad-composer__perm-menu-item-label {
+  font-size: var(--pad-fs-13);
+  color: var(--pad-fg-primary);
+  font-weight: inherit;
+}
+.pad-composer__perm-menu-item-hint {
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
+  font-weight: var(--pad-fw-regular);
+}
+.pad-composer__perm-menu-item.is-active .pad-composer__perm-menu-item-hint {
+  color: var(--pad-fg-secondary);
+}
+.pad-composer__perm-menu-item-check {
+  color: var(--pad-accent);
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+.pad-composer__perm-menu-foot {
+  padding: 6px 12px 4px;
+  border-top: 1px solid var(--pad-divider);
+  margin-top: 2px;
+}
+.pad-composer__perm-menu-foot-text {
+  font-size: var(--pad-fs-10);
+  color: var(--pad-fg-tertiary);
+  font-style: italic;
 }
 .pad-composer__modelchip {
   display: inline-flex;

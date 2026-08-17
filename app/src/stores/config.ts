@@ -100,8 +100,23 @@ function emptyAppConfig() {
     providers: [] as ProviderConfig[],
     activeProviderId: null as string | null,
     thinkingLevel: 'medium' as 'off' | 'low' | 'medium' | 'high',
+    // v0.4.1+: tool permission mode (跟 Rust config_store 默认 ask 对齐)
+    permissionMode: 'ask' as PermissionMode,
   };
 }
+
+/** v0.4.1+ tool permission 模式.
+ *  - ask: 每次 tool call 显式 confirm (最安全, 默认值)
+ *  - smart: 读自动放行, 写/命令/删 confirm (中等, 适合日常开发)
+ *  - allow: 全部自动放行 (最省心但最危险, 不推荐)
+ */
+export type PermissionMode = 'ask' | 'smart' | 'allow';
+
+export const PERMISSION_MODE_OPTIONS: Array<{ value: PermissionMode; label: string; hint: string; icon: string }> = [
+  { value: 'ask',   label: '主动询问', hint: '每个工具调用前都问一次',           icon: 'Hand' },
+  { value: 'smart', label: '智能授权', hint: '读文件自动放行, 写/命令/删才问',  icon: 'Sparkles' },
+  { value: 'allow', label: '始终授权', hint: '全部自动放行, 不再询问',           icon: 'CheckCheck' },
+];
 
 /**
  * v0.3.8+ 内置 provider 的常见 model 列表.
@@ -134,6 +149,8 @@ export const useConfigStore = defineStore('config', () => {
   const providers = ref<ProviderConfig[]>(initial.providers);
   const activeProviderId = ref<string | null>(initial.activeProviderId);
   const thinkingLevel = ref<'off' | 'low' | 'medium' | 'high'>(initial.thinkingLevel);
+  // v0.4.1+ tool permission mode
+  const permissionMode = ref<PermissionMode>(initial.permissionMode);
   const loaded = ref(false);  // v0.3.8+: init() 完成后置 true
   const saving = ref(false);  // 写入 Rust 中, UI 可以 disable input
 
@@ -151,9 +168,16 @@ export const useConfigStore = defineStore('config', () => {
       // v0.3.8.1 fix: 旧 build 写过空串, 落盘后读出还是空. 用 || 替代 ?? 让 "" 也走 fallback
       const tl = (cfg.thinkingLevel as any) || 'medium';
       thinkingLevel.value = (tl === 'off' || tl === 'low' || tl === 'medium' || tl === 'high') ? tl : 'medium';
-      // 如果读出来的 thinkingLevel 跟默认不同, 主动落一次盘 (修旧数据)
+      // v0.4.1+: permission mode. 旧 config.json 没这字段 → undefined → 走 'ask' fallback
+      const pm = (cfg.permissionMode as any) || 'ask';
+      permissionMode.value = (pm === 'ask' || pm === 'smart' || pm === 'allow') ? pm : 'ask';
+      // 如果读出来的字段跟默认不同, 主动落一次盘 (修旧数据)
       if (tl !== thinkingLevel.value) {
         console.log('[config] init: normalized thinkingLevel', JSON.stringify(tl), '->', thinkingLevel.value);
+        void persist();
+      }
+      if (pm !== permissionMode.value) {
+        console.log('[config] init: normalized permissionMode', JSON.stringify(pm), '->', permissionMode.value);
         void persist();
       }
       console.log('[config] init loaded: providers=', providers.value.length, 'active=', activeProviderId.value);
@@ -212,6 +236,7 @@ export const useConfigStore = defineStore('config', () => {
         providers: providers.value,
         activeProviderId: activeProviderId.value,
         thinkingLevel: thinkingLevel.value,
+        permissionMode: permissionMode.value,
       });
     } catch (e) {
       console.error('[config] save failed', e);
@@ -222,7 +247,7 @@ export const useConfigStore = defineStore('config', () => {
 
   // deep watch: 任一字段变 → persist
   watch(
-    [providers, activeProviderId, thinkingLevel],
+    [providers, activeProviderId, thinkingLevel, permissionMode],
     () => {
       void persist();
     },
@@ -316,6 +341,11 @@ export const useConfigStore = defineStore('config', () => {
     thinkingLevel.value = level;
   }
 
+  /** v0.4.1+: 切换 tool permission 模式 */
+  function setPermissionMode(mode: PermissionMode) {
+    permissionMode.value = mode;
+  }
+
   function clearAll() {
     providers.value = [];
     activeProviderId.value = null;
@@ -367,6 +397,7 @@ export const useConfigStore = defineStore('config', () => {
     providers,
     activeProviderId,
     thinkingLevel,
+    permissionMode,
     loaded,
     saving,
     // computed
@@ -386,6 +417,7 @@ export const useConfigStore = defineStore('config', () => {
     setActiveModel,
     setActiveProvider,
     setThinkingLevel,
+    setPermissionMode,
     clearAll,
     migrateFromLocalStorage,
   };

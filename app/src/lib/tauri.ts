@@ -198,6 +198,8 @@ export interface AppConfig {
   providers: AppProviderConfig[];
   activeProviderId: string | null;
   thinkingLevel: 'off' | 'low' | 'medium' | 'high';
+  /** v0.4.1+ tool permission 模式 (跟 Rust config_store permission_mode 对齐, 旧 config.json 缺这字段) */
+  permissionMode?: 'ask' | 'smart' | 'allow';
 }
 export interface AppProviderConfig {
   id: string;

@@ -27,10 +27,21 @@ pub struct AppConfig {
     /// 'off' | 'low' | 'medium' | 'high'
     #[serde(default = "default_thinking_level")]
     pub thinking_level: String,
+    /// v0.4.1+ tool permission 模式: 'ask' | 'smart' | 'allow'
+    /// - ask: 每个 tool call 显式 confirm (最安全)
+    /// - smart: 读自动放行, 写/命令/删 confirm
+    /// - allow: 全部自动放行 (最危险)
+    /// 旧 config.json 没这字段 → 默认 'ask' (跟 v0.4.1 推荐一致, 防首次用户误删)
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
 }
 
 fn default_thinking_level() -> String {
     "medium".to_string()
+}
+
+fn default_permission_mode() -> String {
+    "ask".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
