@@ -157,21 +157,37 @@ await agent.prompt(userContent);
 | 7 | **v0.5.4 sync 链 hotfix** (单 session 上下文丢失) | [ADR-D165](../topics/...md) | ✅ 7247efe | 每次 spawn 手动 sync `state.messages = buildSessionContext().messages` + lazy create stable sessionId |
 | 8 | **v0.5.5 model behavior hotfix** (DeepSeek meta-history 幻觉) | [ADR-...TBD](04-adr/) | ✅ 4d849f1 | `appendSystemPromptOverride` 加 `<context_awareness>` 段, LLM 明确知道有 history |
 | 9 | **v0.5.6 bun compile** (D163 跨项目规则) | [D163](../topics/...md) | ✅ 115959e | `bun build --compile` 出 `sidecar/dist/pi-agent-sidecar.exe` (108 MB), Tauri 跑 .exe 不依赖 system Node |
-| 10 | ADR-0017 status `proposed → accepted` | [ADR-0017](04-adr/0017-v0.5-rpc-mode-migration.md) | ✅ (this commit) | 11 个 commit 实际落地, status 改 accepted |
-| 11 | Architecture doc 同步 RPC 模式 | [01-architecture.md](01-architecture.md) | ✅ (this commit) | 流程图 + step 描述 + 目录结构 全部更新 v0.5.0+ 状态 |
+| 10 | ADR-0017 status `proposed → accepted` | [ADR-0017](04-adr/0017-v0.5-rpc-mode-migration.md) | ✅ 8758554 | 13 个 commit 实际落地, status 改 accepted + 11+2 commit 列表 |
+| 11 | Architecture doc 同步 RPC 模式 | [01-architecture.md](01-architecture.md) | ✅ 8758554 | 流程图 + step 描述 + 目录结构 全部更新 v0.5.0+ 状态 |
 
-### Release 产物 (2026-08-17 22:24)
+### Release 产物 (v0.5.6 2026-08-17 22:24, v0.5.8 2026-08-17 22:46)
 
 ```
+v0.5.6 (115959e, 写死编译时绝对路径 ⚠️ 干净机器 fail):
 src-tauri\target\release\pi-agent-desktop.exe         12.77 MB
 src-tauri\target\release\bundle\msi\Pi Agent_0.1.0_x64_en-US.msi   5.17 MB
 src-tauri\target\release\bundle\nsis\Pi Agent_0.1.0_x64-setup.exe  3.94 MB
 sidecar\dist\pi-agent-sidecar.exe                   108 MB  (bun compiled, self-contained)
+
+v0.5.8 (33fc5fa, Tauri 2 标准 sidecar 机制, 干净机器真能跑):
+src-tauri\target\release\pi-agent-desktop.exe         14.35 MB  (+ tauri-plugin-shell)
+src-tauri\target\release\pi-agent-sidecar.exe        103.48 MB  (Tauri 命名约定 + sidecar.exe 配套)
+src-tauri\target\release\bundle\msi\Pi Agent_0.1.0_x64_en-US.msi  44.02 MB  (含 sidecar.exe)
+src-tauri\target\release\bundle\nsis\Pi Agent_0.1.0_x64-setup.exe 30.94 MB  (含 sidecar.exe)
+sidecar\dist\pi-agent-sidecar.exe                   108 MB  (bun compiled, self-contained)
+src-tauri\binaries\pi-agent-sidecar-x86_64-pc-windows-msvc.exe  108 MB  (Tauri 命名约定, 必须 commit)
 ```
 
-### 后续 (v0.5.7+ 待做)
+### v0.5.7 + v0.5.8 补完 (2026-08-17 22:46)
 
-- [ ] v0.5.7: 拷 .exe 到干净 Windows 机器 (无 Node + 无项目源码), 验证 release-grade install 完整
+| Commit | 性质 | 内容 |
+|---|---|---|
+| 8758554 | doc sync | v0.5.7 — ADR-0017 status proposed → accepted + Architecture/Roadmap 同步 v0.5.0-v0.5.6 状态 |
+| 33fc5fa | release | **v0.5.8** — Tauri 2 标准 sidecar 机制 (D172 跨项目规则), 补 v0.5.6 漏的 `bundle.externalBin` + `app.shell().sidecar()`, 干净 Windows 机器 install MSI/NSIS 真能跑 |
+
+### 后续 (v0.5.8+ 待做)
+
+- [ ] **v0.5.9 验证**: 拷 v0.5.8 NSIS installer 到干净 Windows 机器 install, 验证 sidecar.exe 自动部署 + 4 轮对话 memory test + 重启 .exe history 还在 (D166 端到端未验警告)
 - [ ] v0.4.3: compaction 按钮 (UI 暴露 Pi SDK compact RPC, 跟 context 计数集成)
 - [ ] v0.4.4: 长期记忆 + 向量检索 + Context Manager 中央协调
 - [ ] v0.5.1: image tab 完整化 (multipart upload + drag-drop + preview)

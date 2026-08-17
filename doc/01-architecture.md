@@ -25,6 +25,7 @@
 │            │                              │ spawn           │
 │  ┌─────────▼──────────────────────────────▼──────────┐     │
 │  │              Sidecar (.exe, v0.5.6 bun compiled)    │     │
+│  │  (v0.5.8: Tauri 2 标准 sidecar 机制 externalBin)    │     │
 │  │  (per-prompt, Pi SDK RPC 模式, stdin/stdout JSONL)  │     │
 │  │                                                    │     │
 │  │  - Pi SDK runRpcMode (40+ RpcCommand + RpcEvent)   │     │
@@ -125,16 +126,22 @@
   │
   ▼ (4) Rust 读 OS keychain 拿 apiKey (keychain key = providerId)
   │
-  ▼ (5) Rust spawn sidecar .exe (v0.5.6 bun compiled, 108 MB self-contained) — 传 argv[1] = config JSON
+  ▼ (5) Rust spawn sidecar .exe (v0.5.6 bun compiled, 108 MB self-contained) — 走
+  │      Tauri 2 标准 sidecar 机制 `app.shell().sidecar("pi-agent-sidecar").spawn()`
+  │      (v0.5.8, D172 跨项目规则: `bundle.externalBin` + `app.shell().sidecar()` 替代
+  │       v0.5.6 的 `Command::new(&script)` 写死编译时绝对路径, 干净 Windows 机器 install
+  │       MSI/NSIS 真能跑). 拿 `(Receiver<CommandEvent>, CommandChild)`, argv[1] = config JSON
   │
   ▼ (6) Sidecar runRpcMode 接管 stdin/stdout (JSONL 严格 LF-only), 创建 AgentSessionRuntime
   │
   ▼ (7) LLM stream events → runRpcMode 序列化 AgentSessionEvent JSONL emit 给 stdout
   │      (agent_start / turn_start / message_start / message_update / message_end / turn_end / agent_end / tool_* / auto_retry_*)
   │
-  ▼ (8) Rust 读 stdout 透传 RpcEvent + RpcResponse → Tauri event 'chat:event' → Frontend
+  ▼ (8) Rust 读 stdout 走 `rx.recv()` 循环 `CommandEvent::Stdout` 透传 RpcEvent + RpcResponse
+  │      → Tauri event 'chat:event' → Frontend
   │
-  ▼ (9) 后续 send_rpc_command (abort / permission_response / set_model / ...) 写同一 stdin, sidecar runRpcMode 路由
+  ▼ (9) 后续 send_rpc_command (abort / permission_response / set_model / ...) 走
+  │      `CommandChild::write(rpc_command.as_bytes())` 写 stdin, sidecar runRpcMode 路由
   │
   ▼ (10) Frontend listen('chat:event') 触发 chat store handler
   │      - 增量更新 ChatMessage (streaming)
@@ -235,10 +242,13 @@ D:\UnityWork\Tools\Pi\
 │   ├── src/{index.mjs}           ← wrapper: 200+ lines, 走 Pi SDK runRpcMode
 │   └── dist/pi-agent-sidecar.exe ← bun build --compile 产物, 108 MB, 必须 commit (D163)
 ├── src-tauri/                    ← Rust host
-│   ├── Cargo.toml
-│   ├── tauri.conf.json
-│   ├── capabilities/default.json
+│   ├── Cargo.toml                ← v0.5.8: tauri-plugin-shell = "2" (D172)
+│   ├── tauri.conf.json           ← v0.5.8: bundle.externalBin (D172)
+│   ├── capabilities/default.json ← v0.5.8: shell:allow-spawn (D172)
+│   ├── binaries/                 ← v0.5.8: Tauri 命名约定的 sidecar binary 拷贝
+│   │   └── pi-agent-sidecar-x86_64-pc-windows-msvc.exe ← 108 MB, 必须 commit (D163+D172)
 │   └── src/{main,lib,sidecar,keyring,config_store,index_file}.rs
+│       └── sidecar.rs            ← v0.5.8: app.shell().sidecar() + Receiver<CommandEvent> + CommandChild
 ├── Pi-Agent-Design.design/       ← 设计源（v0.3.8.19+ 唯一权威 = Minimalist Copy/）
 └── .gitignore
 ```
