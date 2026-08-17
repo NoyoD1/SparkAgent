@@ -128,13 +128,14 @@ async function copyMessage() {
       <MarkdownContent :content="finalBody" />
     </div>
 
-    <!-- v0.3.8.15: stream 结束但 4 类内容都为空时, 显示具体 error 信息 -->
+    <!-- v0.3.8.15: stream 结束但 4 类内容都为空时, 显示具体 error 信息
+         v0.4.2.x fix: 跟上面 error banner (line 89) 互斥, 有 errorMessage 时
+         只显示 error banner, 不重复 "⚠ {{ errorMessage }}" + "AI 没有返回内容" 两个 -->
     <div
-      v-else-if="!isStreaming && !hasContent && !hasSteps"
+      v-else-if="!isStreaming && !hasContent && !hasSteps && !errorMessage"
       class="pad-msg__empty"
     >
-      <span v-if="errorMessage">⚠ {{ errorMessage }}</span>
-      <span v-else>AI 没有返回内容</span>
+      <span>AI 没有返回内容</span>
     </div>
 
     <!-- Actions: 仅在非 streaming 且有内容时显示 -->
