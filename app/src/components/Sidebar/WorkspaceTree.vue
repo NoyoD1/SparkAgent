@@ -550,11 +550,16 @@ function removeSession(id: string) {
   /* v0.3.8.3: 选中态左边加一条 3px 圆角 accent 高亮条, 不再是纯矩形背景 */
   box-shadow: inset 3px 0 0 var(--pad-accent);
 }
-/* v0.4.1.7+2: streaming 流光 — 整 item 区域 shine 软波, peak 提到 accent-400 更明显
-   (v0.4.1.7+1 peak 用 accent-300 #d4d4d8 在 accent-soft #f4f4f5 底色上对比度太小, 截图看不出来)
-   - peak 颜色 accent-300 → accent-400 (#a1a1aa), light 模式对比度 +1 档, dark 模式 #404040 也更明显
-   - 透明 padding 15% / 85% → 10% / 90%, 波带更宽 (60% → 80% 实际宽度)
-   - 保留 1.8s 时长 + 100% 移位无缝循环, 整张 tile 始终覆盖容器 */
+/* v0.4.1.7+3: streaming 流光 — v0.4.1.7 原始"单 shine 横扫"逻辑 + repeat 修 loop 衔接
+   (v0.4.1.7 是用户说"对的"那版, 唯一问题是 loop 时 shine 出容器后容器空 50% 时间,
+    v0.4.1.7+1/+2 改用 100% 宽软渐变想修, 但软到肉眼看着像静止)
+   新方案:
+   - 回到 v0.4.1.7 的 50% 宽 gradient + 3 段硬切 (transparent → accent-300 → transparent)
+   - 加 background-repeat 让 shine 出容器后下一格 shine 已经进来, 永远有 shine 可见
+   - 收紧 gradient 4-stop 硬边: 40% 透明 → 50% accent-400 尖峰 → 60% 透明
+     (40-50% 5% 急转, 肉眼一眼看到"有东西在动", 不是软糊糊的灰)
+   - 100% 移位 = 2 个 tile 宽 (50% × 2), 跑完正好 2 个 shine 扫过去, 无空档
+   - 1.4s 时长比之前略快, 视觉更"活" */
 .pad-wstree__session.is-streaming {
   position: relative;
   overflow: hidden;
@@ -567,16 +572,16 @@ function removeSession(id: string) {
   background: linear-gradient(
     90deg,
     transparent 0%,
-    transparent 10%,
-    var(--pad-accent-300) 25%,
+    transparent 40%,
+    var(--pad-accent-300) 45%,
     var(--pad-accent-400) 50%,
-    var(--pad-accent-300) 75%,
-    transparent 90%,
+    var(--pad-accent-300) 55%,
+    transparent 60%,
     transparent 100%
   );
-  background-size: 100% 100%;
+  background-size: 50% 100%;
   background-repeat: repeat;
-  animation: pad-wstree-shimmer 1.8s linear infinite;
+  animation: pad-wstree-shimmer 1.4s linear infinite;
   pointer-events: none;
   z-index: 0;
 }
@@ -585,8 +590,8 @@ function removeSession(id: string) {
   z-index: 1;
 }
 @keyframes pad-wstree-shimmer {
-  from { background-position: 0 0; }       /* shine 波峰在容器中点 */
-  to   { background-position: -100% 0; }  /* 平移一格 (100% = 一个 tile 宽) → 数学无缝 */
+  from { background-position: 0 0; }       /* 2 个 shine 在容器内 (各居一格) */
+  to   { background-position: -100% 0; }  /* 移位 2 tile 宽, 视觉上 2 个 shine 永远在容器里 → 无 loop 衔接 */
 }
 .pad-wstree__session-dot {
   width: 6px;

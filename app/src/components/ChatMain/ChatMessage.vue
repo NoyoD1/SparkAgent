@@ -84,6 +84,13 @@ async function copyMessage() {
 
   <!-- ============== ASSISTANT MESSAGE: step 累加 + final body ============== -->
   <div v-else class="pad-msg pad-msg--assistant" :data-message-id="message.id">
+    <!-- v0.4.2+: 错误 banner (think 阶段出错也显示, 不只是空 message 状态)
+       之前 v0.3.8.15 只在 !hasContent && !hasSteps 时显示, 漏掉了 think 阶段有 steps 但 LLM 调失败的场景 -->
+    <div v-if="!isStreaming && errorMessage && !retry" class="pad-msg__error">
+      <span class="pad-msg__error-icon" aria-hidden="true">⚠</span>
+      <span class="pad-msg__error-text">{{ errorMessage }}</span>
+    </div>
+
     <!-- v0.4.1: 步骤列表 (每个 step = 1 turn, thinking + tool_calls 都在 step 内) -->
     <div v-if="hasSteps" class="pad-msg__steps">
       <StepGroup
@@ -105,13 +112,14 @@ async function copyMessage() {
       <span class="pad-msg__loading-text">{{ message.content ? '继续生成中…' : '生成中…' }}</span>
     </div>
 
-    <!-- v0.4.2+: 重试提示 (sidecar 在 5 次重试间 emit retry_start, UI 显示"重试中 1/5...") -->
+    <!-- v0.4.2+: 重试提示 (sidecar 在 5 次重试间 emit retry_start, UI 显示"重试中 1/5...")
+       加重背景色让 retry 状态更明显, 跟 think 阶段错误区分开 -->
     <div v-if="retry" class="pad-msg__retry">
       <span class="pad-msg__retry-icon" aria-hidden="true">⟳</span>
       <span class="pad-msg__retry-text">
         LLM 调用失败，正在重试
         <strong>{{ retry.attempt }}/{{ retry.maxAttempts }}</strong>
-        <span class="pad-msg__retry-hint">({{ retry.errorMessage.slice(0, 60) }}{{ retry.errorMessage.length > 60 ? '…' : '' }})</span>
+        <span class="pad-msg__retry-hint">({{ retry.errorMessage.slice(0, 80) }}{{ retry.errorMessage.length > 80 ? '…' : '' }})</span>
       </span>
     </div>
 
@@ -433,9 +441,13 @@ async function copyMessage() {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 0 2px;
+  padding: 8px 10px;
+  margin-top: 6px;
   font-size: var(--pad-fs-12);
   color: var(--pad-warning-text);
+  background: var(--pad-warning-subtle);
+  border: 1px solid var(--pad-warning-border);
+  border-radius: var(--pad-radius-md);
 }
 .pad-msg__retry-icon {
   display: inline-block;
@@ -454,6 +466,30 @@ async function copyMessage() {
   color: var(--pad-fg-tertiary);
   margin-left: 4px;
   font-size: var(--pad-fs-11);
+}
+
+/* v0.4.2+ 错误 banner (think 阶段 LLM 调失败也显示, 之前只显示在空 message 状态) */
+.pad-msg__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  margin: 6px 0;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-danger-text);
+  background: var(--pad-danger-subtle);
+  border: 1px solid var(--pad-danger-border);
+  border-radius: var(--pad-radius-md);
+  line-height: 1.5;
+  word-break: break-word;
+}
+.pad-msg__error-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.pad-msg__error-text {
+  flex: 1;
 }
 
 /* v0.3.8.9: stream 结束但 4 类内容都空时的占位提示 */
