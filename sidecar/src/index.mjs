@@ -683,6 +683,38 @@ rl.on('line', (line) => {
             currentSession = session;
             currentSessionId = sessionId;
 
+            // v0.4.2 step 1 fix: user-custom provider (config.baseUrl 模式) 不在 Pi SDK 内置 catalog,
+            //   modelRuntime._models (独立 MutableModels) 查不到. 走跟 PI_FAUX 一样的 2 步:
+            //   1. registerNativeProvider 让 modelRuntime 知道这个 provider 存在
+            //   2. setRuntimeApiKey 注入 stdin 来的 apiKey, 走 RuntimeCredentials override (不写 auth.json,
+            //      in-memory, 每次 send_prompt 都重新 set). 不写文件避免污染 production auth.json
+            //   3. refresh 触发 modelRuntime 重新算 configuredProviders, 走通 hasConfiguredAuth check
+            if (msg.apiKey) {
+              const providerId = globalConfig.baseUrl ? 'user-custom' : globalConfig.provider;
+              if (providerId === 'user-custom') {
+                const customProvider = models.getProvider('user-custom');
+                if (customProvider) {
+                  try {
+                    session.modelRuntime.registerNativeProvider(customProvider);
+                  } catch (e) {
+                    console.error('[sidecar] registerNativeProvider(user-custom) failed:', e);
+                  }
+                }
+              }
+              try {
+                await session.modelRuntime.setRuntimeApiKey(providerId, msg.apiKey);
+                console.error(`[sidecar] setRuntimeApiKey ok: ${providerId} key_len=${msg.apiKey.length}`);
+              } catch (e) {
+                console.error('[sidecar] setRuntimeApiKey failed:', e);
+              }
+              try {
+                await session.modelRuntime.refresh({ allowNetwork: false });
+              } catch (e) {
+                console.error('[sidecar] modelRuntime.refresh after setRuntimeApiKey failed:', e);
+              }
+              console.error(`[sidecar] auth state: hasConfiguredAuth(${providerId})=${session.modelRuntime.hasConfiguredAuth(providerId)}`);
+            }
+
             // v0.4.2 step 1 PI_FAUX: faux provider 不在 Pi SDK 内置 catalog, 必须显式注册.
             // registerNativeProvider 走 ModelRuntime._nativeExtensionProviders + recomposeProvider,
             // 让 MutableModels 知道 faux provider, hasConfiguredAuth('faux') 走通.
