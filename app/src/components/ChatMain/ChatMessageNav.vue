@@ -65,7 +65,10 @@ function setTickRef(el: HTMLButtonElement | null, idx: number) {
   if (el) tickRefs.value[idx] = el;
 }
 
-// v0.3.8.2: 不用 e.currentTarget (会被 GC 置 null), 用 tickRefs 直接拿 DOM
+// v0.5.3 fix: 用户误以为 popover 是要删的"小 tips", 实际那个小 tips 是
+//   浏览器原生的 <button :title="第 N 轮"> 触发的系统 tooltip.
+//   真要删的是 button title 属性, 不是自己写的 popover (内容预览卡).
+//   popover 恢复 + 保留 hover lens 视觉 + click 跳转.
 function onHoverEnter(idx: number) {
   if (leaveTimer) {
     clearTimeout(leaveTimer);
@@ -119,14 +122,9 @@ function positionPopover(tickEl: HTMLElement) {
   }
   left = Math.max(MARGIN, left);
 
-  // ===== 垂直: 视口自适应 =====
-  // v0.5.2: 用 `top` 或 `bottom` 锚定, 不再估算 popover 高度.
-  //   上一版 (v0.5.1) 用估算 POPOVER_MAX_H=280 算 top, 但短内容实际只有 ~120px,
-  //   "above tick" case 算出来 top 偏低, popover 浮在 tick 上方太远.
-  //   修法: "above tick" 用 `bottom: vh - rect.top + MARGIN` 让 popover 底边锚定在
-  //   `rect.top - MARGIN`, 高度由内容 (CSS max-height 280) 自动决定.
-  //   "below tick" 用 `top: rect.bottom + MARGIN` 让 popover 顶边锚定在 tick 下方.
-  //   浏览器自然处理高度, 不依赖 nextTick 测量, 不依赖估算.
+  // ===== 垂直: 视口自适应 (D158 v0.5.2 bottom anchor 修法) =====
+  //   "above tick" 用 `bottom` 代替 `top`, 配合 `top: auto` 覆盖 CSS 默认 top: -9999px
+  //   高度由内容 (CSS max-height 280) 自动决定, 不依赖 nextTick 测量
   const tickCenter = rect.top + rect.height / 2;
   const style: Record<string, string> = {
     position: 'fixed',
@@ -135,12 +133,8 @@ function positionPopover(tickEl: HTMLElement) {
     zIndex: '99999',
   };
   if (tickCenter < vh / 2) {
-    // tick 在视口上半 → popover 顶部在 tick 底部 + MARGIN
     style.top = `${rect.bottom + MARGIN}px`;
   } else {
-    // tick 在视口下半 → popover 底边在 tick 顶部 - MARGIN
-    //   关键: 这里用 `bottom` (距离视口底部) 代替 `top`, 配合 `top: auto` 覆盖
-    //   CSS 默认的 `top: -9999px` (避免 popover 高度被这两个值强行撑成 vh 大小)
     style.bottom = `${vh - rect.top + MARGIN}px`;
     style.top = 'auto';
   }
@@ -352,7 +346,7 @@ const visible = computed(() => props.turns.length >= 1);
       :ref="(el) => setTickRef(el as HTMLButtonElement | null, idx)"
       type="button"
       class="pad-msgnav__row"
-      :title="`第 ${idx + 1} 轮`"
+      :aria-label="`第 ${idx + 1} 轮`"
       @mouseenter="onHoverEnter(idx)"
       @mouseleave="onHoverLeave"
       @click="onClick(turn, idx)"
@@ -473,16 +467,13 @@ const visible = computed(() => props.turns.length >= 1);
   font-family: var(--pad-font-sans);
   pointer-events: auto;
   animation: pad-msgnav-popover-in 0.15s var(--pad-ease-out-soft, ease-out);
-  /* v0.4.2.x 兜底 (issue "标尺 tooltip 第一次错位"): 默认 position: fixed + 极远 top/left,
-   * 万一 inline style 没设或设晚, 元素不会掉到 body 末尾 (static 位置 = 视觉"底部").
-   * 配合 v-if="... && popoverStyle.top" 拆条件, 正常路径 220ms 内根本不渲染.
-   * 这条 CSS 是异常路径兜底 (e.g. 极端 race: popoverStyle 计算中 element 已经 mount). */
+  /* v0.4.2.x 兜底: 默认 position: fixed + 极远 top/left,
+   * 万一 inline style 没设或设晚, 元素不会掉到 body 末尾 (static 位置 = 视觉"底部"). */
   position: fixed;
   top: -9999px;
   left: -9999px;
 }
 @keyframes pad-msgnav-popover-in {
-  /* v0.4.2.x fix: popover 现在用 top 直接定位 (锚点在 tick 上下方), 不再 translateY(-50%) */
   from { opacity: 0; transform: translateX(-4px); }
   to { opacity: 1; transform: translateX(0); }
 }

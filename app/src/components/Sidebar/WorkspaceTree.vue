@@ -594,16 +594,22 @@ function removeSession(id: string) {
   z-index: 1;
 }
 @keyframes pad-wstree-shimmer {
-  /* 数学验证 (image 200% container 宽, shine 30-70% of image = 60% 至 140% of container):
-     pos=-150% 0: image 0% 在 container -150%, shine (50% of image) 在 container -150% + 100% = -50%, 
-                   加上 shine 半宽 40% (image 20% = 40% container) → shine 范围 [-90%, -10%]
-                   全部在 container 左外 → container 透明 ✅
-     pos=50% 0: image 0% 在 container 50%, shine 在 container 50% + 100% = 150%,
-                加上 shine 半宽 40% → shine 范围 [110%, 190%]
-                全部在 container 右外 → container 透明 ✅
-     0% 和 100% 都是 container 透明, loop 回去无 snap. */
-  0%   { background-position: -150% 0; }
-  100% { background-position: 50% 0; }
+  /* v0.5.3 方向修正 — X 减 200% = image 向右移 = shine 也向右移 = **左→右 sweep**
+   * (v0.5.2 写的 0% X=-150% → 100% X=+50% 是 X 增, image 向左移, shine 也左移 → 实际是右→左,
+   *  跟用户期望相反)
+
+   * CSS 数学 (image 宽 W=2×container, 50% image 处是 shine 中心):
+   *   P (image 0% 标记在 container 位置) = -X
+   *   shine 视觉位置 = P + W/2 = -X + 1
+   *   X 增大 → P 减小 (向左) → shine 也向左 = **右→左**
+   *   X 减小 → P 增大 (向右) → shine 也向右 = **左→右** ✅
+
+   * v0.5.3 终值 (对称 0% 100% 都 shine 在 container 外 = 真无缝 loop):
+   *   pos=150% 0 (0%): P = -150%, shine = -50% (container 左外) → 容器透明
+   *   pos=-50% 0 (100%): P = +50%, shine = +150% (container 右外) → 容器透明
+   *   0% 和 100% 都不可见, 循环无 snap, shine 容器内可见时间 ≈ 50% (剩余 50% 容器外补间) */
+  0%   { background-position: 150% 0; }
+  100% { background-position: -50% 0; }
 }
 .pad-wstree__session-dot {
   width: 6px;
