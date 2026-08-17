@@ -75,10 +75,23 @@ export type ServerToClient =
   | {
       type: 'message_update';
       sessionId: string;
-      /** Pi SDK AgentEvent.message_update: { message: AgentMessage; assistantMessageEvent: AssistantMessageEvent } */
-      message: AgentMessageLite;
-      /** v0.4.3: cumulative usage (跟 message 嵌套的 usage 一样, 但 v0.5.0 顶层单独 emit 方便 FE 拿) */
-      usage?: AgentMessageLite['usage'];
+      /** Pi SDK 0.84.2 JsonAgentSessionEvent.message_update:
+       *  json-event.ts: ToJsonEvent 转换显式把 message_update 顶层加上 `usage`,
+       *  同时剥离 assistantMessageEvent.partial (cumulative snapshot 由 message_start 提
+       *  供, deltas build it, message_end 提供 final authoritative message).
+       *  最终 wire schema: { type, usage, assistantMessageEvent } — **没有顶层 message**.
+       *  v0.4.3.2 之前我 v0.5.0 commit 7ef5b8b 写顶层 `usage?` optional, chat store 读
+       *  event.usage 永远 undefined → 0 0 0 0; 我 v0.4.3.2 修成 event.message?.usage 仍
+       *  是错的 (message_update 根本没顶层 message 字段). 正确读法: event.usage (顶层).
+       *  see: pi-sdk/packages/coding-agent/src/modes/json-event.ts:6-15, 31-45
+       */
+      usage: {
+        input: number;
+        output: number;
+        cacheRead: number;
+        cacheWrite: number;
+        cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+      };
       /**
        * 嵌套 streaming event. 跟 v0.4.x 直接 delta 字段不一样.
        * - { type: 'text_delta', delta: string }        text 流式
@@ -96,8 +109,10 @@ export type ServerToClient =
       type: 'message_end';
       sessionId: string;
       message: AgentMessageLite;
-      /** v0.4.3: final cumulative usage (跟 message.usage 一样, 顶层 emit 方便 FE 拿) */
-      usage?: AgentMessageLite['usage'];
+      /** Pi SDK 0.84.2 json-event.ts:32-34:
+       *  `if (event.type !== 'message_update') return event` — message_end 保持原 AgentSessionEvent
+       *  schema: { type, message: AgentMessage }. message.usage 是 AssistantMessage 必填字段
+       *  (types.ts:415 `usage: Usage;`), FE 读 event.message.usage. */
     }
   // v0.5.0 tool_execution_* (Pi SDK 用 tool_execution_* 不是 v0.4.x 的 tool_*)
   | {

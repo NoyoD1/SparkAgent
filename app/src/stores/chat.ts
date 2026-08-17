@@ -410,17 +410,22 @@ export const useChatStore = defineStore('chat', () => {
           };
           switch (event.type) {
             case 'message_update':
-              // v0.4.3: 跟踪 usage (Pi SDK 0.84.2 message_update 顶层带 usage, 跟 message.usage 一样)
-              //   每次 LLM 增量 update 都会带最新 cumulative usage, 覆盖到 lastUsage
-              //   顺便算 contextTokens (input + cacheRead = LLM 实际看到的 prompt 大小)
+              // v0.4.3.2.4 修正 (D182 修正版): Pi SDK 0.84.2 JsonAgentSessionEvent.message_update
+              //   顶层有 `usage` (json-event.ts:6-15 + 31-45 显式构造), **没有顶层 message**.
+              //   v0.4.3.2 我之前 v0.5.0 commit 7ef5b8b 写顶层 usage? optional 是错的 (optional
+              //   让 chat store 永远不读), 修成 event.message?.usage 仍错 (message_update RPC
+              //   事件根本没顶层 message 字段). 正确读法: event.usage (顶层, 必填).
+              //   message_start 提供 initial message, deltas build it, message_end 提供 final
+              //   authoritative message — 所以 message_update 不带 message 是 by design.
               if (event.usage) {
+                const u = event.usage;
                 lastUsageBySession.value = {
                   ...lastUsageBySession.value,
-                  [sessionId]: event.usage,
+                  [sessionId]: u,
                 };
                 contextTokensBySession.value = {
                   ...contextTokensBySession.value,
-                  [sessionId]: event.usage.input + event.usage.cacheRead,
+                  [sessionId]: u.input + u.cacheRead,
                 };
               }
               // v0.5.0: event.assistantMessageEvent 嵌套 + .type 标 kind (text_delta / thinking_delta / tool_call_delta)
@@ -472,10 +477,12 @@ export const useChatStore = defineStore('chat', () => {
               }
               break;
             case 'message_end':
-              // v0.4.3: message_end 时 Pi SDK 给最终 usage, 写到 assistant message.usage (持久化到 store)
-              //   后续切别的 session / 切回这个 session 都能从 message.usage 读回
-              if (event.usage && idx >= 0) {
-                const finalUsage = event.usage;
+              // v0.4.3.2.4 确认: message_end 保持原 AgentSessionEvent schema (json-event.ts:32-34),
+              //   顶层**无 usage**, 用 event.message.usage (AssistantMessage 必填字段).
+              //   v0.4.3.2 修对了, 不动.
+              //   写到 assistant message.usage (持久化到 store), 切别的 session / 切回能读回
+              if (event.message?.usage && idx >= 0) {
+                const finalUsage = event.message.usage;
                 lastUsageBySession.value = { ...lastUsageBySession.value, [sessionId]: finalUsage };
                 contextTokensBySession.value = {
                   ...contextTokensBySession.value,
