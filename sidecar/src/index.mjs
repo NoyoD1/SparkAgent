@@ -275,39 +275,54 @@ function buildModels(config) {
   }
 
   if (config.baseUrl) {
-    const customApiKey = config.apiKey || '';
-    models.setProvider(createProvider({
-      id: 'user-custom',
-      name: config.providerLabel || 'Custom',
-      baseUrl: config.baseUrl,
-      auth: {
-        apiKey: {
-          name: 'Custom OpenAI-compatible API key',
-          resolve: async () => ({
-            auth: { apiKey: customApiKey },
-            source: 'sidecar config',
-          }),
-        },
-      },
-      models: [{
-        id: config.model,
-        provider: 'user-custom',
-        name: config.model,
-        api: 'openai-completions',
-        baseUrl: config.baseUrl,
-        input: ['text'],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 128000,
-        maxTokens: 8192,
-      }],
-      api: {
-        stream: openaiCompletionsStream,
-        streamSimple: openaiCompletionsStreamSimple,
-      },
-    }));
+    models.setProvider(buildUserCustomProvider(config));
   }
 
   return models;
+}
+
+/**
+ * v0.4.2 step 1 fix: 抽 buildUserCustomProvider 出来, buildModels() + case 'config' 都用.
+ *
+ * 历史: v0.4.1 走 `new Agent({streamFn: models.streamSimple.bind(models)})`,
+ *   user-custom 走 sidecar 自己 `MutableModels.setProvider`, hasConfiguredAuth 走通.
+ * v0.4.2 走 `createAgentSession` → `modelRuntime.streamSimple`, 走 modelRuntime 自己的
+ *   `MutableModels`, **不知道** user-custom (因为只 setProvider 到 sidecar MutableModels),
+ *   抛 "No API key found for user-custom".
+ * 修法: case 'config' 调 `session.modelRuntime.registerNativeProvider(userCustomProvider)`,
+ *   让 modelRuntime 知道 user-custom. (PI_FAUX 模式同款修法, 走 registerNativeProvider.)
+ */
+function buildUserCustomProvider(config) {
+  const customApiKey = config.apiKey || '';
+  return createProvider({
+    id: 'user-custom',
+    name: config.providerLabel || 'Custom',
+    baseUrl: config.baseUrl,
+    auth: {
+      apiKey: {
+        name: 'Custom OpenAI-compatible API key',
+        resolve: async () => ({
+          auth: { apiKey: customApiKey },
+          source: 'sidecar config',
+        }),
+      },
+    },
+    models: [{
+      id: config.model,
+      provider: 'user-custom',
+      name: config.model,
+      api: 'openai-completions',
+      baseUrl: config.baseUrl,
+      input: ['text'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 8192,
+    }],
+    api: {
+      stream: openaiCompletionsStream,
+      streamSimple: openaiCompletionsStreamSimple,
+    },
+  });
 }
 
 /**
@@ -679,6 +694,19 @@ rl.on('line', (line) => {
                 console.error(`[sidecar] PI_FAUX: registered faux provider, hasConfiguredAuth(faux)=${session.modelRuntime.hasConfiguredAuth('faux')}`);
               } catch (e) {
                 console.error('[sidecar] PI_FAUX registerNativeProvider failed:', e);
+              }
+            }
+            // v0.4.2 step 1 fix: user-custom provider (config.baseUrl 走 OpenAI-compatible) 同理需要 register
+            //   到 modelRuntime, 否则 modelRuntime 不知道 user-custom, 抛 "No API key found for user-custom".
+            //   跟 PI_FAUX 修法一致, registerNativeProvider 走 ModelRuntime._nativeExtensionProviders.
+            if (globalConfig.baseUrl) {
+              try {
+                const userCustomProvider = buildUserCustomProvider(globalConfig);
+                session.modelRuntime.registerNativeProvider(userCustomProvider);
+                await session.modelRuntime.refresh({ allowNetwork: false });
+                console.error(`[sidecar] user-custom: registered provider, hasConfiguredAuth(user-custom)=${session.modelRuntime.hasConfiguredAuth('user-custom')}`);
+              } catch (e) {
+                console.error('[sidecar] user-custom registerNativeProvider failed:', e);
               }
             }
 
