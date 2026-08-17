@@ -238,6 +238,7 @@ function jumpToMessage(messageId: string) {
               :model-name="activeModelName"
               :is-streaming="isMessageStreaming(idx)"
               :error-message="isMessageStreaming(idx) ? null : chatStore.getError(activeSession?.id)"
+              :retry="isMessageStreaming(idx) ? (chatStore.retryBySession?.[activeSession?.id || ''] ?? null) : null"
             />
           </div>
         </div>

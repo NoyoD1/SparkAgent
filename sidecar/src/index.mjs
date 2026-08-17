@@ -440,6 +440,26 @@ function mapAgentEventToIPC(event, sessionId) {
  * @param {string} userContent
  * @param {string} sessionId
  */
+/**
+ * v0.4.2+: LLM 调用失败自动重试, 最大 5 次, 指数退避 1s/2s/4s/8s/16s.
+ * 流程:
+ *  1. agent.prompt() 第一次调用
+ *  2. 失败 → 拦截 error 事件, 暂存 lastError, 设置 shouldRetry
+ *  3. emit retry_start 给 FE (UI 显示"重试中 1/5...")
+ *  4. 等 delayMs (exponential backoff, 用户 abort 立即退出)
+ *  5. pop 失败 assistant message, 调 agent.continue() (不重复加 user message)
+ *  6. 重复 2-5 直到成功 or 5 次用完
+ *  7. 5 次都失败 → emit 最终 error 给 FE, finishUp
+ *
+ * 设计要点:
+ *  - 不修改 Agent class (Pi SDK 内部), 走 SDK 公开的 continue() API
+ *  - 拦截 error / agent_end 事件期间不 forward 给 FE, 保持 streaming 状态
+ *  - abort 支持: retry sleep 期间检查 ac.signal, agent.continue() 不阻塞 abort (新 runPrompt 进来 abort 旧的 ac)
+ *  - 对 429 也重试 (用户明确要求最大 5 次, 不区分错误类型)
+ */
+const MAX_RETRIES = 5;
+const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];  // 5 次退避
+
 async function runPrompt(config, userContent, sessionId) {
   // Abort 旧的 (如果有)
   if (currentAbortController) {
@@ -523,12 +543,40 @@ async function runPrompt(config, userContent, sessionId) {
   // 启动 stream hang watchdog (30s 没新 event 强制 finishUp, 防商汤 stream 不 emit done)
   startHangWatchdog();
 
+  // v0.4.2+ 重试状态机
+  let currentAttempt = 0;  // 0 = 第一次 (没重试), 1+ = 第 N 次重试
+  let lastError = null;
+  let shouldRetry = false;
+  let retryEndedCleanly = false;  // 标记最后是不是成功 (没错误走完)
+
   // 订阅 Agent 事件 → 映射 IPC
   const unsubscribe = agent.subscribe((event) => {
     try {
       resetHangWatchdog();  // v0.4.1.4+ 任何 event 都 reset watchdog
+
+      // v0.4.2+ error 拦截: 如果还在 retry 范围内, 暂存错误不发给 FE
+      if (event.type === 'error') {
+        const assistantMessage = event.error;
+        const errorMessage = assistantMessage?.errorMessage
+          || event.reason
+          || 'Unknown error from Pi SDK';
+        lastError = sanitizeErrBody(String(errorMessage));
+        // 当前已经重试了 N 次, 还剩 (MAX_RETRIES - currentAttempt) 次可以重试
+        shouldRetry = currentAttempt < MAX_RETRIES;
+        console.error(`[sidecar] error intercepted (attempt ${currentAttempt + 1}, maxRetries=${MAX_RETRIES}, willRetry=${shouldRetry}): ${lastError}`);
+        return;  // 不 forward 给 FE, 等 retry loop 决定
+      }
+
+      // agent_end 在 retry 期间也不 forward (FE 端 streaming 状态保持)
+      if (event.type === 'agent_end' && shouldRetry) {
+        console.error('[sidecar] agent_end suppressed (retrying)');
+        return;
+      }
+
+      // 正常 forward + 终态处理
       mapAgentEventToIPC(event, sessionId);
       if (event.type === 'agent_end' || event.type === 'error') {
+        if (event.type === 'agent_end') retryEndedCleanly = true;
         finishUp();
       }
     } catch (e) {
@@ -545,24 +593,112 @@ async function runPrompt(config, userContent, sessionId) {
     await agent.prompt(userContent);
   } catch (e) {
     console.error('[sidecar] agent.prompt threw:', e);
+    if (!lastError) {
+      lastError = sanitizeErrBody(e instanceof Error ? e.message : String(e));
+      shouldRetry = currentAttempt < MAX_RETRIES;
+    }
+  }
+
+  // v0.4.2+ retry loop: 5 次重试, exponential backoff
+  while (shouldRetry && currentAttempt < MAX_RETRIES && !ac.signal.aborted) {
+    currentAttempt++;
+    const delayMs = RETRY_DELAYS_MS[currentAttempt - 1];
+
+    // pop 失败 assistant message, 让 agent.continue() 重试最后那条 user message
+    if (agent.state.messages.length > 0) {
+      const lastMsg = agent.state.messages[agent.state.messages.length - 1];
+      if (lastMsg.role === 'assistant' && (lastMsg.stopReason === 'error' || lastMsg.stopReason === 'aborted')) {
+        agent.state.messages.pop();
+        console.error(`[sidecar] popped failed assistant message, retry ${currentAttempt}/${MAX_RETRIES}`);
+      }
+    }
+
+    // 通知 FE: 准备重试 (UI 显示"重试中 1/5...")
+    send({
+      type: 'retry_start',
+      attempt: currentAttempt,
+      maxAttempts: MAX_RETRIES,
+      delayMs,
+      errorMessage: lastError,
+      sessionId,
+    });
+
+    // 等 delayMs, abort 时立即跳出
+    try {
+      await new Promise((resolve, reject) => {
+        if (ac.signal.aborted) {
+          reject(new Error('Aborted'));
+          return;
+        }
+        const timer = setTimeout(resolve, delayMs);
+        ac.signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('Aborted'));
+        }, { once: true });
+      });
+    } catch (e) {
+      console.error('[sidecar] retry aborted during delay');
+      shouldRetry = false;
+      break;
+    }
+
+    if (ac.signal.aborted) {
+      shouldRetry = false;
+      break;
+    }
+
+    shouldRetry = false;
+    lastError = null;
+
+    // 用 agent.continue() 重试 (不重复加 user message, 走 SDK 公开 API)
+    try {
+      await agent.continue();
+    } catch (e) {
+      console.error(`[sidecar] agent.continue threw (retry ${currentAttempt}/${MAX_RETRIES}):`, e);
+      lastError = sanitizeErrBody(e instanceof Error ? e.message : String(e));
+      shouldRetry = currentAttempt < MAX_RETRIES;
+    }
+  }
+
+  // 走到这里:
+  //  - retry 成功 (retryEndedCleanly=true): agent_end 已通过 mapAgentEventToIPC + finishUp 发出
+  //  - 5 次都失败: lastError 有值, 还没发给 FE
+  //  - 用户 abort: lastError 仍可能是上次的 error, 也还没发给 FE
+  if (lastError && !retryEndedCleanly) {
+    send({
+      type: 'retry_end',
+      success: false,
+      attempts: currentAttempt,
+      finalError: lastError,
+      aborted: ac.signal.aborted,
+      sessionId,
+    });
     if (!agentEndSent) {
-      send({ type: 'error', message: sanitizeErrBody(e instanceof Error ? e.message : String(e)), sessionId });
+      send({ type: 'error', message: lastError, sessionId });
       finishUp();
     }
-  } finally {
-    try { unsubscribe?.(); } catch {}
-    // v0.4.1.4+ 停 watchdog, 清理 currentFinishUp 避免下一次 runPrompt 误用
-    stopHangWatchdog();
-    currentFinishUp = null;
-    if (currentAbortController === ac) currentAbortController = null;
-    if (currentAgent === agent) currentAgent = null;
-    if (currentSessionId === sessionId) currentSessionId = null;
-    // v0.4.1+ abort 时清掉所有 pending permission request, 避免 FE 弹窗卡死等永远不来的 response
-    for (const [toolCallId, { resolve }] of pendingPermissionRequests) {
-      resolve({ block: true, reason: 'Aborted' });
-    }
-    pendingPermissionRequests.clear();
+  } else if (retryEndedCleanly) {
+    // emit retry_end (success) 跟 agent_end 配对, FE 端可以据此清重试指示
+    send({
+      type: 'retry_end',
+      success: true,
+      attempts: currentAttempt,
+      sessionId,
+    });
   }
+
+  try { unsubscribe?.(); } catch {}
+  // v0.4.1.4+ 停 watchdog, 清理 currentFinishUp 避免下一次 runPrompt 误用
+  stopHangWatchdog();
+  currentFinishUp = null;
+  if (currentAbortController === ac) currentAbortController = null;
+  if (currentAgent === agent) currentAgent = null;
+  if (currentSessionId === sessionId) currentSessionId = null;
+  // v0.4.1+ abort 时清掉所有 pending permission request, 避免 FE 弹窗卡死等永远不来的 response
+  for (const [toolCallId, { resolve }] of pendingPermissionRequests) {
+    resolve({ block: true, reason: 'Aborted' });
+  }
+  pendingPermissionRequests.clear();
 }
 
 /**

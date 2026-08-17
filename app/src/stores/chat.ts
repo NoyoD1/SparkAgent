@@ -123,8 +123,11 @@ export const useChatStore = defineStore('chat', () => {
   // ===== Streaming state =====
   const streamingBySession = ref<Record<string, boolean>>({});
   const errorBySession = ref<Record<string, string | null>>({});
+  // v0.4.2+ LLM 错误重试: retryBySession 记录当前 retry 状态 (attempt 进度 + 上次错误)
+  // FE UI 可以根据这个显示"重试中 1/5..."提示
+  const retryBySession = ref<Record<string, { attempt: number; maxAttempts: number; errorMessage: string } | null>>({});
 
-  // ===== Actions =====
+  // ===== Actions ====
 
   function appendUserMessage(sessionId: string, content: string) {
     const d = getSessionData(sessionId);
@@ -365,6 +368,8 @@ export const useChatStore = defineStore('chat', () => {
                 }
               }
               streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
+              // v0.4.2+ 清 retry 状态 (agent_end 正常结束)
+              retryBySession.value = { ...retryBySession.value, [sessionId]: null };
               chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
               console.log(
                 '[chat] agent_end: assistant.content.length=',
@@ -380,10 +385,31 @@ export const useChatStore = defineStore('chat', () => {
             case 'error':
               errorBySession.value = { ...errorBySession.value, [sessionId]: event.message };
               streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
+              // v0.4.2+ 清 retry 状态 (5 次重试都失败, 终态错误)
+              retryBySession.value = { ...retryBySession.value, [sessionId]: null };
               console.error('[chat] error event:', event.message);
               off();
               return;
           }
+          break;
+        // v0.4.2+ LLM 重试: sidecar 在 5 次重试间 emit retry_start / retry_end
+        // 关键: retry 期间 sidecar 不发 error 也不发 agent_end, 所以 streaming 状态保留,
+        // is-streaming 类的 shimmer 不会断. retryBySession 让 UI 显示"重试中 1/5...".
+        case 'retry_start':
+          retryBySession.value = {
+            ...retryBySession.value,
+            [sessionId]: {
+              attempt: event.attempt,
+              maxAttempts: event.maxAttempts,
+              errorMessage: event.errorMessage,
+            },
+          };
+          console.log(`[chat] retry_start: ${event.attempt}/${event.maxAttempts}, delayMs=${event.delayMs}, err=${event.errorMessage.slice(0, 80)}`);
+          break;
+        case 'retry_end':
+          // 清理 retry 状态 (success 或 final failure 都已经发过)
+          retryBySession.value = { ...retryBySession.value, [sessionId]: null };
+          console.log(`[chat] retry_end: success=${event.success}, attempts=${event.attempts}${event.finalError ? ', err=' + event.finalError.slice(0, 80) : ''}`);
           break;
         case 'permission_request': {
           // v0.4.1+ tool permission: sidecar 问 "LLM 想跑 X tool, 允许吗"
@@ -493,6 +519,7 @@ export const useChatStore = defineStore('chat', () => {
     chatData,
     streamingBySession,
     errorBySession,
+    retryBySession, // v0.4.2+ LLM 重试状态 (UI 显示"重试中 1/5...")
     isStreamingSession: isStreaming,
     getSessionData,
     getMessages,

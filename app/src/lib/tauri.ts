@@ -37,7 +37,10 @@ export type ServerToClient =
   | { type: 'agent_end'; sessionId: string }
   | { type: 'error'; message: string; sessionId: string }
   // v0.4.1+ tool permission: sidecar 问 FE "LLM 想跑 X tool, 允许吗"
-  | { type: 'permission_request'; toolCallId: string; toolName: string; args: Record<string, unknown>; sessionId: string };
+  | { type: 'permission_request'; toolCallId: string; toolName: string; args: Record<string, unknown>; sessionId: string }
+  // v0.4.2+ LLM 错误自动重试: 5 次指数退避 (1s/2s/4s/8s/16s), sidecar 在 attempt 间隔 emit retry_start
+  | { type: 'retry_start'; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string; sessionId: string }
+  | { type: 'retry_end'; success: boolean; attempts: number; finalError?: string; aborted?: boolean; sessionId: string };
 
 type Handler = (event: ServerToClient) => void;
 

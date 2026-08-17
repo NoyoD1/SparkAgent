@@ -30,6 +30,8 @@ interface Props {
   isStreaming?: boolean;
   /** v0.3.8.15: 错误信息 (sidecar 发 error event 时显示具体内容) */
   errorMessage?: string | null;
+  /** v0.4.2+ LLM 重试状态 (sidecar retry_start 期间显示"重试中 1/5...") */
+  retry?: { attempt: number; maxAttempts: number; errorMessage: string } | null;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -37,6 +39,7 @@ const props = withDefaults(defineProps<Props>(), {
   modelName: '',
   isStreaming: false,
   errorMessage: null,
+  retry: null,
   steps: () => [],
 });
 
@@ -100,6 +103,16 @@ async function copyMessage() {
       <span class="pad-msg__loading-dot"></span>
       <span class="pad-msg__loading-dot"></span>
       <span class="pad-msg__loading-text">{{ message.content ? '继续生成中…' : '生成中…' }}</span>
+    </div>
+
+    <!-- v0.4.2+: 重试提示 (sidecar 在 5 次重试间 emit retry_start, UI 显示"重试中 1/5...") -->
+    <div v-if="retry" class="pad-msg__retry">
+      <span class="pad-msg__retry-icon" aria-hidden="true">⟳</span>
+      <span class="pad-msg__retry-text">
+        LLM 调用失败，正在重试
+        <strong>{{ retry.attempt }}/{{ retry.maxAttempts }}</strong>
+        <span class="pad-msg__retry-hint">({{ retry.errorMessage.slice(0, 60) }}{{ retry.errorMessage.length > 60 ? '…' : '' }})</span>
+      </span>
     </div>
 
     <!-- markdown body (final reply, 渲染 lastStep.stepText) -->
@@ -414,6 +427,34 @@ async function copyMessage() {
 .pad-msg__loading-dot:nth-child(2) { animation-delay: 0.15s; }
 .pad-msg__loading-dot:nth-child(3) { animation-delay: 0.3s; }
 .pad-msg__loading-text { margin-left: 4px; }
+
+/* v0.4.2+ LLM 重试提示 (跟 loading 一起出现, 在 loading 下面一行) */
+.pad-msg__retry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 2px;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-warning-text);
+}
+.pad-msg__retry-icon {
+  display: inline-block;
+  font-size: 14px;
+  animation: pad-msg-retry-spin 1.2s linear infinite;
+  /* 跟 loading dots 共用 bounce keyframe 也行, 但 spin 更直观 */
+}
+@keyframes pad-msg-retry-spin {
+  to { transform: rotate(360deg); }
+}
+.pad-msg__retry-text strong {
+  font-weight: var(--pad-fw-semibold);
+  margin: 0 2px;
+}
+.pad-msg__retry-hint {
+  color: var(--pad-fg-tertiary);
+  margin-left: 4px;
+  font-size: var(--pad-fs-11);
+}
 
 /* v0.3.8.9: stream 结束但 4 类内容都空时的占位提示 */
 .pad-msg__empty {
