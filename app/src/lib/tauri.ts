@@ -404,6 +404,59 @@ class PiTauriClient {
     })) as { skills: TauriSkillInfo[]; diagnostics: TauriSkillDiagnostic[] };
   }
 
+  // ====== v0.4.6 Project rules / 自定义指令 (跟 Claude 桌面端 "自定义指令" 模式) ======
+  // 持久化到 <workspace>/AGENTS.md (per-workspace) + <agentDir>/AGENTS.md (global).
+  // Pi SDK 0.84.2 DefaultResourceLoader 自动 load AGENTS.md (resource-loader.ts:71),
+  //   sidecar 启动时把 paths 传 appendSystemPromptSource 注入 system prompt.
+  // 跟 write_skill_file / list_skills 同 pattern: Tauri 2 invoke 必须 { args } 包裹.
+  async readCustomInstructions(args: {
+    scope: 'workspace' | 'global';
+    workspacePath?: string | null;
+    agentDir?: string | null;
+  }): Promise<{
+    filePath: string | null;
+    content: string;
+    modifiedAt: string | null;
+  }> {
+    return (await invoke('read_custom_instructions', {
+      args: {
+        scope: args.scope,
+        workspacePath: args.workspacePath ?? null,
+        agentDir: args.agentDir ?? null,
+      },
+    })) as { filePath: string | null; content: string; modifiedAt: string | null };
+  }
+
+  async writeCustomInstructions(args: {
+    scope: 'workspace' | 'global';
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    content: string;
+  }): Promise<string> {
+    return (await invoke('write_custom_instructions', {
+      args: {
+        scope: args.scope,
+        workspacePath: args.workspacePath ?? null,
+        agentDir: args.agentDir ?? null,
+        content: args.content,
+      },
+    })) as string;
+  }
+
+  async deleteCustomInstructions(args: {
+    scope: 'workspace' | 'global';
+    workspacePath?: string | null;
+    agentDir?: string | null;
+  }): Promise<boolean> {
+    return (await invoke('delete_custom_instructions', {
+      args: {
+        scope: args.scope,
+        workspacePath: args.workspacePath ?? null,
+        agentDir: args.agentDir ?? null,
+      },
+    })) as boolean;
+  }
+
   async migrateFromEnv(envPath?: string): Promise<{
     migrated: Array<{ envVar: string; providerId: string; preview: string }>;
     skipped: string[];

@@ -20,6 +20,7 @@ import {
   Plug,             // 扩展 / MCP
   Sparkles,         // Skills (v0.4.4)
   Terminal,         // Slash (v0.4.5)
+  FileText,         // 自定义指令 (v0.4.6)
   Info,             // 关于
   ArrowLeft,        // 关闭
   RotateCcw,        // 重置
@@ -33,6 +34,7 @@ import ShortcutsTab from './tabs/ShortcutsTab.vue';
 import ExtensionsTab from './tabs/ExtensionsTab.vue';
 import SkillsTab from './tabs/SkillsTab.vue';
 import SlashTab from './tabs/SlashTab.vue';
+import CustomInstructionsTab from './tabs/CustomInstructionsTab.vue';
 import AboutTab from './tabs/AboutTab.vue';
 
 interface TabDef {
@@ -52,6 +54,7 @@ const TABS: TabDef[] = [
   { id: 'extensions', label: '扩展 / MCP', icon: markRaw(Plug),      component: markRaw(ExtensionsTab), group: 'Agent 能力', implemented: false },
   { id: 'skills',     label: 'Skills',  icon: markRaw(Sparkles),   component: markRaw(SkillsTab),     group: 'Agent 能力', implemented: true  },
   { id: 'slash',      label: 'Slash',   icon: markRaw(Terminal),    component: markRaw(SlashTab),      group: 'Agent 能力', implemented: true  },
+  { id: 'instructions', label: '自定义指令', icon: markRaw(FileText), component: markRaw(CustomInstructionsTab), group: 'Agent 能力', implemented: true  },
   { id: 'about',      label: '关于',     icon: markRaw(Info),       component: markRaw(AboutTab),      group: '数据与统计', implemented: true  },
 ];
 

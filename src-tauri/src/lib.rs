@@ -832,6 +832,114 @@ async fn list_skills(args: ListSkillsArgs) -> Result<ListSkillsResponse, String>
     })
 }
 
+// ====== v0.4.6 Project rules / 自定义指令 (跟 Claude 桌面端 "自定义指令" 模式) ======
+// 持久化到 <workspace>/AGENTS.md (per-workspace) + <agentDir>/AGENTS.md (global),
+//   Pi SDK 0.84.2 DefaultResourceLoader 自动 load 这两个文件 (resource-loader.ts:71),
+//   sidecar 启动时把 paths 传 appendSystemPromptSource → Pi SDK load 内容追加到 system prompt.
+// 跟 v0.4.4 Skills 一样 pattern (workspace scope / global scope, std::fs 读写).
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomInstructionsArgs {
+    /// "workspace" → <ws>/AGENTS.md, "global" → <agentDir>/AGENTS.md
+    scope: String,
+    /// workspace scope 必填
+    workspace_path: Option<String>,
+    /// global scope 不需要 (Rust 端 fallback 算, 跟 write_skill_file 一样)
+    agent_dir: Option<String>,
+    /// write 用: 完整文件内容 (markdown). read/delete 时不传
+    #[serde(default)]
+    content: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomInstructionsContent {
+    /// 文件绝对路径 (或 None 如果文件不存在)
+    file_path: Option<String>,
+    /// 文件内容 (或空 string 如果不存在)
+    content: String,
+    /// 文件 mtime (或 None 如果不存在)
+    modified_at: Option<String>,
+}
+
+fn resolve_custom_instructions_path(scope: &str, workspace_path: Option<String>, agent_dir: Option<String>) -> Result<PathBuf, String> {
+    match scope {
+        "workspace" => {
+            let ws = workspace_path.as_ref().filter(|s| !s.is_empty()).ok_or("workspace scope 需要 workspacePath")?;
+            Ok(PathBuf::from(ws).join("AGENTS.md"))
+        }
+        "global" => {
+            let dir = match agent_dir.as_ref().filter(|s| !s.is_empty()) {
+                Some(d) => PathBuf::from(d),
+                None => {
+                    // 跟 write_skill_file / list_skills 一样的 fallback: USERPROFILE/HOME + .pi/agent
+                    let home = std::env::var("USERPROFILE")
+                        .ok()
+                        .or_else(|| std::env::var("HOME").ok())
+                        .or_else(|| {
+                            std::env::var("HOMEDRIVE").ok()
+                                .zip(std::env::var("HOMEPATH").ok())
+                                .map(|(d, p)| format!("{}\\{}", d, p))
+                        })
+                        .ok_or_else(|| "无法定位 home dir (USERPROFILE/HOME 都未设)".to_string())?;
+                    PathBuf::from(home).join(".pi").join("agent")
+                }
+            };
+            Ok(dir.join("AGENTS.md"))
+        }
+        _ => Err(format!("scope 必须是 'workspace' 或 'global', got '{}'", scope)),
+    }
+}
+
+#[tauri::command]
+async fn read_custom_instructions(args: CustomInstructionsArgs) -> Result<CustomInstructionsContent, String> {
+    let path = resolve_custom_instructions_path(&args.scope, args.workspace_path, args.agent_dir)?;
+    if !path.exists() {
+        return Ok(CustomInstructionsContent {
+            file_path: None,
+            content: String::new(),
+            modified_at: None,
+        });
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read({}): {}", path.display(), e))?;
+    let metadata = std::fs::metadata(&path).ok();
+    let modified_at = metadata
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| format!("{}", d.as_secs()));
+    Ok(CustomInstructionsContent {
+        file_path: Some(path.to_string_lossy().to_string()),
+        content,
+        modified_at,
+    })
+}
+
+#[tauri::command]
+async fn write_custom_instructions(args: CustomInstructionsArgs) -> Result<String, String> {
+    let path = resolve_custom_instructions_path(&args.scope, args.workspace_path, args.agent_dir.clone())?;
+    let content = args.content.as_ref().ok_or("write_custom_instructions 需要 content 字段")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create_dir_all({}): {}", parent.display(), e))?;
+    }
+    std::fs::write(&path, content)
+        .map_err(|e| format!("write({}): {}", path.display(), e))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn delete_custom_instructions(args: CustomInstructionsArgs) -> Result<bool, String> {
+    let path = resolve_custom_instructions_path(&args.scope, args.workspace_path, args.agent_dir)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path)
+        .map_err(|e| format!("remove_file({}): {}", path.display(), e))?;
+    Ok(true)
+}
+
 // ====== LLM command ======
 
 #[tauri::command]
@@ -1129,6 +1237,10 @@ pub fn run() {
             import_skill_url,
             // v0.4.4.6 Skill 列表: FE 主动拉, 写完/导入后立刻刷新 UI (跟 sidecar skills_snapshot 解耦)
             list_skills,
+            // v0.4.6 Project rules / 自定义指令 (跟 Claude 桌面端 "自定义指令" 模式)
+            read_custom_instructions,
+            write_custom_instructions,
+            delete_custom_instructions,
             // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
             sidecar::send_rpc_command,
         ])
