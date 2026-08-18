@@ -17,7 +17,7 @@
 | **v0.5.0 ~ v0.5.8** | **RPC 模式重构 + Release** | sidecar 重写 + Pi SDK RPC + Tauri 2 标准 sidecar + 端到端验证 | 🟢 (14 commits + 验证 PASS) | **2026-08-17** |
 | **v0.5.8 hotfix** | **stale binary 修复** | beforeBuildCommand 路径加 ../ (Tauri 2 cwd = app/) + cargo tauri build 嵌新 dist | 🟢 (1 commit `66e7a9a`) | **2026-08-18** |
 | **v0.4.3** | **Compaction UI (redesign + Polish)** | ContextIndicator 紧凑指示器 + popover 二级展开 + 5 轮 polish (1→2.5) + D182 token 计量修正 | 🟢 (commit `681f248` + 5 轮 polish commit `57e1a47`, 端到端验证 PASS) | **2026-08-18** |
-| **v0.5.8 hotfix²** | **D162 修正 (改回 `node scripts/build-fe.mjs`)** | tauri-cli 2.11.4 源码实测推翻 D162/D144/D181 (cwd 实际 = 项目根, 不是 app/), 推翻 v0.5.8 hotfix 66e7a9a 的 `../scripts/` 错改 | 🟢 (1 commit `6a3e1a4`, 端到端验证 PASS) | **2026-08-18** |
+| **v0.5.8 hotfix³** | **D162 v3 推翻 v2 (改回 `node ../scripts/build-fe.mjs`)** | tauri-cli 2.11.4 源码 + 绝对路径 echo-cwd.mjs 实测推翻 v0.5.8 hotfix² commit 6a3e1a4 的"实测 cwd = 项目根" (错的实测, 把 build-fe.mjs 内部 log 当成 cargo 实际 cwd). 根因: `resolve_frontend_dir()` (`app_paths.rs:146-166`) 走 `lookup` 找最近的 `package.json` → `D:\UnityWork\Tools\Pi\app\package.json` → `dirs.frontend` 永远 = `app/` (除非项目根有 `package.json`). 跟 `--no-bundle` flag 无关. 修法: `node ../scripts/build-fe.mjs`. 端到端验证: cargo tauri build PASS, 生成 .msi 46.5 MB + .exe 32.5 MB (2026-08-18 11:53) | 🟢 (1 commit `0fb669a`) | **2026-08-18** |
 | **v0.4.4 Skills** | **Pi SDK skills 暴露 (loadSkills + formatSkillsForPrompt + system prompt 注入)** | Sidebar SkillsButton + popover + sidecar stdout 一次 emit `skills_snapshot` | 🟢 (commit `b02e99e` + v0.4.4.1 `5c71e56` + v0.4.4.2 `c613297` + v0.4.4.3 `62a56c3` + v0.4.4.4 `842d43a` 从 zip 压缩包 + v0.4.4.5 `52dd667` 从 URL import) | **2026-08-18** |
 | **v0.4.4 系列** | **P0 Pi SDK 暴露 (table stakes)** | skills / slash cmds / rules / usage | ⚪ (规划) | **2026-09 目标** |
 | v0.5.0+ | P1 自建 | Plan mode / sub-agents / MCP 集成 | ⚪ | TBD |
@@ -228,11 +228,11 @@ src-tauri\binaries\pi-agent-sidecar-x86_64-pc-windows-msvc.exe  108 MB  (Tauri �
 
 **P0 进度: 2/5 (v0.4.3 ✅, v0.4.4 ✅, 还有 3 项) — 0 风险快速做完. 估计 1 周内完剩下 3 项.**
 
-#### P0 期间 (2026-08-18) 修正的 3 条 memory 规则 (D170 同步 + D183 教训)
+#### P0 期间 (2026-08-18) 修正的 4 条 memory 规则 (D170 同步 + D183 教训 + v0.5.8 hotfix³ v3 推翻 v2)
 
-- **D162 / D144 / D181 全部错的** — Tauri 2 在 Windows 平台 beforeBuildCommand 实际 cwd = `dirs.frontend` = **项目根** (`D:\UnityWork\Tools\Pi`), 不是 `app/`. 根因: tauri-cli 2.11.4 `WalkBuilder` + `parents(false) + max_depth(3)` 找不到 `app/package.json` (是兄弟不是子), fallback 到 `tauri.parent()`. 修法: `beforeBuildCommand` 路径用 `node scripts/build-fe.mjs` (无 `../`, 跟 v0.5.8 commit 33fc5fa 一致), 推翻 v0.5.8 hotfix 66e7a9a 改回 `../scripts/` 的错改. 端到端验证: 0 0 0 0 (D182 错 schema) → 4 行 token 数字正常.
+- **D162 v3 推翻 v2 (v0.5.8 hotfix³ commit `0fb669a`)** — 之前 v0.5.8 hotfix² commit `6a3e1a4` 写"cwd = 项目根"是**错的实测** (把 build-fe.mjs 内部 `import.meta.url` 定位的 app/ 路径当成 cargo 实际 cwd). **真实实测 (2026-08-18 11:50 绝对路径 echo-cwd.mjs)**: Tauri 2 在 Windows 平台 beforeBuildCommand 实际 cwd = `dirs.frontend` = **`D:\UnityWork\Tools\Pi\app`** (不是项目根, 也不是 src-tauri/). 根因 (tauri-cli 2.11.4 源码 + 实测确认): `resolve_frontend_dir()` (`app_paths.rs:146-166`) 走 `lookup` 找最近的 `package.json` → 项目根没 `package.json` → 找到 `app/package.json` → `dirs.frontend` = `app/`. 跟 `--no-bundle` flag 无关, **永远** = `app/`, 除非项目根有 `package.json`. 修法: `beforeBuildCommand: "node ../scripts/build-fe.mjs"` (跟 v0.5.8 hotfix commit 66e7a9a 一致, 推翻 v0.5.8 hotfix² commit 6a3e1a4 改成 `node scripts/build-fe.mjs` 的错改). 端到端验证: cargo tauri build PASS, 生成 .msi 46.5 MB + .exe 32.5 MB.
 - **D182 修正** — Pi SDK 0.84.2 `json-event.ts:6-15 + 31-45` 显式把 `message_update` 顶层加 `usage`, **没有顶层 `message` 字段** (是 `message_start + deltas build it, message_end 提供 final`, by design). `message_end` 保持原 schema, 顶层无 usage, 嵌在 `event.message.usage`. 修法: tauri.ts message_update schema 删顶层 `message` 加顶层 `usage`; chat.ts case 'message_update' 改读 `event.usage` (顶层).
-- **D183 教训** — 改 memory rule 前必须实测, 不能凭 user 反馈推论. v0.5.8 commit 33fc5fa 当时实测 cwd = app/ 实际是 `build-fe.mjs` 内部 `import.meta.url` 自己定位的 (跟 cargo 实际 cwd 无关, log 输出 cwd 是脚本算的), D162/D144/D181 全部基于这个错误实测, 这次 tauri-cli 2.11.4 源码 + `cmd echo CWD=%CD%` 实测推翻.
+- **D183 教训 (现场重演 v3)** — 改 memory rule 前必须**独立实测**, 不能从 build-fe.mjs 内部 log 推论 cargo 实际 cwd. v0.5.8 commit 33fc5fa 当时实测 cwd = app/ 实际是 `build-fe.mjs` 内部 `import.meta.url` 自己定位的, v0.5.8 hotfix² commit 6a3e1a4 没排除这个干扰, 这次用绝对路径 + 独立 echo-cwd.mjs 排除一切干扰, 真实 cwd = `app/` (跟 v0.5.8 hotfix 66e7a9a 一致), D162 v2 错的"实测"再次被推翻.
 - **D184 教训** — 凭草图推测 UI 位置会连续 4 轮错 (v0.4.3.2 / 2.2 / 2.3 / 2.4 全部把"压缩"放在 0% 后面, user 凌晨 2:30 强烈不满). **按 user 原话字面理解, 不推测**.
 
 #### 🥈 P1 — 2-3 个月内做 (重要, Pi SDK 缺需自建)
