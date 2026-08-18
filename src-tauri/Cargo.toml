@@ -39,3 +39,5 @@ thiserror = "1"
 chrono = "0.4"
 # HTTP client (sync, simple, no async SSL cert chain)
 ureq = { version = "2", features = ["json"] }
+# v0.4.4.4 Skill 导入: 解析 zip 压缩包 (Tauri 2 标准 zip crate, 支持 .md + 多文件 skill pack)
+zip = { version = "2", default-features = false, features = ["deflate"] }

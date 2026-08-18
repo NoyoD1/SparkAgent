@@ -327,6 +327,208 @@ async fn read_skill_file(path: String) -> Result<ParsedSkillFile, String> {
     Ok(parsed)
 }
 
+// ====== v0.4.4.4 Skill 导入: 从 zip 压缩包导入 (多文件 skill pack 支持) ======
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportSkillZipArgs {
+    /// zip 文件绝对路径 (user 通过 dialog 选)
+    zip_path: String,
+    /// scope: "workspace" | "global", 跟 write_skill_file 一样
+    scope: String,
+    /// workspace scope 必填
+    workspace_path: Option<String>,
+    /// global scope 不传, Rust fallback 算
+    agent_dir: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedSkillZip {
+    /// skill name (从 SKILL.md frontmatter.name 或 zip 根子目录名)
+    name: String,
+    /// 写入的最终目录 (workspace scope: <ws>/.pi/skills/<name>/, global scope: <agentDir>/skills/<name>/)
+    target_dir: String,
+    /// SKILL.md 绝对路径
+    skill_md_path: String,
+    /// 描述 (从 SKILL.md frontmatter.description)
+    description: Option<String>,
+    /// 是否多文件 (子目录模式), true = 整目录 copy, false = 单文件 SKILL.md
+    multi_file: bool,
+    /// 解压文件数
+    file_count: usize,
+}
+
+#[tauri::command]
+async fn import_skill_zip(args: ImportSkillZipArgs) -> Result<ImportedSkillZip, String> {
+    use std::io::Read;
+
+    // 1. zip_path 校验
+    let zip_path = PathBuf::from(&args.zip_path);
+    if !zip_path.exists() || !zip_path.is_file() {
+        return Err(format!("zip 文件不存在: {}", args.zip_path));
+    }
+    if zip_path.extension().map(|e| e.to_ascii_lowercase() != "zip").unwrap_or(true) {
+        return Err(format!("不是 .zip 文件: {}", args.zip_path));
+    }
+
+    // 2. 打开 zip
+    let zip_file = std::fs::File::open(&zip_path).map_err(|e| format!("打开 zip 失败: {}", e))?;
+    let mut archive = zip::ZipArchive::new(zip_file).map_err(|e| format!("解析 zip 失败: {}", e))?;
+
+    // 3. 找 SKILL.md (两种 layout):
+    //   - 根级 SKILL.md (zip 根有 SKILL.md)
+    //   - 子目录 <name>/SKILL.md (zip 根是 <name>/, <name>/SKILL.md)
+    // 优先: 子目录模式 (大多数 skill pack 工具的 layout, e.g. GitHub release)
+    let mut skill_md_path_in_zip: Option<String> = None;
+    let mut root_subdir: Option<String> = None;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| format!("读 entry 失败: {}", e))?;
+        let name = entry.name().to_string();
+        // 跳过目录 entry (zip crate 区分 dir/file)
+        if name.ends_with('/') { continue; }
+        // 只关心 SKILL.md, 第一次找到就决定模式
+        if !name.ends_with("SKILL.md") { continue; }
+        if skill_md_path_in_zip.is_some() { continue; } // 忽略后续 SKILL.md, 取第一个
+        if name.contains('/') {
+            // 子目录模式: <subdir>/SKILL.md
+            let subdir = name.split('/').next().unwrap_or("").to_string();
+            if !subdir.is_empty() && subdir != "." && subdir != ".." {
+                skill_md_path_in_zip = Some(name.clone());
+                root_subdir = Some(subdir);
+            }
+        } else {
+            // 根级模式: SKILL.md
+            skill_md_path_in_zip = Some(name.clone());
+            root_subdir = None;
+        }
+    }
+
+    let skill_md_in_zip = skill_md_path_in_zip.ok_or_else(|| {
+        "zip 里没找到 SKILL.md. skill pack 必须在根或子目录里包含 SKILL.md (frontmatter + body)".to_string()
+    })?;
+
+    // 4. 读 SKILL.md 内容 (zip 里)
+    let mut skill_md_buf = String::new();
+    {
+        let mut entry = archive.by_name(&skill_md_in_zip).map_err(|e| format!("读 SKILL.md 失败: {}", e))?;
+        entry.read_to_string(&mut skill_md_buf).map_err(|e| format!("解码 SKILL.md 失败: {}", e))?;
+    }
+
+    // 5. 解析 frontmatter
+    let parsed = parse_skill_frontmatter(&skill_md_buf);
+    let name = if !parsed.name.is_empty() {
+        parsed.name
+    } else if let Some(sub) = &root_subdir {
+        // frontmatter 没 name → 用 zip 根子目录名
+        sub.clone()
+    } else {
+        // 根级 SKILL.md + 没 frontmatter name → 用 zip 文件名去 .zip
+        zip_path.file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "skill".to_string())
+    };
+
+    // 6. name 校验 (跟 write_skill_file 一致)
+    if name.is_empty() || name.len() > 64 {
+        return Err(format!("skill name 长度必须 1-64, got {} ({})", name.len(), name));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        return Err(format!("skill name 只能含 [a-zA-Z0-9._-], got '{}'", name));
+    }
+    if name == "." || name == ".." {
+        return Err("skill name 不能是 '.' 或 '..'".to_string());
+    }
+
+    // 7. 决定 target 目录
+    let target_base = match args.scope.as_str() {
+        "workspace" => {
+            let ws = args.workspace_path.as_ref().ok_or("workspace scope 需要 workspacePath")?;
+            if ws.is_empty() {
+                return Err("workspace path 不能为空".to_string());
+            }
+            PathBuf::from(ws).join(".pi").join("skills")
+        }
+        "global" => {
+            let dir = match args.agent_dir.as_ref().filter(|s| !s.is_empty()) {
+                Some(d) => PathBuf::from(d),
+                None => {
+                    let home = std::env::var("USERPROFILE")
+                        .ok()
+                        .or_else(|| std::env::var("HOME").ok())
+                        .or_else(|| std::env::var("HOMEDRIVE").ok().zip(std::env::var("HOMEPATH").ok()).map(|(d, p)| format!("{}\\{}", d, p)))
+                        .ok_or("global scope 没传 agentDir, 也找不到 USERPROFILE/HOME env")?;
+                    PathBuf::from(home).join(".pi").join("agent")
+                }
+            };
+            dir.join("skills")
+        }
+        other => return Err(format!("scope 必须是 'workspace' 或 'global', got '{}'", other)),
+    };
+    let target_dir = target_base.join(&name);
+
+    // 8. target 已存在 → 拒绝 (避免覆盖现有 skill, user 手动处理)
+    if target_dir.exists() {
+        return Err(format!("target 已存在: {:?} — 请先删除或选不同 name", target_dir));
+    }
+
+    // 9. 写到 target
+    //   子目录模式 (root_subdir.is_some()): 解整个子目录到 target
+    //   根级模式: 写 SKILL.md 到 target/<name>.md (跟 write_skill_file 一致)
+    let multi_file = root_subdir.is_some();
+    let mut file_count = 0usize;
+
+    if let Some(subdir) = &root_subdir {
+        // 子目录模式: 遍历 zip entries, 把 <subdir>/* 解到 target/
+        std::fs::create_dir_all(&target_dir).map_err(|e| format!("创建 target dir 失败: {}", e))?;
+        let prefix = format!("{}/", subdir);
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| format!("读 entry 失败: {}", e))?;
+            let name = entry.name().to_string();
+            if !name.starts_with(&prefix) { continue; }
+            // 相对路径 (去掉 prefix)
+            let rel = &name[prefix.len()..];
+            if rel.is_empty() { continue; } // 子目录本身
+            let dest = target_dir.join(rel);
+            if name.ends_with('/') {
+                // directory entry
+                std::fs::create_dir_all(&dest).map_err(|e| format!("创建子目录失败: {}", e))?;
+            } else {
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| format!("创建 parent 失败: {}", e))?;
+                }
+                let mut out = std::fs::File::create(&dest).map_err(|e| format!("创建文件失败: {}", e))?;
+                std::io::copy(&mut entry, &mut out).map_err(|e| format!("写文件失败: {}", e))?;
+                file_count += 1;
+            }
+        }
+    } else {
+        // 根级模式: 写 SKILL.md 到 target/<name>.md
+        std::fs::create_dir_all(&target_dir).map_err(|e| format!("创建 target dir 失败: {}", e))?;
+        let dest = target_dir.join(format!("{}.md", name));
+        std::fs::write(&dest, skill_md_buf.as_bytes()).map_err(|e| format!("写 SKILL.md 失败: {}", e))?;
+        file_count = 1;
+    }
+
+    let target_dir_abs = std::fs::canonicalize(&target_dir).unwrap_or(target_dir.clone()).to_string_lossy().to_string();
+    let skill_md_abs = {
+        let p = if multi_file {
+            target_dir.join("SKILL.md")
+        } else {
+            target_dir.join(format!("{}.md", name))
+        };
+        std::fs::canonicalize(&p).unwrap_or(p).to_string_lossy().to_string()
+    };
+    Ok(ImportedSkillZip {
+        name,
+        target_dir: target_dir_abs,
+        skill_md_path: skill_md_abs,
+        description: parsed.description,
+        multi_file,
+        file_count,
+    })
+}
+
 // ====== LLM command ======
 
 #[tauri::command]
@@ -616,6 +818,8 @@ pub fn run() {
             write_skill_file,
             // v0.4.4.3 Skill 导入: 读本地 .md 文件 + 解析 frontmatter
             read_skill_file,
+            // v0.4.4.4 Skill 导入: 从 zip 压缩包导入 (支持多文件 skill pack)
+            import_skill_zip,
             // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
             sidecar::send_rpc_command,
         ])

@@ -412,6 +412,23 @@ class PiTauriClient {
     return (await invoke('read_skill_file', { path })) as any;
   }
 
+  // ====== v0.4.4.4 Skill 导入: 从 zip 压缩包导入 (多文件 skill pack) ======
+  async importSkillZip(args: {
+    zipPath: string;
+    scope: 'workspace' | 'global';
+    workspacePath?: string | null;
+    agentDir?: string | null;
+  }): Promise<{
+    name: string;
+    targetDir: string;
+    skillMdPath: string;
+    description: string | null;
+    multiFile: boolean;
+    fileCount: number;
+  }> {
+    return (await invoke('import_skill_zip', { args })) as any;
+  }
+
   // ====== App config (v0.3.8+: 持久化到 Rust 文件, 替代 localStorage) ======
   // 走 Rust 持久化是因为 WebView2 缓存被清时 localStorage 也被擦, provider 配置会丢.
   // 文件位置: %APPDATA%\com.piagent.desktop\config.json

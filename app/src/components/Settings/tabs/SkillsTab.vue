@@ -53,6 +53,20 @@ function onCreated(filePath: string) {
     if (toast.value?.message.includes(filePath)) toast.value = null;
   }, 5000);
 }
+/**
+ * v0.4.4.4: zip 压缩包导入完成. 跟 .md 导入 / 手动 submit 类似, 切回 list + toast.
+ * 不同点: 直接 import 完成, user 不需要再编辑 form, 所以不刷新 form 字段.
+ */
+function onZipImported(info: { name: string; targetDir: string; fileCount: number }) {
+  viewMode.value = 'list';
+  toast.value = {
+    type: 'ok',
+    message: `已解压 ${info.fileCount} 个文件 (${info.name}) 到 ${info.targetDir} — 记得重启 release .exe 让 sidecar 重新加载 skills`,
+  };
+  setTimeout(() => {
+    if (toast.value?.message.includes(info.name)) toast.value = null;
+  }, 5000);
+}
 </script>
 
 <template>
@@ -153,6 +167,7 @@ function onCreated(filePath: string) {
       v-else
       @close="closeAdd"
       @created="onCreated"
+      @zipImported="onZipImported"
     />
   </div>
 </template>

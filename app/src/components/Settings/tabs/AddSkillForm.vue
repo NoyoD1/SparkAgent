@@ -18,7 +18,7 @@
  *   - 上传 .md 文件
  */
 import { ref, computed } from 'vue';
-import { ArrowLeft, Save, AlertCircle, Loader2, Check, FileText, Sparkles, Upload } from 'lucide-vue-next';
+import { ArrowLeft, Save, AlertCircle, Loader2, Check, FileText, Sparkles, Upload, FileArchive } from 'lucide-vue-next';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { piTauri } from '@/lib/tauri';
 import { useSessionStore } from '@/stores/session';
@@ -26,6 +26,7 @@ import { useSessionStore } from '@/stores/session';
 const emit = defineEmits<{
   close: [];
   created: [filePath: string];
+  zipImported: [info: { name: string; targetDir: string; fileCount: number }];
 }>();
 
 const importState = ref<'idle' | 'importing' | 'fail'>('idle');
@@ -67,7 +68,7 @@ const finalBody = computed(() => {
   return `---\nname: ${name.value}\ndescription: ${description.value || '(no description)'}\n---\n\n${trimmedBody}\n`;
 });
 
-async function importFromFile() {
+async function importFromMd() {
   importState.value = 'importing';
   importMessage.value = '';
   try {
@@ -94,6 +95,55 @@ async function importFromFile() {
     importState.value = 'idle';
     importMessage.value = `已加载 ${parsed.path} (name="${parsed.name}"${parsed.description ? `, description 已填充` : ''})`;
     console.log('[skills] imported from', parsed.path, '— name:', parsed.name, 'description:', parsed.description, 'disableModelInvocation:', parsed.disableModelInvocation);
+  } catch (e) {
+    importState.value = 'fail';
+    importMessage.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+/**
+ * v0.4.4.4: 从 .zip 压缩包导入 (多文件 skill pack)
+ * 跟 .md 导入区别: zip 整目录解到 target/<name>/, 跳过 form, 直接 emit zipImported.
+ * 2 种 zip layout 都支持:
+ *   - 根级 SKILL.md (单文件)
+ *   - 子目录 <name>/SKILL.md (GitHub release 标准 layout, 保留所有文件)
+ */
+async function importFromZip() {
+  importState.value = 'importing';
+  importMessage.value = '';
+  try {
+    // 1. Tauri 2 dialog:open 选 .zip
+    const selected = await openDialog({
+      multiple: false,
+      title: '选择 skill 压缩包 (.zip)',
+      filters: [
+        { name: 'Zip 压缩包', extensions: ['zip'] },
+      ],
+    });
+    if (!selected || typeof selected !== 'string') {
+      importState.value = 'idle';
+      return;
+    }
+    // 2. 决定 scope (跟 manual submit 一样)
+    const wsPath = activeWorkspacePath.value;
+    const isWorkspace = scope.value === 'workspace';
+    if (isWorkspace && !wsPath) {
+      importState.value = 'fail';
+      importMessage.value = '当前没有 active workspace. 切到一个 workspace 或选 "Global" 范围';
+      return;
+    }
+    // 3. invoke import_skill_zip
+    const result = await piTauri.importSkillZip({
+      zipPath: selected,
+      scope: scope.value,
+      workspacePath: isWorkspace ? wsPath : null,
+      agentDir: null, // global: Rust 端 fallback 算 (跟 write_skill_file 一致)
+    });
+    // 4. emit zipImported (SkillsTab 关 form + 显示 toast)
+    importState.value = 'idle';
+    importMessage.value = `已解压 ${result.fileCount} 个文件到 ${result.targetDir}`;
+    console.log('[skills] zip imported:', result);
+    emit('zipImported', { name: result.name, targetDir: result.targetDir, fileCount: result.fileCount });
   } catch (e) {
     importState.value = 'fail';
     importMessage.value = e instanceof Error ? e.message : String(e);
@@ -182,11 +232,21 @@ async function submit() {
         type="button"
         class="pad-addskill__import-btn"
         :disabled="importState === 'importing'"
-        @click="importFromFile"
+        @click="importFromMd"
       >
         <Loader2 v-if="importState === 'importing'" :size="14" :stroke-width="1.75" class="pad-addskill__spinner" />
         <Upload v-else :size="14" :stroke-width="1.75" />
-        <span>{{ importState === 'importing' ? '加载中...' : '从文件导入 (.md)' }}</span>
+        <span>{{ importState === 'importing' ? '加载中...' : '从 .md 导入' }}</span>
+      </button>
+      <button
+        type="button"
+        class="pad-addskill__import-btn pad-addskill__import-btn--zip"
+        :disabled="importState === 'importing'"
+        @click="importFromZip"
+      >
+        <Loader2 v-if="importState === 'importing'" :size="14" :stroke-width="1.75" class="pad-addskill__spinner" />
+        <FileArchive v-else :size="14" :stroke-width="1.75" />
+        <span>{{ importState === 'importing' ? '解压中...' : '从 .zip 导入 (整目录)' }}</span>
       </button>
       <span v-if="importMessage" class="pad-addskill__import-hint" :class="{ 'is-fail': importState === 'fail' }">
         {{ importMessage }}
