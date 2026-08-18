@@ -21,13 +21,23 @@ import { useSkillsStore } from '@/stores/skills';
 import AddSkillForm from './AddSkillForm.vue';
 
 const skillsStore = useSkillsStore();
-const { skills, hasSnapshot, diagnostics } = storeToRefs(skillsStore);
+const { skills, hasSnapshot, hasTauriList, diagnostics } = storeToRefs(skillsStore);
+const isRefreshing = ref(false);
 
 // v0.4.4.6: 切到 Skills tab 立刻调 list_skills 刷新 (跟 sidecar skills_snapshot 解耦,
 //   不必等 send_prompt sidecar 启动). user 进 tab 立刻看到列表.
-onMounted(async () => {
-  await skillsStore.refreshFromTauri();
-});
+// v0.4.4.6.1: 同时暴露手动刷新按钮 (list_skills 是按需 invoke, 不会自动监听文件变化;
+//   如果 list_skills 出错或 list 跟磁盘不一致, user 可以点刷新重拉)
+async function refreshList() {
+  if (isRefreshing.value) return;
+  isRefreshing.value = true;
+  try {
+    await skillsStore.refreshFromTauri();
+  } finally {
+    isRefreshing.value = false;
+  }
+}
+onMounted(refreshList);
 
 const viewMode = ref<'list' | 'add'>('list');
 const toast = ref<{ type: 'ok' | 'fail'; message: string } | null>(null);
@@ -114,23 +124,39 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
           <Sparkles :size="14" :stroke-width="1.75" />
           <span class="pad-skillstab__card-title">
             {{ skills.length }} skills 加载
-            <span v-if="hasSnapshot" class="pad-skillstab__count">
+            <span v-if="hasTauriList || hasSnapshot" class="pad-skillstab__count">
               · 启用 {{ skills.filter((s) => skillsStore.isEnabled(s.name)).length }} 个
             </span>
           </span>
+          <button class="pad-skillstab__refresh-btn" :disabled="isRefreshing" @click="refreshList" title="重新从磁盘扫描 skills (Tauri list_skills)">
+            <span v-if="isRefreshing">…</span>
+            <span v-else>↻</span>
+          </button>
           <button class="pad-skillstab__add-btn" @click="openAdd">
             <Plus :size="14" :stroke-width="1.75" />
             <span>添加自定义</span>
           </button>
         </div>
+        <!-- v0.4.4.6.1: 显示 list_skills 诊断 (如果 0 个 + 有 diagnostics, 说明有错误, 不是真的 0 个) -->
+        <div v-if="hasTauriList && diagnostics.length > 0" class="pad-skillstab__diag-list">
+          <details>
+            <summary>⚠️ {{ diagnostics.length }} 个 list_skills 诊断 (点开查看)</summary>
+            <ul>
+              <li v-for="(d, i) in diagnostics" :key="i">
+                <code>[{{ d.type }}]</code> {{ d.message }}<span v-if="d.path"> · <code>{{ d.path }}</code></span>
+              </li>
+            </ul>
+          </details>
+        </div>
 
-        <div v-if="!hasSnapshot" class="pad-skillstab__empty">
+        <div v-if="!hasTauriList && !hasSnapshot" class="pad-skillstab__empty">
           <Sparkles :size="20" :stroke-width="1.5" />
-          <div class="pad-skillstab__empty-title">⏳ 等待 sidecar 加载 skills...</div>
+          <div class="pad-skillstab__empty-title">⏳ 加载 skills 中...</div>
           <div class="pad-skillstab__empty-desc">
-            第一次 <code>send_prompt</code> 后 sidecar 才会 emit <code>skills_snapshot</code> (走
-            <code>chat:event</code> channel, 来自 stdout 启动时一次 emit).
-            如果一直不显示, 检查 sidecar stderr 是否有 loadSkills 报错.
+            v0.4.4.6+ 走 Tauri 端 <code>list_skills</code> invoke (扫
+            <code>&lt;workspace&gt;/.pi/skills/</code> + <code>~/.pi/agent/skills/</code>),
+            切到本 tab 自动拉一次. 如果一直 0 个, 点下方"刷新"重拉, 或
+            <button class="pad-skillstab__inline-link" @click="openAdd">手动添加</button>.
           </div>
         </div>
 
@@ -176,7 +202,9 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
       <div class="pad-skillstab__hint">
         <Info :size="12" :stroke-width="1.75" />
         <span>
-          toggle 后 <strong>重启 release .exe</strong> 让 sidecar 重新加载 skills 注入 system prompt
+          <strong>v0.4.4.6+</strong>: 添加/导入 skill 后<strong>立刻可见</strong> (走 Tauri
+          <code>list_skills</code> 主动拉). 但 <strong>勾选 toggle</strong> 启用后仍需
+          <strong>重启 release .exe</strong> 让 sidecar 重新加载注入 system prompt
           (D165 systemPrompt 不可动态改). 后续 v0.4.4.x 会做"toggle 后自动重启 sidecar" polish.
         </span>
       </div>
@@ -369,6 +397,34 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
   font-size: 11px;
   border-top: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
 }
+.pad-skillstab__diag-list {
+  padding: 8px 14px;
+  border-top: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  font-size: 11px;
+  color: var(--pad-fg-warning, #d97706);
+  background: var(--pad-bg-warning-soft, rgba(217, 119, 6, 0.04));
+}
+.pad-skillstab__diag-list summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+}
+.pad-skillstab__diag-list ul {
+  margin: 6px 0 0 0;
+  padding-left: 18px;
+  list-style: disc;
+}
+.pad-skillstab__diag-list li {
+  padding: 2px 0;
+  word-break: break-all;
+}
+.pad-skillstab__diag-list code {
+  font-family: var(--pad-font-mono);
+  font-size: 10px;
+  background: var(--pad-bg-muted, rgba(0, 0, 0, 0.06));
+  padding: 1px 4px;
+  border-radius: 2px;
+}
 
 .pad-skillstab__hint {
   display: flex;
@@ -383,9 +439,30 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
   line-height: 1.5;
 }
 
-/* v0.4.4.2 添加自定义按钮 (跟 ProviderTab "添加自定义" 同 pattern) */
-.pad-skillstab__add-btn {
+/* v0.4.4.6.1 刷新按钮 (强制重拉 Tauri list_skills, 跟写文件后自动调对应) */
+.pad-skillstab__refresh-btn {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--pad-border-subtle, #e0e0e0);
+  background: transparent;
+  color: var(--pad-fg-tertiary, #888);
+  border-radius: var(--pad-radius-sm, 4px);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  transition: all 0.15s;
+}
+.pad-skillstab__refresh-btn:hover:not(:disabled) {
+  background: var(--pad-bg-hover, rgba(0, 0, 0, 0.04));
+  color: var(--pad-fg-primary);
+}
+.pad-skillstab__refresh-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pad-skillstab__add-btn {
+  margin-left: 8px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
