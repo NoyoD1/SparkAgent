@@ -18,10 +18,12 @@ import { ref, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import { Sparkles, Plus, AlertCircle, Info, Check } from 'lucide-vue-next';
 import { useSkillsStore } from '@/stores/skills';
+import { useSessionStore } from '@/stores/session';
 import AddSkillForm from './AddSkillForm.vue';
 
 const skillsStore = useSkillsStore();
-const { skills, hasSnapshot, hasTauriList, diagnostics } = storeToRefs(skillsStore);
+const sessionStore = useSessionStore();
+const { skills, hasSnapshot, hasTauriList, diagnostics, lastError } = storeToRefs(skillsStore);
 const isRefreshing = ref(false);
 
 // v0.4.4.6: 切到 Skills tab 立刻调 list_skills 刷新 (跟 sidecar skills_snapshot 解耦,
@@ -137,6 +139,13 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
             <span>添加自定义</span>
           </button>
         </div>
+        <!-- v0.4.4.6.2: 错误信息 (refreshFromTauri catch 时存到 lastError, UI 直接显示) -->
+        <!-- 放在 v-if 链外, 不打断 v-else-if, 始终显示 (有错就显) -->
+        <div v-if="lastError" class="pad-skillstab__error">
+          <AlertCircle :size="14" :stroke-width="1.75" />
+          <span>list_skills 失败: <code>{{ lastError }}</code></span>
+        </div>
+
         <!-- v0.4.4.6.1: 显示 list_skills 诊断 (如果 0 个 + 有 diagnostics, 说明有错误, 不是真的 0 个) -->
         <div v-if="hasTauriList && diagnostics.length > 0" class="pad-skillstab__diag-list">
           <details>
@@ -198,6 +207,20 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
           <span>{{ diagnostics.length }} skill 加载诊断 (e.g. collision / path 不存在)</span>
         </div>
       </div>
+
+      <!-- v0.4.4.6.2: Debug 信息 (activeWorkspace / hasSnapshot / hasTauriList 状态, user 切 tab 一眼能看到) -->
+      <!-- 放在 card 外面, 始终显示, 不打断 v-if 链 -->
+      <details class="pad-skillstab__debug">
+        <summary>🔧 Debug 信息 (点开查看)</summary>
+        <ul>
+          <li>activeWorkspace: <code>{{ sessionStore.activeWorkspace ? `${sessionStore.activeWorkspace.name} → ${sessionStore.activeWorkspace.path}` : 'NULL (没切到 workspace)' }}</code></li>
+          <li>hasSnapshot (sidecar): <code>{{ hasSnapshot }}</code></li>
+          <li>hasTauriList (Tauri list_skills): <code>{{ hasTauriList }}</code></li>
+          <li>skills.length: <code>{{ skills.length }}</code></li>
+          <li>diagnostics.length: <code>{{ diagnostics.length }}</code></li>
+          <li v-if="lastError">lastError: <code>{{ lastError }}</code></li>
+        </ul>
+      </details>
 
       <div class="pad-skillstab__hint">
         <Info :size="12" :stroke-width="1.75" />
@@ -419,6 +442,54 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
   word-break: break-all;
 }
 .pad-skillstab__diag-list code {
+  font-family: var(--pad-font-mono);
+  font-size: 10px;
+  background: var(--pad-bg-muted, rgba(0, 0, 0, 0.06));
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+/* v0.4.4.6.2: list_skills 错误显示 (user 不会用 DevTools console, UI 直接显示 catch 的错) */
+.pad-skillstab__error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--pad-bg-danger-soft, rgba(220, 38, 38, 0.06));
+  color: var(--pad-fg-danger, #dc2626);
+  font-size: 11px;
+  border-top: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  word-break: break-all;
+}
+.pad-skillstab__error code {
+  font-family: var(--pad-font-mono);
+  font-size: 10px;
+  background: var(--pad-bg-muted, rgba(0, 0, 0, 0.06));
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+/* v0.4.4.6.2: Debug 折叠 (activeWorkspace / hasSnapshot / hasTauriList / skills.length 一目了然) */
+.pad-skillstab__debug {
+  padding: 8px 14px;
+  border-top: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  font-size: 11px;
+  color: var(--pad-fg-tertiary);
+}
+.pad-skillstab__debug summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+  color: var(--pad-fg-secondary);
+}
+.pad-skillstab__debug ul {
+  margin: 6px 0 0 0;
+  padding-left: 18px;
+  list-style: disc;
+}
+.pad-skillstab__debug li {
+  padding: 1px 0;
+  word-break: break-all;
+}
+.pad-skillstab__debug code {
   font-family: var(--pad-font-mono);
   font-size: 10px;
   background: var(--pad-bg-muted, rgba(0, 0, 0, 0.06));

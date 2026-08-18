@@ -61,6 +61,8 @@ export const useSkillsStore = defineStore('skills', () => {
   /** v0.4.4.6: Tauri 端 list_skills 是否已经成功拉过 (跟 sidecar 的 hasSnapshot 是两套,
    *   FE 启动时调 refreshFromTauri 立刻有数据, 不必等 sidecar 启动) */
   const hasTauriList = ref(false);
+  /** v0.4.4.6.2: refreshFromTauri 失败时的错误信息, UI 直接显示 (user 不会用 DevTools console) */
+  const lastError = ref<string | null>(null);
 
   // 持久化 enabledByName
   watch(
@@ -86,6 +88,7 @@ export const useSkillsStore = defineStore('skills', () => {
   async function refreshFromTauri(): Promise<void> {
     const sessionStore = useSessionStore();
     const ws = sessionStore.activeWorkspace;
+    console.log(`[skills] refreshFromTauri: activeWorkspace=${ws ? `${ws.name} (${ws.path})` : 'NULL'}`);
     try {
       const res = await piTauri.listSkills({
         workspacePath: ws?.path ?? null,
@@ -100,9 +103,12 @@ export const useSkillsStore = defineStore('skills', () => {
       }));
       diagnostics.value = res.diagnostics;
       hasTauriList.value = true;
+      lastError.value = null;
       console.log(`[skills] tauri list: ${res.skills.length} skills, ${res.diagnostics.length} diagnostics`);
     } catch (e) {
-      console.error('[skills] listSkills invoke failed', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      lastError.value = msg;
+      console.error('[skills] listSkills invoke failed', msg);
     }
   }
 
@@ -131,6 +137,7 @@ export const useSkillsStore = defineStore('skills', () => {
     diagnostics,
     hasSnapshot,
     hasTauriList,
+    lastError,
     isEnabled,
     enable,
     disable,
