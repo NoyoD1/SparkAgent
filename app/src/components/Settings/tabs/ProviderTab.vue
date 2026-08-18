@@ -16,7 +16,7 @@
  */
 import { ref, computed, onMounted } from 'vue';
 import {
-  Plus, Trash2, RefreshCw, CheckCircle2, KeyRound, Server, Save, Settings,
+  Plus, Trash2, RefreshCw, KeyRound, Server, Save, Settings,
 } from 'lucide-vue-next';
 import {
   useConfigStore, PROVIDER_OPTIONS, BUILTIN_MODELS, THINKING_LEVELS,
@@ -276,7 +276,12 @@ async function deleteKey() {
 }
 
 function removeProvider(provider: ProviderConfig) {
-  if (!confirm(`确定删除 "${provider.label}"? 会清除这个 provider 的本地 config + keychain 里的 key.`)) return;
+  // v0.5.0-PR2: 删的如果是当前 active, 提示 user input box 会回退
+  if (provider.id === config.activeProviderId) {
+    if (!confirm(`"${provider.label}" 是当前正在使用的 provider, 确定删除? 删除后 input box 会回退到第一个可用的 provider.`)) return;
+  } else {
+    if (!confirm(`确定删除 "${provider.label}"? 会清除这个 provider 的本地 config + keychain 里的 key.`)) return;
+  }
   piTauri.deleteApiKey(provider.id).catch(() => {});
   config.removeProvider(provider.id);
   void refreshAllKeyStatus();
@@ -285,32 +290,6 @@ function removeProvider(provider: ProviderConfig) {
     selection.value = null;
   } else {
     selection.value = { kind: 'builtin', type: provider.type };
-  }
-}
-
-function setActive(provider: ProviderConfig) {
-  if (!provider.activeModelId) {
-    fetchMessage.value = '请先选一个 active model';
-    fetchState.value = 'fail';
-    return;
-  }
-  config.setActiveProvider(provider.id);
-  fetchState.value = 'ok';
-  fetchMessage.value = `已切换到 ${provider.label} / ${provider.activeModelId}`;
-}
-
-function activateModel(providerId: string, modelId: string) {
-  const p = config.providers.find((x) => x.id === providerId);
-  const m = p?.models.find((x) => x.id === modelId);
-  if (!m || m.enabled === false) {
-    fetchState.value = 'fail';
-    fetchMessage.value = '该 model 已停用, 不能激活';
-    return;
-  }
-  config.setActiveModel(providerId, modelId);
-  if (p) {
-    fetchState.value = 'ok';
-    fetchMessage.value = `已激活 ${p.label} / ${modelId}`;
   }
 }
 
@@ -339,6 +318,10 @@ function addCustomModel() {
 function removeModel(modelId: string) {
   if (!selectedProvider.value) return;
   const p = selectedProvider.value;
+  // v0.5.0-PR2: 删的如果是当前 active, 提示 user — setProviderModels 会自动清 activeModelId, 下次 send 会用第一个 enabled
+  if (p.id === config.activeProviderId && p.activeModelId === modelId) {
+    if (!confirm(`"${modelId}" 是当前正在使用的 model, 确定删除? 删除后下次发送会自动用这个 provider 的第一个 enabled model.`)) return;
+  }
   const next = p.models.filter((m) => m.id !== modelId);
   config.setProviderModels(p.id, next);
 }
@@ -561,7 +544,6 @@ function onProviderAdded(id: string) {
               />
               <p class="pad-provider-detail__head-sub">
                 {{ builtinOptions.find((o) => o.id === selectedProvider!.type)?.label ?? '自定义' }}
-                <span v-if="selectedProvider!.id === config.activeProviderId" class="pad-provider-detail__head-tag">当前激活</span>
               </p>
             </div>
           </div>
@@ -667,7 +649,7 @@ function onProviderAdded(id: string) {
                 <label
                   class="pad-provider-detail__model"
                   :class="{
-                    'is-active': selectedProvider.activeModelId === m.id,
+                    'is-current': config.activeProviderId === selectedProvider.id && config.activeProvider?.activeModelId === m.id,
                     'is-disabled': !isModelEnabled(m),
                   }"
                 >
@@ -676,14 +658,6 @@ function onProviderAdded(id: string) {
                     class="pad-provider-detail__model-toggle"
                     :checked="isModelEnabled(m)"
                     @change="config.toggleModelEnabled(selectedProvider.id, m.id)"
-                  />
-                  <input
-                    type="radio"
-                    :name="`model-${selectedProvider.id}`"
-                    :value="m.id"
-                    :checked="selectedProvider.activeModelId === m.id"
-                    :disabled="!isModelEnabled(m)"
-                    @change="activateModel(selectedProvider.id, m.id)"
                   />
                   <div class="pad-provider-detail__model-body">
                     <div class="pad-provider-detail__model-id">{{ m.id }}</div>
@@ -698,6 +672,12 @@ function onProviderAdded(id: string) {
                       <span v-if="m.reasoning" class="pad-provider-detail__model-meta-tag">reasoning</span>
                     </div>
                   </div>
+                  <!-- v0.5.0-PR2: current 标识 (只读, 跟 input box 同步 — 全局 activeProviderId + activeModelId 决定的) -->
+                  <span
+                    v-if="config.activeProviderId === selectedProvider.id && config.activeProvider?.activeModelId === m.id"
+                    class="pad-provider-detail__model-current-tag"
+                    title="当前正在 input box 使用的 model (在 chat 输入框点其他 model 即可切换)"
+                  >current</span>
                   <button
                     class="pad-provider-detail__model-config"
                     type="button"
@@ -774,14 +754,7 @@ function onProviderAdded(id: string) {
 
           <!-- Actions -->
           <div class="pad-provider-detail__actions">
-            <button
-              class="pad-provider-detail__btn pad-provider-detail__btn--primary"
-              :disabled="fetchState === 'fetching' || !selectedProvider.activeModelId"
-              @click="setActive(selectedProvider)"
-            >
-              <CheckCircle2 :size="14" :stroke-width="1.75" />
-              设为当前
-            </button>
+            <!-- v0.5.0-PR2: 详情面板只管 enabled, current active 完全归 input box 管 — 删 "设为当前" 按钮 -->
             <button
               class="pad-provider-detail__btn pad-provider-detail__btn--danger"
               @click="removeProvider(selectedProvider)"
@@ -998,17 +971,7 @@ function onProviderAdded(id: string) {
 .pad-provider-detail__head-body { flex: 1; min-width: 0; }
 .pad-provider-detail__head-title { margin: 0; font-size: 18px; font-weight: var(--pad-fw-semibold); }
 .pad-provider-detail__head-sub { margin: 4px 0 0; font-size: var(--pad-fs-12); color: var(--pad-fg-tertiary); display: flex; align-items: center; gap: 8px; }
-.pad-provider-detail__head-tag {
-  display: inline-block;
-  font-size: var(--pad-fs-10);
-  color: var(--pad-accent);
-  background: var(--pad-accent-soft);
-  border-radius: var(--pad-radius-pill);
-  padding: 1px 8px;
-  text-transform: none;
-  letter-spacing: 0;
-  font-weight: var(--pad-fw-medium);
-}
+/* v0.5.0-PR2: 详情面板不再有 "当前激活" head tag (current 标识改在 model row 显示, 跟 input box 同步) */
 
 .pad-provider-detail__row {
   display: flex;
@@ -1132,11 +1095,27 @@ function onProviderAdded(id: string) {
   transition: background var(--pad-dur-fast) ease;
 }
 .pad-provider-detail__model:hover { background: var(--pad-bg-hover); }
-.pad-provider-detail__model.is-active { background: var(--pad-accent-soft); }
+/* v0.5.0-PR2: 详情面板不切 active — current 标识用浅绿底高亮 (只读, 跟 input box 同步) */
+.pad-provider-detail__model.is-current { background: var(--pad-success-soft, var(--pad-accent-soft)); }
 .pad-provider-detail__model.is-disabled { opacity: 0.5; }
 .pad-provider-detail__model-body { flex: 1; min-width: 0; }
 .pad-provider-detail__model-id { font-size: var(--pad-fs-13); font-family: var(--pad-font-mono); color: var(--pad-fg-primary); }
 .pad-provider-detail__model-label { font-size: var(--pad-fs-11); color: var(--pad-fg-tertiary); margin-top: 1px; }
+/* v0.5.0-PR2: current 标签 (跟 metadata tag 同尺寸, 绿底高亮, 跟 enabled 状态无关) */
+.pad-provider-detail__model-current-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 1px 8px;
+  border-radius: var(--pad-radius-pill);
+  background: var(--pad-success, var(--pad-accent));
+  color: var(--pad-fg-inverse, #fff);
+  font-weight: var(--pad-fw-semibold);
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  flex-shrink: 0;
+}
 /* v0.4.4.6: metadata 摘要 (type/vision/ctx/out/rounds/reasoning 已设的项) */
 .pad-provider-detail__model-meta {
   display: flex;
