@@ -15,6 +15,7 @@ import { useSessionStore } from '@/stores/session';
 import { useConfigStore, PROVIDER_OPTIONS, PERMISSION_MODE_OPTIONS, type PermissionMode } from '@/stores/config';
 import { useUiStore } from '@/stores/ui';
 import { useAgentsStore } from '@/stores/agents';
+import { useSkillsStore } from '@/stores/skills';
 import { piTauri } from '@/lib/tauri';
 import ContextIndicator from './ContextIndicator.vue';
 
@@ -23,12 +24,62 @@ const sessionStore = useSessionStore();
 const configStore = useConfigStore();
 const uiStore = useUiStore();
 const agentsStore = useAgentsStore();
+const skillsStore = useSkillsStore();
 const { activeSession } = storeToRefs(sessionStore);
 const { agents, activeName } = storeToRefs(agentsStore);
+const { skills } = storeToRefs(skillsStore);
 
 const inputText = ref('');
 const showModelMenu = ref(false);
 const showAgentMenu = ref(false);  // v0.4.6.1 agent selector dropdown
+// v0.4.7a: Composer / popover (skill / agent / mcp, 不含 builtin 22)
+const showSlashPopover = ref(false);
+const slashPopoverQuery = ref('');
+const slashPopoverCursor = ref(0);  // 当前选中项
+interface SlashItem {
+  group: 'Skills' | 'Agents' | '扩展';
+  slug: string;       // /skill:code-review /agent:engineer /mcp:...
+  label: string;
+  description: string;
+  isPlaceholder?: boolean;
+}
+const slashItems = computed<SlashItem[]>(() => {
+  const out: SlashItem[] = [];
+  // 1. Skills
+  for (const s of skills.value) {
+    out.push({
+      group: 'Skills',
+      slug: `/skill:${s.name}`,
+      label: s.name,
+      description: s.description || '(无描述)',
+    });
+  }
+  // 2. Agents
+  for (const a of agents.value) {
+    out.push({
+      group: 'Agents',
+      slug: `/agent:${a.name}`,
+      label: a.name,
+      description: a.description || a.body.slice(0, 60) || '(无描述)',
+    });
+  }
+  // 3. MCP (P1 留空)
+  out.push({
+    group: '扩展',
+    slug: '/mcp:',
+    label: '(暂无可用)',
+    description: 'MCP 扩展 P1 实现, 后续 v0.5+ 接入 (ADR-0023)',
+    isPlaceholder: true,
+  });
+  return out;
+});
+const filteredSlashItems = computed<SlashItem[]>(() => {
+  const q = slashPopoverQuery.value.toLowerCase();
+  if (!q) return slashItems.value;
+  return slashItems.value.filter(
+    (it) => it.label.toLowerCase().includes(q) || it.description.toLowerCase().includes(q),
+  );
+});
 // v0.4.1+ tool permission 菜单
 const showPermissionMenu = ref(false);
 
@@ -121,6 +172,125 @@ async function pickMainAgent(name: string) {
     showAgentMenu.value = false;
   } catch (e) {
     console.error('[Composer] setMain failed', e);
+  }
+}
+
+// ===== v0.4.7a: Composer / popover 监听 =====
+// 监听 inputText, 检测光标前是不是 "/" (单独一个, 后无字符 / 有字符) -> 弹层
+// 触发: ↑↓ 选 + Enter 触发 + Esc 关闭
+// 选 skill -> 激活 (走 v0.4.4 skills store toggle)
+// 选 agent -> 切主 agent (走 v0.4.6.1 agents store setMain)
+// 选 mcp -> placeholder (P1 留空)
+// 不含 builtin 22 (D184 v8 Q1 拍板: 终端命令式交互要淡化, 走 GUI 面板)
+
+const slashPopoverRef = ref<HTMLElement | null>(null);
+
+function isSlashTriggerActive(): boolean {
+  // 光标前有 "/" 单独一个, 后无字符 / 单词
+  const text = inputText.value;
+  const cursor = textareaRef.value?.selectionStart ?? text.length;
+  // 找光标前最近的换行
+  const before = text.slice(0, cursor);
+  const after = text.slice(cursor);
+  // 光标前最后一个 token 必须是 "/" (或 "/xxx")
+  const lastNl = before.lastIndexOf('\n');
+  const lineStart = lastNl + 1;
+  const lineBefore = before.slice(lineStart);
+  // 不能前面已经有非空白 (slash 命令必须在行首, 类似 markdown)
+  if (lineBefore.trim() !== lineBefore) return false;
+  // 必须以 / 开头
+  if (!lineBefore.startsWith('/')) return false;
+  // 后面不能有 / (避免双 //)
+  if (after.startsWith('/')) return false;
+  return true;
+}
+
+function getSlashQuery(): string {
+  const text = inputText.value;
+  const cursor = textareaRef.value?.selectionStart ?? text.length;
+  const before = text.slice(0, cursor);
+  const lastNl = before.lastIndexOf('\n');
+  const lineStart = lastNl + 1;
+  const lineBefore = before.slice(lineStart);
+  // 去掉 / 前缀
+  return lineBefore.slice(1);
+}
+
+function openSlashPopover() {
+  showSlashPopover.value = true;
+  slashPopoverQuery.value = getSlashQuery();
+  slashPopoverCursor.value = 0;
+}
+
+function closeSlashPopover() {
+  showSlashPopover.value = false;
+  slashPopoverQuery.value = '';
+  slashPopoverCursor.value = 0;
+}
+
+async function pickSlashItem(item: SlashItem) {
+  if (item.isPlaceholder) {
+    console.log('[Composer / popover] mcp placeholder, no-op');
+    return;
+  }
+  // 把光标前 /xxx 替换成空, 触发对应 action
+  const text = inputText.value;
+  const cursor = textareaRef.value?.selectionStart ?? text.length;
+  const before = text.slice(0, cursor);
+  const after = text.slice(cursor);
+  const lastNl = before.lastIndexOf('\n');
+  const lineStart = lastNl + 1;
+  const newBefore = before.slice(0, lineStart);
+  inputText.value = newBefore + after;
+  nextTick(() => {
+    if (textareaRef.value) {
+      const newCursor = newBefore.length;
+      textareaRef.value.setSelectionRange(newCursor, newCursor);
+      textareaRef.value.focus();
+      autoResize();
+    }
+  });
+  closeSlashPopover();
+  // 触发对应 action
+  if (item.group === 'Skills') {
+    skillsStore.toggle(item.label);
+    console.log(`[Composer / popover] skill toggled: ${item.label}`);
+  } else if (item.group === 'Agents') {
+    try {
+      await agentsStore.setMain(item.label);
+      console.log(`[Composer / popover] agent set main: ${item.label} (下次发 prompt 生效)`);
+    } catch (e) {
+      console.error('[Composer / popover] setMain failed', e);
+    }
+  }
+}
+
+function onTextareaInput() {
+  autoResize();
+  if (isSlashTriggerActive()) {
+    openSlashPopover();
+  } else {
+    closeSlashPopover();
+  }
+}
+
+function onTextareaKeydown(e: KeyboardEvent) {
+  if (!showSlashPopover.value) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeSlashPopover();
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    slashPopoverCursor.value = Math.min(slashPopoverCursor.value + 1, filteredSlashItems.value.length - 1);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    slashPopoverCursor.value = Math.max(slashPopoverCursor.value - 1, 0);
+  } else if (e.key === 'Enter') {
+    if (filteredSlashItems.value.length > 0 && slashPopoverCursor.value >= 0) {
+      e.preventDefault();
+      const item = filteredSlashItems.value[slashPopoverCursor.value];
+      if (item) pickSlashItem(item);
+    }
   }
 }
 
@@ -250,9 +420,39 @@ onMounted(() => nextTick(autoResize));
       class="pad-composer__input"
       rows="2"
       :placeholder="hasConfig ? '帮你编写代码、调试 Bug、优化性能等开发工作，交付生产级代码产物。' : '先在 Settings → Providers 加个 provider, 然后回这里发消息'"
-      @input="autoResize"
-      @keydown.enter.exact.prevent="send"
+      @input="onTextareaInput"
+      @keydown="onTextareaKeydown"
+      @keydown.enter.exact.prevent="showSlashPopover ? pickSlashItem(filteredSlashItems[slashPopoverCursor] || filteredSlashItems[0]) : send()"
     />
+
+    <!-- v0.4.7a: Composer / popover 3 类 (skill / agent / mcp, 不含 builtin 22) -->
+    <div v-if="showSlashPopover" ref="slashPopoverRef" class="pad-composer__slash-popover">
+      <div v-if="filteredSlashItems.length === 0" class="pad-composer__slash-empty">
+        <span>没有匹配的项</span>
+      </div>
+      <div v-else class="pad-composer__slash-list">
+        <template v-for="group in ['Skills', 'Agents', '扩展']" :key="group">
+          <div v-if="filteredSlashItems.some((it) => it.group === group)" class="pad-composer__slash-group-label">
+            {{ group }}
+          </div>
+          <button
+            v-for="it in filteredSlashItems.filter((x) => x.group === group)"
+            :key="`${group}-${it.label}`"
+            class="pad-composer__slash-item"
+            :class="{ 'is-active': filteredSlashItems.indexOf(it) === slashPopoverCursor, 'is-placeholder': it.isPlaceholder }"
+            @click="pickSlashItem(it)"
+          >
+            <span class="pad-composer__slash-slug">{{ it.slug }}</span>
+            <span class="pad-composer__slash-desc">{{ it.description }}</span>
+          </button>
+        </template>
+      </div>
+      <div class="pad-composer__slash-hint">
+        <span>↑↓ 选</span>
+        <span>↵ 触发</span>
+        <span>Esc 关闭</span>
+      </div>
+    </div>
     <div class="pad-composer__bar">
       <div class="pad-composer__bar-left">
         <button class="pad-composer__iconbtn" title="添加上下文">
@@ -544,6 +744,81 @@ onMounted(() => nextTick(autoResize));
 .pad-composer__agent-item-check {
   color: var(--pad-fg-success, #22c55e);
   flex-shrink: 0;
+}
+
+/* v0.4.7a: Composer / popover (skill / agent / mcp, 不含 builtin 22) */
+.pad-composer__slash-popover {
+  position: relative;
+  margin-top: var(--pad-sp-2);
+  background: var(--pad-card, #fff);
+  border: 1px solid var(--pad-border, rgba(0,0,0,0.1));
+  border-radius: var(--pad-radius-md, 8px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  padding: 4px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.pad-composer__slash-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-tertiary);
+}
+.pad-composer__slash-list { display: flex; flex-direction: column; gap: 2px; }
+.pad-composer__slash-group-label {
+  padding: 6px 10px 2px;
+  font-size: 10px;
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pad-composer__slash-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--pad-radius-sm, 4px);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
+}
+.pad-composer__slash-item:hover,
+.pad-composer__slash-item.is-active {
+  background: var(--pad-bg-hover, rgba(0,0,0,0.06));
+  color: var(--pad-fg-primary);
+}
+.pad-composer__slash-item.is-placeholder { opacity: 0.5; cursor: not-allowed; }
+.pad-composer__slash-item.is-placeholder:hover { background: transparent; }
+.pad-composer__slash-slug {
+  font-family: var(--pad-font-mono);
+  font-size: 12px;
+  color: var(--pad-accent, #6366f1);
+  font-weight: var(--pad-fw-medium);
+  flex-shrink: 0;
+  min-width: 140px;
+}
+.pad-composer__slash-desc {
+  flex: 1;
+  font-size: 11px;
+  color: var(--pad-fg-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pad-composer__slash-hint {
+  display: flex;
+  gap: 12px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--pad-border-subtle, rgba(0,0,0,0.06));
+  font-size: 10px;
+  color: var(--pad-fg-tertiary);
+  font-family: var(--pad-font-mono);
 }
 
 .pad-composer__bar {
