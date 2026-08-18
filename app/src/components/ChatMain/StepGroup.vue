@@ -32,6 +32,10 @@ const thinkingBlocks = computed(() => props.step.thinking);
 const toolCalls = computed(() => props.step.toolCalls);
 const isActive = computed(() => props.step.isActive);
 const collapsed = computed(() => props.step.collapsed);
+// v0.5.0-PR3: step 内的 LLM 中间文字 (text_delta 累积) — 跟 thinking + tool_calls 同一层
+//   之前 v0.4.1.2 砍掉是因为 message.content 重复累积 (text 累积错了), 现在 per-step stepText
+//   不会重复, 重新显示 — user 反馈"看不到中间过程回复文本"
+const stepText = computed(() => props.step.stepText?.trim() ?? '');
 
 const thinkingCount = computed(() => thinkingBlocks.value.filter((t) => t.content).length);
 const toolCount = computed(() => toolCalls.value.length);
@@ -177,8 +181,13 @@ const stepSummary = computed(() => {
         </div>
       </div>
 
-      <!-- v0.4.1.2 fix: step 内不渲染 stepText, text 统一在 final body (lastStep.stepText) 显示
-       * 避免 step 内 stepText 跟 final body 内容重复 (user 反馈"出现多次同样内容") -->
+      <!-- v0.5.0-PR3: step 内 LLM 中间文字 (text_delta 累积) — 跟 thinking + toolCalls 平级
+       * v0.4.1.2 当时砍掉是因为 message.content 重复累积 (text 累积错了), 当时表现为
+       *   "step 1 跟 step 2 重复显示同一段话". 现在 chat.ts 把 text_delta 累积到 per-step
+       *   stepText (不重复), 重新在 step 内显示 — user 反馈"看不到中间过程回复文本". -->
+      <div v-if="stepText" class="pad-step__text">
+        <MarkdownContent :content="stepText" />
+      </div>
     </div>
   </div>
 </template>
@@ -344,6 +353,22 @@ const stepSummary = computed(() => {
 .pad-step__thinking-content :deep(.pad-md p) {
   font-style: italic;
   color: var(--pad-fg-tertiary);
+}
+
+/* ===== step 内的 LLM 中间文字 (fs-13 normal, 跟正文一样) ===== */
+.pad-step__text {
+  margin: 4px 0 4px 6px;
+  padding: 4px 0;
+  font-size: var(--pad-fs-13);
+  line-height: var(--pad-lh-base);
+  color: var(--pad-fg-primary);
+}
+/* 深穿透 MarkdownContent 内部, 保持正文 14px + fg-primary */
+.pad-step__text :deep(.pad-md),
+.pad-step__text :deep(.pad-md p) {
+  font-size: var(--pad-fs-13);
+  color: var(--pad-fg-primary);
+  font-style: normal;
 }
 
 /* ===== tool calls 块 (fs-11 mono) ===== */

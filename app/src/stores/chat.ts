@@ -816,6 +816,35 @@ export const useChatStore = defineStore('chat', () => {
     sessionStore.renameSession(sessionId, title);
   }
 
+  /**
+   * v0.5.0-PR3 (D_Stop_Hang): 强制把 session 翻成"非 streaming" 状态.
+   *
+   * 用途: Pi SDK 0.84.2 在某些 OpenAI-compatible provider (MiniMax / DeepSeek V4 Flash 等)
+   *   上, abort 后 emit `agent_end` event 偶尔 lost → 跑马灯一直转, stop 按钮卡死.
+   *   Composer.stop() 30s timeout 或 abort 失败 catch 时调这个, 强制恢复 UI 状态.
+   *
+   * 副作用: 当前 active step 关闭 (isActive=false, collapsed=true), 但不修改已累积的
+   *   thinking / toolCalls / stepText — 用户能继续发下一条消息, 已生成的回复保留.
+   */
+  function forceStopStreaming(sessionId: string) {
+    streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
+    retryBySession.value = { ...retryBySession.value, [sessionId]: null };
+    const d2 = getSessionData(sessionId);
+    if (d2) {
+      const assistant = d2.messages[d2.messages.length - 1];
+      if (assistant && assistant.role === 'assistant' && assistant.steps) {
+        const last = assistant.steps[assistant.steps.length - 1];
+        if (last && last.isActive) {
+          last.isActive = false;
+          last.collapsed = true;
+        }
+      }
+      chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+    }
+    setPhase(sessionId, 'idle');
+    console.warn('[chat] forceStopStreaming:', sessionId, '(abort 30s timeout or catch 兜底)');
+  }
+
   return {
     chatData,
     streamingBySession,
@@ -848,5 +877,6 @@ export const useChatStore = defineStore('chat', () => {
     setStepCollapsed, // v0.4.1 step 累加
     setStepThinkingCollapsed,
     compact, // v0.4.3: 手动触发 context 压缩
+    forceStopStreaming, // v0.5.0-PR3: 强制把 streaming 翻 false (abort 30s timeout / catch 兜底)
   };
 });

@@ -323,17 +323,56 @@ async function send() {
  *   透传到 sidecar → AgentSession.abort() → 停 LLM stream + tool call
  * 期间 (abort → agent_end 之间) userAborted=true, UI 状态保持"停止中"视觉,
  *   agent_end event 来后 store 翻 streaming=false, button 自动恢复成 send.
+ *
+ * v0.5.0-PR3 兜底 (D_Stop_Hang):
+ *   - 30s timeout: Pi SDK 0.84.2 在某些 OpenAI-compatible provider (MiniMax 等) 上
+ *     abort 后 emit `agent_end` event 偶尔 lost → 跑马灯一直转. 30s 内没收到
+ *     agent_end 就 force 翻 streaming=false + 弹 "已强制终止" 提示.
+ *   - catch 兜底: abort RpcCommand 本身失败时也 force 翻 streaming=false.
  */
 const userAborted = ref(false);
+let abortWatchStop: (() => void) | null = null;
 async function stop() {
   const sid = activeSession.value?.id;
   if (!sid) return;
   userAborted.value = true;
+  // 启动 30s fallback timer: 30s 内没收到 agent_end → force 翻 streaming=false
+  if (abortWatchStop) abortWatchStop();
+  let resolved = false;
+  const fallbackTimer = setTimeout(() => {
+    if (resolved) return;
+    console.warn('[Composer] abort 30s 内没收到 agent_end, force 翻 streaming=false');
+    chatStore.forceStopStreaming(sid);
+    userAborted.value = false;
+  }, 30_000);
+  // watch isStreaming 翻 false → agent_end 到了, 立刻 clear timer
+  abortWatchStop = watch(
+    () => chatStore.isStreamingSession(sid),
+    (s) => {
+      if (!s) {
+        resolved = true;
+        clearTimeout(fallbackTimer);
+        if (abortWatchStop) {
+          abortWatchStop();
+          abortWatchStop = null;
+        }
+        userAborted.value = false;
+      }
+    },
+    { immediate: false },
+  );
   try {
     await piTauri.sendRpcCommand(sid, { type: 'abort' });
   } catch (e) {
-    console.error('[Composer] abort RpcCommand failed', e);
-    // 即使失败也清 flag, 让用户能继续操作
+    console.error('[Composer] abort RpcCommand failed, force 翻 streaming=false', e);
+    resolved = true;
+    clearTimeout(fallbackTimer);
+    if (abortWatchStop) {
+      abortWatchStop();
+      abortWatchStop = null;
+    }
+    // 兜底: abort 失败也清 streaming, 让 user 继续操作
+    chatStore.forceStopStreaming(sid);
     userAborted.value = false;
   }
 }
