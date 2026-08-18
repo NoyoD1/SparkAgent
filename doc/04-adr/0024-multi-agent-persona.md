@@ -1,8 +1,8 @@
 # ADR-0024: Multi-agent persona（主/子 agent 库 + Composer 顶部 selector + SlashPopover）
 
-- **状态**: Proposed
+- **状态**: Accepted (2026-08-18 14:36, user 拍板 "按你的来 开始吧")
 - **日期**: 2026-08-18
-- **决策者**: user 拍板（待）
+- **决策者**: user 拍板
 - **Supersedes**: 无
 - **Superseded by**: 无
 - **关联**: [ADR-0012](0012-pi-sdk-integration.md) (Pi SDK 集成) / [ADR-0022](0022-sub-agent-architecture.md) (sub-agent 调用层) / [ADR-0023](0023-mcp-integration.md) (MCP 集成)

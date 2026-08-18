@@ -21,6 +21,7 @@
 | **v0.4.4 Skills** | **Pi SDK skills 暴露 (loadSkills + formatSkillsForPrompt + system prompt 注入)** | Sidebar SkillsButton + popover + sidecar stdout 一次 emit `skills_snapshot` | 🟢 (commit `b02e99e` + v0.4.4.1 `5c71e56` + v0.4.4.2 `c613297` + v0.4.4.3 `62a56c3` + v0.4.4.4 `842d43a` 从 zip 压缩包 + v0.4.4.5 `52dd667` 从 URL import) | **2026-08-18** |
 | **v0.4.4.6 polish** | **4 个 user 反馈 bug 修 (上下文窗口持久化 + 模型 dropdown outside-click + contextWindow 读 user config + model metadata form + skill 实时刷新)** | 1) chat.ts 加 `pi-agent:usage:v1` STORAGE_KEY + watch 持久化 lastUsageBySession / contextTokensBySession; 2) Composer.vue model menu 加 outside-click handler (复用 onClickOutsideAnyMenu); 3) chat.ts getContextWindow 改读 activeModel.contextWindow (缺省 200K); 4) FE+Rust+sidecar 协调加 model 5 字段 metadata (type/vision/contextWindow/maxOutput/maxRounds/reasoning), ProviderTab ⚙️ inline form; 5) Rust lib.rs 加 list_skills invoke handler (std::fs::read_dir 扫 2 目录), skills.ts refreshFromTauri, AddSkillForm 写完/导入完调 refresh 立刻刷新 UI | 🟢 (2 commit `940eb47` + `ddd179a`, 端到端验证 PASS) | **2026-08-18** |
 | **v0.4.4 系列** | **P0 Pi SDK 暴露 (table stakes)** | skills / slash cmds / rules / usage | ⚪ (规划) | **2026-09 目标** |
+| **v0.4.5.1 + v0.4.6.1 + v0.4.7a** | **Multi-agent persona (主/子 agent 库 + Composer 顶部 selector + SlashPopover 3 类)** | 5 invoke (list/read/write/delete/set_main_agent) + 旧数据迁移 (AGENTS.md → .pi/agents/default.md) + Sidebar "AGENT 团队" group + Composer 顶部 agent selector + Composer `/` popover 3 类 (skill/agent/mcp, 不含 builtin 22). 跟 v0.4.4 skills 同 pattern (D165 systemPrompt 不可动态改): 切主 agent = 写 active_agent.json + 下次发 prompt 时 sidecar 启动自动生效. 跟 ADR-0022 sub-agent 命名区分 (本 ADR "子 agent" = 数据层 persona 库, ADR-0022 "sub-agent" = 调用层独立 sidecar 进程). 详见 [ADR-0024](04-adr/0024-multi-agent-persona.md). D184 教训 v6/v7/v8 累计 3 次现场重演 (v0.4.5/6/7/8 全部推测错). 3 commit (7b8f833 + e2ece2a + fa8412c) + 端到端 cargo tauri build PASS, .msi 46.5 MB + NSIS 32.5 MB (2026-08-18 15:00) | 🟢 (3 commit) | **2026-08-18** |
 | v0.5.0+ | P1 自建 | Plan mode / sub-agents / MCP 集成 | ⚪ | TBD |
 | v0.6 | Web app + Agent SDK | claude.ai/code 对标 / 编程 API | ⚪ | TBD |
 | v0.7 | 体验增强 | Auto mode / Voice / Hooks / Notepads | ⚪ | TBD |
@@ -33,8 +34,9 @@
 >
 > **ADR 拍板状态 (2026-08-17 23:26)**:
 > - [ADR-0021](04-adr/0021-pi-agent-2026-strategy.md) ✅ **accepted** (A 方案: 跟 Pi SDK 走)
-> - [ADR-0022](04-adr/0022-sub-agent-architecture.md) ⚪ **proposed** (待 user 拍板 A/B/C)
+> - [ADR-0022](04-adr/0022-sub-agent-architecture.md) ✅ **accepted** (A 方案, 2026-08-17 23:33, user 拍板, 短期只 Explore/Plan)
 > - [ADR-0023](04-adr/0023-mcp-integration.md) ✅ **accepted** (3 阶段全做)
+> - [ADR-0024](04-adr/0024-multi-agent-persona.md) ✅ **accepted** (2026-08-18 14:36, user 拍板 "按你的来 开始吧", 走 v0.4.4 skills 同 pattern 切主 agent)
 
 ---
 
