@@ -141,41 +141,14 @@ const skillsPromptFragment = enabledSkills.length > 0
   : '';
 console.error(`[sidecar] skills: loaded ${allSkills.length} total, ${enabledSkills.length} enabled, ${skillsDiagnostics.length} diagnostics`);
 
-// ====== v0.4.6.1 Multi-agent persona (主/子 agent 库) ======
-// Pi SDK 0.84.2 `_baseSystemPrompt` + `appendSystemPrompt` 都是 ResourceLoader 私有内部 state
-//   (D183 v3 现场重演 + D171 实测确认), 没有公开 setter, 走 session 重建 path 太复杂.
-//   跟 v0.4.4 skills 同 pattern: 切主 agent = FE 写 active_agent.json + 下次发 prompt
-//   sidecar 启动时读 config.activeAgent, 拼到 appendSystemPromptOverride (D165 systemPrompt
-//   不可动态改, 走 "下次发 prompt 时生效" UX). 切了下条 LLM 用新 persona, history 保留
-//   (SessionManager 自动从 jsonl 读回).
-//
-// format: config.activeAgent = { name: "engineer", body: "..." }  (FE 端 list_agents 后
-//   取 active_name + read_agent 拿 body 拼好传过来)
-const activeAgentConfig = config.activeAgent ?? null;
-// v0.4.6.2: 加详细 debug log 排查 "切 agent 没生效" bug (D186 教训)
-console.error(`[sidecar] active agent config: type=${typeof activeAgentConfig} value=${activeAgentConfig ? JSON.stringify({name: activeAgentConfig.name, body_len: activeAgentConfig.body?.length ?? 0, body_is_DEFAULT: activeAgentConfig.body === 'DEFAULT'}) : 'null/undefined'}`);
-let activeAgentPromptFragment = '';
-if (activeAgentConfig && activeAgentConfig.body && activeAgentConfig.body !== 'DEFAULT') {
-  activeAgentPromptFragment = `\n\n<current_agent_persona>
-You are currently operating under the "${activeAgentConfig.name}" persona. Follow these persona rules:
-
-${activeAgentConfig.body}
-</current_agent_persona>`;
-  console.error(`[sidecar] active agent: name=${activeAgentConfig.name} body_len=${activeAgentConfig.body.length} → 拼 persona 段`);
-} else if (activeAgentConfig && activeAgentConfig.body === 'DEFAULT') {
-  // v0.5.0-PR1: DEFAULT marker = 走 Pi SDK 默认 (不拼 persona 段, 让 LLM 走 Pi 内置默认 prompt)
-  console.error(`[sidecar] active agent: ${activeAgentConfig.name} marker=DEFAULT → 走 Pi SDK 默认, 不拼 persona 段`);
-} else {
-  console.error(`[sidecar] active agent: none (no persona injected) — activeAgentConfig=${JSON.stringify(activeAgentConfig)}`);
-}
-// v0.5.0-PR1: 4 段 system prompt 显式 log (Persona / Skills / Context Awareness / Project)
-//  让 user 装新 .msi 跑端到端时, 能从 sidecar stderr log 看到 4 段拼装, 验证切 agent 真生效.
-//  self-verify 范围: sidecar log + agents store init log (D186 教训诚实承认: LLM 是否真看到, 只有 user 端到端能验)
-const _personaSegLabel = activeAgentConfig?.body === 'DEFAULT'
-  ? 'persona=Pi-SDK-default'
-  : (activeAgentConfig?.name && activeAgentConfig.body ? `persona=${activeAgentConfig.name}` : 'persona=Pi-SDK-default');
-const _personaSegLen = activeAgentPromptFragment.length;
-console.error(`[sidecar] system prompt: 4 segments [${_personaSegLabel}(${_personaSegLen} chars) skills=${enabledSkills.length}(${skillsPromptFragment.length} chars) context_awareness=set project_context=Pi-SDK-auto]`);
+// v0.5.0-v0.1: 删 multi-agent persona 段 (回滚 v0.4.6.1 + v0.4.6.2 + v0.5.0-PR1)
+//   user 16:24 拍板: agent 是边界定义/思维指导, 永远是 1 个通用 agent, single agent 链路
+//   Pi SDK 0.84.2 DefaultResourceLoader 自动 load <agentDir>/AGENTS.md + <cwd>/AGENTS.md
+//   (resource-loader.ts:71) → 注入 system prompt 段. AGENTS.md 编辑走 Settings → Custom Instructions tab.
+//   sidecar 不用拼 persona 段, 也不需要 active_agent 字段.
+// v0.5.0-v0.1: 3 段 system prompt 显式 log (Base / Skills / Context Awareness) + Project context
+//  Pi SDK auto-load. 让 user 装 .msi 跑端到端能从 sidecar stderr 看拼装.
+console.error(`[sidecar] system prompt: 4 segments [base=Pi-SDK-default skills=${enabledSkills.length}(${skillsPromptFragment.length} chars) project_context=AGENTS.md-auto(Pi-SDK) context_awareness=set]`);
 if (skillsDiagnostics.length > 0) {
   for (const d of skillsDiagnostics.slice(0, 5)) {
     console.error(`[sidecar] skills diag: ${d.type} ${d.message} ${d.path ?? ''}`);
@@ -399,9 +372,9 @@ intent across the session is still part of the conversation.
         //   返回 XML 格式, 跟 <context_awareness> 风格一致). enabledSkillNames 从 config 传, 改 enabled
         //   必须重启 sidecar (D165 systemPrompt 不可动态改).
         ...(skillsPromptFragment ? [skillsPromptFragment] : []),
-        // v0.4.6.1 Multi-agent persona: 拼 active agent 内容进 system prompt (跟 skills 同 pattern,
-        //   改 active 必须重启 sidecar = 下次发 prompt 自动生效).
-        ...(activeAgentPromptFragment ? [activeAgentPromptFragment] : []),
+        // v0.5.0-v0.1: 删 active agent persona 段 (multi-agent persona 回滚)
+        //   Pi SDK 0.84.2 DefaultResourceLoader 自动 load AGENTS.md (resource-loader.ts:71)
+        //   → 注入 project_context 段. sidecar 不用拼 persona.
       ],
     },
   });

@@ -17,7 +17,6 @@ import { useConfigStore } from './config';
 import { useSessionStore } from './session';
 import { useUiStore } from './ui';
 import { useSkillsStore } from './skills';
-import { useAgentsStore } from './agents';
 
 export type { ChatMessage, ThinkingBlock, ToolCallBlock, Step };
 
@@ -703,11 +702,6 @@ export const useChatStore = defineStore('chat', () => {
       //   不可动态改), SkillsButton toggle 触发 Tauri sidecar kill+spawn.
       const skills = useSkillsStore();
       const enabledNames = skills.getEnabledNames();
-      // v0.4.6.1 multi-agent persona: 拿当前 active agent 的 body 拼到 activeAgent.
-      //   跟 skills 同 pattern (D165 systemPrompt 不可动态改, 改 active = 下次发 prompt 时
-      //   sidecar 启动自动生效). 没有 active → undefined (sidecar 不拼 persona 段).
-      const agents = useAgentsStore();
-      const activeAgentConfig = (await agents.getActiveAgentConfig()) ?? undefined;
       await piTauri.sendPrompt(sessionId, text, () => ({
         providerId: active.id,
         provider: active.type,
@@ -726,7 +720,6 @@ export const useChatStore = defineStore('chat', () => {
           maxRounds: model.maxRounds,
           reasoning: model.reasoning,
         },
-        activeAgent: activeAgentConfig,  // v0.4.6.1 multi-agent persona
       }));
       console.log('[chat] sendPrompt: piTauri.sendPrompt resolved');
     } catch (e) {

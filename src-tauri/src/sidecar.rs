@@ -84,24 +84,10 @@ pub struct SidecarConfig {
     ///   (内置 provider 走 Pi SDK catalog 不需要). 缺省 → sidecar 用 hardcoded 默认值.
     #[serde(default)]
     pub model_metadata: Option<ModelMetadataConfig>,
-    /// v0.4.6.1 Multi-agent persona: 当前 active agent name + content (从 <ws>/.pi/agents/<name>.md 读)
-    ///   sidecar 启动时拼到 appendSystemPromptOverride 注入 system prompt.
-    ///   切主 agent → sidecar 走 session 重建 path (Pi SDK 0.84.2 不支持 in-place 改 system prompt,
-    ///   详见 ADR-0024 + D183 v3 现场重演). 缺省 → 没有 active agent, 不拼.
-    #[serde(default)]
-    pub active_agent: Option<ActiveAgentConfig>,
+    // v0.5.0-v0.1: 删 active_agent 字段 (multi-agent persona 回滚, 详见 ADR-0024 superseded by ADR-0025)
 }
 
-/// v0.4.6.1 Multi-agent persona: 当前 active agent name + body content.
-///   sidecar 启动时读 <ws>/.pi/active_agent.json 拿 name, 读 <ws>/.pi/agents/<name>.md 拿 body.
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActiveAgentConfig {
-    /// agent name (跟 <ws>/.pi/agents/<name>.md 文件名一致, 1-64 char)
-    pub name: String,
-    /// body (frontmatter 后面的 markdown, 已经是 raw content)
-    pub body: String,
-}
+// v0.5.0-v0.1: 删 ActiveAgentConfig struct (multi-agent persona 回滚)
 
 /// v0.4.4 Skills (Pi SDK 暴露): enabled skill names + 额外 skill paths.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -187,7 +173,7 @@ pub fn run_prompt(
             "sessionId": config.session_id,
             "skills": config.skills,        // v0.4.4 Skills (Pi SDK 暴露)
             "modelMetadata": config.model_metadata,  // v0.4.4.6 model metadata
-            "activeAgent": config.active_agent,      // v0.4.6.1 multi-agent persona
+            // v0.5.0-v0.1: 删 activeAgent 字段 (multi-agent persona 回滚)
         })) {
             Ok(s) => s,
             Err(e) => {

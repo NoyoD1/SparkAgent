@@ -1,11 +1,23 @@
 # ADR-0024: Multi-agent persona（主/子 agent 库 + Composer 顶部 selector + SlashPopover）
 
-- **状态**: Accepted (2026-08-18 14:36, user 拍板 "按你的来 开始吧")
-- **日期**: 2026-08-18
-- **决策者**: user 拍板
-- **Supersedes**: 无
-- **Superseded by**: 无
-- **关联**: [ADR-0012](0012-pi-sdk-integration.md) (Pi SDK 集成) / [ADR-0022](0022-sub-agent-architecture.md) (sub-agent 调用层) / [ADR-0023](0023-mcp-integration.md) (MCP 集成)
+## ⚠️ 已被 ADR-0025 取代 (2026-08-18 16:30)
+
+**回滚原因 (user 16:24 原话)**: "我开发的应该是一个通用 agent, 它永远是主 agent, 一些子 agent 只是像你之前规划的, 用于分工工作的, 处理什么问题是由我们本身线程决定的, 而不是一定需要我们主动去选择. agent team 其实是以前的那种思维, 现在 agent 更像是一个边界定义, 处理问题时的思维指导. 先移除 agent team 的设定吧, 我们先把单 agent 整个链路拉动之后, 再考虑 subagent 的实现."
+
+**保留的历史**: 本 ADR 详细记录了 v0.4.6.1 + v0.4.6.2 + v0.4.7a + v0.4.7b + v0.5.0-PR1 的 5 个 commit + 1 个 PR 的设计 + 实现, 留作 reference. **D186 教训累计 5 次现场重演** (v6 + v7 + v8 + v9 + v10 全部推测错方向, 详情见 ADR 末尾 "D186 教训 v8-v10 现场重演"), **D184 教训累计 5 次** (按 user 原话字面理解, 不凭草图 / 截图 / 推测).
+
+**新方向**: 见 [ADR-0025](0025-single-agent-design.md) — 1 个通用 agent (永远是主 agent, 不需要切) + AGENTS.md (Custom Instructions tab 编辑) 作 system prompt 段 (思维指导 / 边界定义) + Skills (持续能力) + Slash (user 自定义模板) + @ 引用 (一次性片段). Sub-agent 留作 v0.5.1+ 再说, 不是 P0 优先级.
+
+**已作废的 commit** (B 重做 1 个 commit 落地, 不堆 revert 历史):
+- 7b8f833 v0.4.5.1 砍 Slash tab (被 1187120 v0.4.5.2 恢复, **无需处理**)
+- e2ece2a v0.4.6.1 multi-agent persona (Sidebar AGENT 团队 group + Composer 顶部 agent selector + Settings → Agents tab)
+- 5ee616e v0.4.6.2 per-session 切主 agent
+- fa8412c v0.4.7a Composer `/` popover 3 类 (含 Agents 段)
+- 2f21394 v0.5.0-PR1 DEFAULT marker + ensureDefaultAgent
+- 4b32b7d doc 同步
+- (新 commit 落地) v0.5.0-v0.1: 1 个大 commit 直接重写代码 (删 agents store / 删 7 invoke / 改 CustomInstructionsTab 回归单 AGENTS.md 编辑 / 改 `/` 弹窗 2 类 / 改 WorkspaceTree 删 agent group / 改 sidecar 简化 log)
+
+## 历史内容 (保留参考)
 
 ---
 

@@ -14,7 +14,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, Manager};
 use std::path::{Path, PathBuf};
 // v0.4.4.6: ClientConfig 用 sidecar::SkillsConfig / sidecar::ModelMetadataConfig
-use sidecar::{SkillsConfig, ModelMetadataConfig, ActiveAgentConfig};
+use sidecar::{SkillsConfig, ModelMetadataConfig};
 
 /// Debug log to <project>/.tauri-debug.log (DEBUG ONLY).
 /// 用 file 而非 stderr 是因为 cargo tauri dev 的 stderr 被 bash task pipe 吃了看不见.
@@ -63,10 +63,7 @@ pub struct ClientConfig {
     ///   FE 从 configStore.activeModel 读, sidecar 拼到 user-custom model object.
     #[serde(default)]
     pub model_metadata: Option<ModelMetadataConfig>,
-    /// v0.4.6.1 multi-agent persona: 当前 active agent (走 sidecar 拼到 appendSystemPromptOverride).
-    ///   FE 从 agents store 读, send_prompt 时一起传, 跟 skills/modelMetadata 同 pattern.
-    #[serde(default)]
-    pub active_agent: Option<ActiveAgentConfig>,
+    // v0.5.0-v0.1: 删 active_agent 字段 (multi-agent persona 回滚, 详见 ADR-0024 superseded by ADR-0025)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -944,319 +941,10 @@ async fn delete_custom_instructions(args: CustomInstructionsArgs) -> Result<bool
     Ok(true)
 }
 
-// ====== v0.4.6.1: Multi-agent persona (主/子 agent 库 + Composer 顶部 selector) ======
-// 存储: <workspace>/.pi/agents/<name>.md (frontmatter name/description/role: main|sub)
-// 激活态: <workspace>/.pi/active_agent.json
-// 跟 v0.4.4 Skills / v0.4.6 自定义指令 同 pattern (std::fs 读写, per-workspace 为主)
-// 切主 agent → sidecar 走 session 重建 path (Pi SDK 0.84.2 不支持 in-place 改 system prompt,
-//   详见 ADR-0024 + D183 v3 现场重演 + 决策: 走 SessionManager.setSessionFile + 重建 AgentSession,
-//   自动从 jsonl 读回 history, 切了下条 LLM 回复就用新 persona, history 完整保留)
-//
-// D193 教训: 全部 5 invoke fn cmd(args: MyArgs) → { args: {...} } 包裹, camelCase 字段
-// D188 教训: 跟 list_skills / read_skill_file 现有 pattern 对齐
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentArgs {
-    /// workspace 目录绝对路径 (扫 <ws>/.pi/agents/ + 写 <ws>/.pi/active_agent.json)
-    workspace_path: Option<String>,
-    /// global agentDir 路径 (留作 future global agent 扩展, 当前未用)
-    #[serde(default)]
-    agent_dir: Option<String>,
-    /// agent name (1-64 char, [a-zA-Z0-9._-], 防 path traversal)
-    #[serde(default)]
-    name: Option<String>,
-    /// write 用: 完整文件内容 (markdown + 可选 frontmatter). read/delete 时不传
-    #[serde(default)]
-    content: Option<String>,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentInfo {
-    name: String,
-    description: Option<String>,
-    /// 'main' | 'sub' (frontmatter role 字段, 缺省 'sub')
-    role: String,
-    body: String,
-    file_path: String,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ListAgentsResponse {
-    agents: Vec<AgentInfo>,
-    /// 当前 active agent name (从 <ws>/.pi/active_agent.json 读, 缺省 None = 未激活)
-    active_name: Option<String>,
-}
-
-fn parse_agent_name(name: &str) -> Result<String, String> {
-    if name.is_empty() || name.len() > 64 {
-        return Err(format!("agent name 长度必须 1-64, got {}", name.len()));
-    }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
-        return Err(format!("agent name 只能含 [a-zA-Z0-9._-], got '{}'", name));
-    }
-    Ok(name.to_string())
-}
-
-/// 极简 frontmatter 解析 (跟 v0.4.4.2 write_skill_file 的 inline frontmatter 一样),
-/// 只支持 `---\nkey: value\n---\nbody` 格式, 不引 YAML 库
-fn parse_agent_frontmatter(content: &str) -> (std::collections::HashMap<String, String>, String) {
-    let mut fm: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    if !content.starts_with("---") {
-        return (fm, content.to_string());
-    }
-    let rest = &content[3..];
-    if let Some(end_idx) = rest.find("\n---") {
-        let header = &rest[..end_idx];
-        let after = &rest[end_idx + 4..];
-        let body_start = after.find('\n').map(|i| i + 1).unwrap_or(0);
-        let body = after[body_start..].to_string();
-        for line in header.lines() {
-            if let Some((k, v)) = line.split_once(':') {
-                let key = k.trim().to_string();
-                let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
-                if !key.is_empty() {
-                    fm.insert(key, val);
-                }
-            }
-        }
-        return (fm, body);
-    }
-    (fm, content.to_string())
-}
-
-fn resolve_agents_dir(workspace_path: Option<String>) -> Result<PathBuf, String> {
-    let ws = workspace_path.as_ref().filter(|s| !s.is_empty())
-        .ok_or("agent 操作需要 workspacePath")?;
-    Ok(PathBuf::from(ws).join(".pi").join("agents"))
-}
-
-fn resolve_active_agent_path(workspace_path: Option<String>) -> Result<PathBuf, String> {
-    let ws = workspace_path.as_ref().filter(|s| !s.is_empty())
-        .ok_or("active agent 操作需要 workspacePath")?;
-    Ok(PathBuf::from(ws).join(".pi").join("active_agent.json"))
-}
-
-fn read_active_agent_name(workspace_path: Option<String>) -> Option<String> {
-    let path = resolve_active_agent_path(workspace_path).ok()?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-    json.get("name").and_then(|v| v.as_str()).map(|s| s.to_string())
-}
-
-fn write_active_agent_name(workspace_path: Option<String>, name: &str) -> Result<String, String> {
-    let path = resolve_active_agent_path(workspace_path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create_dir_all({}): {}", parent.display(), e))?;
-    }
-    let json = serde_json::json!({
-        "name": name,
-        "updatedAt": chrono::Utc::now().to_rfc3339(),
-    });
-    let pretty = serde_json::to_string_pretty(&json)
-        .map_err(|e| format!("ser json: {}", e))?;
-    std::fs::write(&path, pretty)
-        .map_err(|e| format!("write({}): {}", path.display(), e))?;
-    Ok(path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-async fn list_agents(args: AgentArgs) -> Result<ListAgentsResponse, String> {
-    let mut agents = Vec::new();
-    let dir = resolve_agents_dir(args.workspace_path.clone())?;
-    if dir.exists() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(ListAgentsResponse { agents, active_name: None });
-            }
-            Err(e) => return Err(format!("read_dir({}): {}", dir.display(), e)),
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if !p.is_file() { continue; }
-            if p.extension().and_then(|s| s.to_str()) != Some("md") { continue; }
-            let filename = match p.file_stem().and_then(|s| s.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            let content = match std::fs::read_to_string(&p) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let (fm, body) = parse_agent_frontmatter(&content);
-            agents.push(AgentInfo {
-                name: fm.get("name").cloned().unwrap_or_else(|| filename.clone()),
-                description: fm.get("description").cloned(),
-                role: fm.get("role").cloned().unwrap_or_else(|| "sub".to_string()),
-                body,
-                file_path: p.to_string_lossy().to_string(),
-            });
-        }
-    }
-    // main 排前, 同 role 按 name 排序 (跟 sidebar group + Composer 顶部 selector 一致)
-    agents.sort_by(|a, b| {
-        match (a.role.as_str(), b.role.as_str()) {
-            ("main", "sub") => std::cmp::Ordering::Less,
-            ("sub", "main") => std::cmp::Ordering::Greater,
-            _ => a.name.cmp(&b.name),
-        }
-    });
-    Ok(ListAgentsResponse {
-        agents,
-        active_name: read_active_agent_name(args.workspace_path),
-    })
-}
-
-#[tauri::command]
-async fn read_agent(args: AgentArgs) -> Result<AgentInfo, String> {
-    let name = args.name.as_ref().ok_or("read_agent 需要 name 字段")?;
-    parse_agent_name(name)?;
-    let dir = resolve_agents_dir(args.workspace_path)?;
-    let path = dir.join(format!("{}.md", name));
-    if !path.exists() {
-        return Err(format!("agent 不存在: {}", path.display()));
-    }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read({}): {}", path.display(), e))?;
-    let (fm, body) = parse_agent_frontmatter(&content);
-    Ok(AgentInfo {
-        name: fm.get("name").cloned().unwrap_or_else(|| name.clone()),
-        description: fm.get("description").cloned(),
-        role: fm.get("role").cloned().unwrap_or_else(|| "sub".to_string()),
-        body,
-        file_path: path.to_string_lossy().to_string(),
-    })
-}
-
-#[tauri::command]
-async fn write_agent(args: AgentArgs) -> Result<String, String> {
-    let name = args.name.as_ref().ok_or("write_agent 需要 name 字段")?;
-    parse_agent_name(name)?;
-    let content = args.content.as_ref().ok_or("write_agent 需要 content 字段")?;
-    let dir = resolve_agents_dir(args.workspace_path)?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("create_dir_all({}): {}", dir.display(), e))?;
-    let path = dir.join(format!("{}.md", name));
-    // 自动补 frontmatter (如果 user 没写, 补 name + role: sub)
-    let final_content = if content.starts_with("---") {
-        content.clone()
-    } else {
-        format!("---\nname: {}\ndescription: (无描述)\nrole: sub\n---\n\n{}", name, content)
-    };
-    std::fs::write(&path, &final_content)
-        .map_err(|e| format!("write({}): {}", path.display(), e))?;
-    Ok(path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-async fn delete_agent(args: AgentArgs) -> Result<bool, String> {
-    let name = args.name.as_ref().ok_or("delete_agent 需要 name 字段")?;
-    parse_agent_name(name)?;
-    let dir = resolve_agents_dir(args.workspace_path.clone())?;
-    let path = dir.join(format!("{}.md", name));
-    if !path.exists() {
-        return Ok(false);
-    }
-    std::fs::remove_file(&path)
-        .map_err(|e| format!("remove_file({}): {}", path.display(), e))?;
-    // 如果删的是当前 active agent, 清空 active_agent.json
-    if let Some(active) = read_active_agent_name(args.workspace_path.clone()) {
-        if active == *name {
-            let active_path = resolve_active_agent_path(args.workspace_path)?;
-            if active_path.exists() {
-                let _ = std::fs::remove_file(&active_path);
-            }
-        }
-    }
-    Ok(true)
-}
-
-#[tauri::command]
-async fn set_main_agent(args: AgentArgs) -> Result<String, String> {
-    let name = args.name.as_ref().ok_or("set_main_agent 需要 name 字段")?;
-    parse_agent_name(name)?;
-    // 验证 agent 文件存在
-    let dir = resolve_agents_dir(args.workspace_path.clone())?;
-    let path = dir.join(format!("{}.md", name));
-    if !path.exists() {
-        return Err(format!("agent 不存在: {}", path.display()));
-    }
-    write_active_agent_name(args.workspace_path, name)
-}
-
-// ====== v0.4.6.2: per-session active agent ======
-// 存储: <workspace>/.pi/active_agents/<sessionId>.json
-// 跟 SessionManager 同目录 (sessions/<hash>), per-session 隔离, 切不同 session 不影响.
-// D184 v9 ❸ user 14:30: "每个会话应该自己有不同的 agent, 而不是A对话切换了, B对话也受影响"
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionAgentArgs {
-    /// workspace 路径
-    workspace_path: Option<String>,
-    /// session id (跟 SessionManager.sessionId 一致)
-    session_id: String,
-    /// 切主时: agent name; read 时不需要
-    #[serde(default)]
-    name: Option<String>,
-}
-
-fn resolve_session_agent_path(workspace_path: Option<String>, session_id: &str) -> Result<PathBuf, String> {
-    let ws = workspace_path.as_ref().filter(|s| !s.is_empty())
-        .ok_or("session_agent 操作需要 workspacePath")?;
-    if session_id.is_empty() {
-        return Err("session_id 不能为空".to_string());
-    }
-    // 校验 session_id 防止 path traversal
-    if !session_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
-        return Err("session_id 只能含 [a-zA-Z0-9._-]".to_string());
-    }
-    Ok(PathBuf::from(ws).join(".pi").join("active_agents").join(format!("{}.json", session_id)))
-}
-
-#[tauri::command]
-async fn read_session_active_agent(args: SessionAgentArgs) -> Result<Option<String>, String> {
-    let path = resolve_session_agent_path(args.workspace_path, &args.session_id)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read({}): {}", path.display(), e))?;
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("parse json ({}): {}", path.display(), e))?;
-    Ok(json.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
-}
-
-#[tauri::command]
-async fn write_session_active_agent(args: SessionAgentArgs) -> Result<String, String> {
-    let name = args.name.as_ref().ok_or("write_session_active_agent 需要 name 字段")?;
-    parse_agent_name(name)?;
-    // 验证 agent 文件存在 (per-workspace, 跟 v0.4.6.1 list_agents 一样)
-    let workspace_path = args.workspace_path.clone();
-    let dir = resolve_agents_dir(workspace_path.clone())?;
-    let agent_path = dir.join(format!("{}.md", name));
-    if !agent_path.exists() {
-        return Err(format!("agent 不存在: {}", agent_path.display()));
-    }
-    let path = resolve_session_agent_path(workspace_path, &args.session_id)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create_dir_all({}): {}", parent.display(), e))?;
-    }
-    let json = serde_json::json!({
-        "name": name,
-        "sessionId": args.session_id,
-        "updatedAt": chrono::Utc::now().to_rfc3339(),
-    });
-    let pretty = serde_json::to_string_pretty(&json)
-        .map_err(|e| format!("ser json: {}", e))?;
-    std::fs::write(&path, pretty)
-        .map_err(|e| format!("write({}): {}", path.display(), e))?;
-    Ok(path.to_string_lossy().to_string())
-}
+// v0.5.0-v0.1: 删 v0.4.6.1 + v0.4.6.2 multi-agent persona 全部 invoke + struct + helper (314 行)
+//   user 16:24 拍板: agent 是边界定义/思维指导, 永远是 1 个通用 agent, single agent 链路
+//   替代 = AGENTS.md (Custom Instructions tab 编辑) + Pi SDK 0.84.2 DefaultResourceLoader
+//   自动 load (resource-loader.ts:71) + 注入 system prompt 段. 详见 ADR-0024 (superseded by ADR-0025)
 
 // ====== v0.4.5.2: User 自定义快捷提示词模板 (Slash commands) ======
 // 跟 v0.4.6.1 agents 同 pattern, 但存 <workspace>/.pi/commands/*.md
@@ -1300,6 +988,34 @@ fn resolve_commands_dir(workspace_path: Option<String>) -> Result<PathBuf, Strin
     Ok(PathBuf::from(ws).join(".pi").join("commands"))
 }
 
+// v0.5.0-v0.1: 命令专用 frontmatter 解析 (跟 v0.4.6.1 parse_agent_frontmatter 同 pattern,
+//   之前 list/read_command 复用 parse_agent_frontmatter, multi-agent 回滚后改用本函数)
+//   只解析 name / description (不需要 role, 跟 v0.4.5.2 设计一致)
+fn parse_command_frontmatter(content: &str) -> (std::collections::HashMap<String, String>, String) {
+    let mut fm: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if !content.starts_with("---") {
+        return (fm, content.to_string());
+    }
+    let rest = &content[3..];
+    if let Some(end_idx) = rest.find("\n---") {
+        let header = &rest[..end_idx];
+        let after = &rest[end_idx + 4..];
+        let body_start = after.find('\n').map(|i| i + 1).unwrap_or(0);
+        let body = after[body_start..].to_string();
+        for line in header.lines() {
+            if let Some((k, v)) = line.split_once(':') {
+                let key = k.trim().to_string();
+                let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                if !key.is_empty() {
+                    fm.insert(key, val);
+                }
+            }
+        }
+        return (fm, body);
+    }
+    (fm, content.to_string())
+}
+
 #[tauri::command]
 async fn list_commands(args: CommandArgs) -> Result<Vec<CommandInfo>, String> {
     let mut commands = Vec::new();
@@ -1321,7 +1037,7 @@ async fn list_commands(args: CommandArgs) -> Result<Vec<CommandInfo>, String> {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            let (fm, body) = parse_agent_frontmatter(&content);  // 复用极简 frontmatter 解析
+            let (fm, body) = parse_command_frontmatter(&content);  // v0.5.0-v0.1: 改用命令专用 frontmatter 解析 (之前复用 parse_agent_frontmatter 已被删)
             commands.push(CommandInfo {
                 name: fm.get("name").cloned().unwrap_or_else(|| filename.clone()),
                 description: fm.get("description").cloned().unwrap_or_else(|| "(无描述)".to_string()),
@@ -1345,7 +1061,7 @@ async fn read_command(args: CommandArgs) -> Result<CommandInfo, String> {
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("read({}): {}", path.display(), e))?;
-    let (fm, body) = parse_agent_frontmatter(&content);
+    let (fm, body) = parse_command_frontmatter(&content);
     Ok(CommandInfo {
         name: fm.get("name").cloned().unwrap_or_else(|| name.clone()),
         description: fm.get("description").cloned().unwrap_or_else(|| "(无描述)".to_string()),
@@ -1467,7 +1183,7 @@ async fn send_prompt(
             session_id: session_id_for_sidecar,  // v0.4.2 step 1+
             skills: config.skills,  // v0.4.4 Skills (Pi SDK 暴露) — 已存在但没传, 补上
             model_metadata: config.model_metadata,  // v0.4.4.6 model metadata
-            active_agent: config.active_agent,  // v0.4.6.1 multi-agent persona
+            // v0.5.0-v0.1: 删 active_agent 字段 (multi-agent persona 回滚)
         },
         session_id.clone(),
         prompt_cmd_json,
@@ -1689,15 +1405,9 @@ pub fn run() {
             read_custom_instructions,
             write_custom_instructions,
             delete_custom_instructions,
-            // v0.4.6.1: Multi-agent persona (主/子 agent 库 + Composer 顶部 selector)
-            list_agents,
-            read_agent,
-            write_agent,
-            delete_agent,
-            set_main_agent,
-            // v0.4.6.2: per-session active agent (D184 v9 ❸)
-            read_session_active_agent,
-            write_session_active_agent,
+            // v0.5.0-v0.1: 删 v0.4.6.1 + v0.4.6.2 multi-agent persona invoke (7 个)
+            //   list_agents / read_agent / write_agent / delete_agent / set_main_agent +
+            //   read_session_active_agent / write_session_active_agent
             // v0.4.5.2: User 自定义快捷提示词模板 (Slash commands, 不含 builtin)
             list_commands,
             read_command,
