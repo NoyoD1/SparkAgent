@@ -19,6 +19,7 @@
 | **v0.4.3** | **Compaction UI (redesign + Polish)** | ContextIndicator 紧凑指示器 + popover 二级展开 + 5 轮 polish (1→2.5) + D182 token 计量修正 | 🟢 (commit `681f248` + 5 轮 polish commit `57e1a47`, 端到端验证 PASS) | **2026-08-18** |
 | **v0.5.8 hotfix³** | **D162 v3 推翻 v2 (改回 `node ../scripts/build-fe.mjs`)** | tauri-cli 2.11.4 源码 + 绝对路径 echo-cwd.mjs 实测推翻 v0.5.8 hotfix² commit 6a3e1a4 的"实测 cwd = 项目根" (错的实测, 把 build-fe.mjs 内部 log 当成 cargo 实际 cwd). 根因: `resolve_frontend_dir()` (`app_paths.rs:146-166`) 走 `lookup` 找最近的 `package.json` → `D:\UnityWork\Tools\Pi\app\package.json` → `dirs.frontend` 永远 = `app/` (除非项目根有 `package.json`). 跟 `--no-bundle` flag 无关. 修法: `node ../scripts/build-fe.mjs`. 端到端验证: cargo tauri build PASS, 生成 .msi 46.5 MB + .exe 32.5 MB (2026-08-18 11:53) | 🟢 (1 commit `0fb669a`) | **2026-08-18** |
 | **v0.4.4 Skills** | **Pi SDK skills 暴露 (loadSkills + formatSkillsForPrompt + system prompt 注入)** | Sidebar SkillsButton + popover + sidecar stdout 一次 emit `skills_snapshot` | 🟢 (commit `b02e99e` + v0.4.4.1 `5c71e56` + v0.4.4.2 `c613297` + v0.4.4.3 `62a56c3` + v0.4.4.4 `842d43a` 从 zip 压缩包 + v0.4.4.5 `52dd667` 从 URL import) | **2026-08-18** |
+| **v0.4.4.6 polish** | **4 个 user 反馈 bug 修 (上下文窗口持久化 + 模型 dropdown outside-click + contextWindow 读 user config + model metadata form + skill 实时刷新)** | 1) chat.ts 加 `pi-agent:usage:v1` STORAGE_KEY + watch 持久化 lastUsageBySession / contextTokensBySession; 2) Composer.vue model menu 加 outside-click handler (复用 onClickOutsideAnyMenu); 3) chat.ts getContextWindow 改读 activeModel.contextWindow (缺省 200K); 4) FE+Rust+sidecar 协调加 model 5 字段 metadata (type/vision/contextWindow/maxOutput/maxRounds/reasoning), ProviderTab ⚙️ inline form; 5) Rust lib.rs 加 list_skills invoke handler (std::fs::read_dir 扫 2 目录), skills.ts refreshFromTauri, AddSkillForm 写完/导入完调 refresh 立刻刷新 UI | 🟢 (2 commit `940eb47` + `ddd179a`, 端到端验证 PASS) | **2026-08-18** |
 | **v0.4.4 系列** | **P0 Pi SDK 暴露 (table stakes)** | skills / slash cmds / rules / usage | ⚪ (规划) | **2026-09 目标** |
 | v0.5.0+ | P1 自建 | Plan mode / sub-agents / MCP 集成 | ⚪ | TBD |
 | v0.6 | Web app + Agent SDK | claude.ai/code 对标 / 编程 API | ⚪ | TBD |
@@ -226,7 +227,7 @@ src-tauri\binaries\pi-agent-sidecar-x86_64-pc-windows-msvc.exe  108 MB  (Tauri �
 - [ ] **v0.4.6 Project rules (类似 CLAUDE.md)** (1-2h, 高 ROI) — 走 UI 让 user 创建/编辑 project memory file, 走 `appendSystemPromptOverride` 注入
 - [ ] **v0.4.7 /usage 完整化** (2h, 中 ROI) — 走 Pi SDK `usage-totals.ts` + 分类聚合 + UI 图表
 
-**P0 进度: 2/5 (v0.4.3 ✅, v0.4.4 ✅, 还有 3 项) — 0 风险快速做完. 估计 1 周内完剩下 3 项.**
+**P0 进度: 2/5 (v0.4.3 ✅, v0.4.4 ✅ [含 v0.4.4.1-4.6 polish], 还有 3 项) — 0 风险快速做完. 估计 1 周内完剩下 3 项.**
 
 #### P0 期间 (2026-08-18) 修正的 4 条 memory 规则 (D170 同步 + D183 教训 + v0.5.8 hotfix³ v3 推翻 v2)
 
