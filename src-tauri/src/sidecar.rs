@@ -309,6 +309,188 @@ pub fn run_prompt(
     });
 }
 
+/// Bug #2 修 (2026-08-18): force-spawn 跑 compact
+/// 跟 run_prompt 几乎一样, 但:
+///   - 不注册到 ActiveSidecars (compact 是 fire-and-forget, 完即退, 不需要后续 send_rpc_command)
+///   - 初始命令是 { type: 'compact' } (不是 prompt)
+///   - 退出条件是 `compaction_end` event (compact 走 LLM 总结, 不发 agent_end)
+/// 背景: send_rpc_command 走 ActiveSidecars 找 child, 闲置 session 时 map 已空, 报
+///   "no active sidecar for session=..." → FE 视觉"点了没反应". force-spawn 单独跑 compact
+///   跟 prompt 解耦, 不依赖当前 session 是否在 active.
+pub fn run_compact(
+    app: AppHandle,
+    config: SidecarConfig,
+    session_id: String,
+    active: Arc<ActiveSidecars>,
+) {
+    debug_log(&format!("run_compact: session={session_id}"));
+    tauri::async_runtime::spawn(async move {
+        let config_arg = match serde_json::to_string(&serde_json::json!({
+            "type": "config",
+            "provider": config.provider,
+            "model": config.model,
+            "baseUrl": config.base_url,
+            "apiKey": config.api_key,
+            "thinkingLevel": config.thinking_level,
+            "workspacePath": config.workspace_path,
+            "permissionMode": config.permission_mode,
+            "sessionId": config.session_id,
+            "skills": config.skills,
+            "modelMetadata": config.model_metadata,
+        })) {
+            Ok(s) => s,
+            Err(e) => {
+                emit_error(&app, &session_id, &format!("ser config: {e}"));
+                return;
+            }
+        };
+
+        let (mut rx, mut child) = match app
+            .shell()
+            .sidecar("pi-agent-sidecar")
+            .map_err(|e| format!("get sidecar handle: {e}"))
+            .and_then(|cmd| {
+                cmd.args([config_arg])
+                    .spawn()
+                    .map_err(|e| format!("spawn sidecar: {e}"))
+            }) {
+            Ok(pair) => {
+                debug_log(&format!("compact sidecar spawned, session={session_id}"));
+                pair
+            }
+            Err(e) => {
+                debug_log(&format!("spawn compact sidecar failed: {e}"));
+                emit_error(&app, &session_id, &format!("spawn sidecar failed: {e}"));
+                return;
+            }
+        };
+
+        // 写初始 compact RpcCommand (不带 id, Pi SDK 用默认 routing)
+        let initial = serde_json::json!({ "type": "compact" });
+        let line = match serde_json::to_string(&initial) {
+            Ok(s) => format!("{s}\n"),
+            Err(e) => {
+                emit_error(&app, &session_id, &format!("ser compact cmd: {e}"));
+                return;
+            }
+        };
+        if let Err(e) = child.write(line.as_bytes()) {
+            emit_error(&app, &session_id, &format!("write compact cmd: {e}"));
+            return;
+        }
+
+        // ⚠️ 不注册到 ActiveSidecars (compact 独立 fire-and-forget)
+
+        let mut got_compaction_end = false;
+        let mut event_count = 0u32;
+        while let Some(event) = rx.recv().await {
+            event_count += 1;
+            match event {
+                CommandEvent::Stdout(bytes) => {
+                    let line = String::from_utf8_lossy(&bytes);
+                    debug_log(&format!("compact stdout[{event_count}]: {line}"));
+                    log::info!("[sidecar:compact:{session_id}] {line}");
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let mut event_json: serde_json::Value =
+                        match serde_json::from_str(line.as_ref()) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                log::warn!("[sidecar:compact:{session_id}] bad json: {e} line={line}");
+                                continue;
+                            }
+                        };
+                    if let Some(obj) = event_json.as_object_mut() {
+                        obj.insert("sessionId".to_string(), serde_json::json!(session_id));
+                    }
+                    let event_type = event_json
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if let Err(e) = app.emit("chat:event", &event_json) {
+                        log::error!("emit failed: {e}");
+                    }
+                    // compact 退出条件: compaction_end (走 LLM 总结替换 history, 不发 agent_end)
+                    if event_type == "compaction_end" {
+                        got_compaction_end = true;
+                        break;
+                    }
+                }
+                CommandEvent::Stderr(bytes) => {
+                    let line = String::from_utf8_lossy(&bytes);
+                    debug_log(&format!("compact stderr: {line}"));
+                    log::warn!("[sidecar:compact stderr:{session_id}] {line}");
+                }
+                CommandEvent::Error(s) => {
+                    log::error!("[sidecar:compact err:{session_id}] {s}");
+                    debug_log(&format!("compact CommandEvent::Error: {s}"));
+                }
+                CommandEvent::Terminated(payload) => {
+                    debug_log(&format!(
+                        "compact sidecar terminated: code={:?} signal={:?}",
+                        payload.code, payload.signal
+                    ));
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if !got_compaction_end {
+            log::warn!("[sidecar:compact:{session_id}] stream ended without compaction_end");
+            // 补发一个 compaction_end 避免 FE UI 永远显示"压缩中"
+            let end = serde_json::json!({
+                "type": "compaction_end",
+                "sessionId": session_id,
+                "reason": "stream_ended",
+                "aborted": false,
+                "willRetry": false,
+                "errorMessage": "压缩流程异常结束, 请重试",
+            });
+            let _ = app.emit("chat:event", &end);
+        }
+
+        // 主动 kill child (force 结束, 避免 hang)
+        let _ = child.kill();
+        log::info!("[sidecar:compact:{session_id}] done, killed");
+
+        // 防御性清理: 万一 active map 还有这个 sid 的 child (理论上没有)
+        {
+            let mut map = active.0.lock().await;
+            map.remove(&session_id);
+        }
+    });
+}
+
+/// v0.4.6 Bug 修 (abort 后重发继续走): force kill sidecar child.
+/// 背景: spawn-per-prompt 模式下, abort 触发后 Pi SDK 应该 emit agent_end 然后 sidecar
+///   退出. 但实际在某些 provider (MiniMax / DeepSeek V4 Flash) 上 agent_end 偶尔 lost,
+///   30s 兜底 forceStopStreaming 翻 streaming=false 但旧 sidecar 还在跑, AgentSession state
+///   还在 hold. 下次 send_prompt 启新 sidecar 时, 如果 piSessionId 复用,resume 加载旧
+///   jsonl 看到 incomplete message → "顺着我前面打断的继续往下走".
+/// 修法: forceStop 时调这个 invoke, kill 旧 child + 主动移除 active map entry.
+/// 副作用: 旧 sidecar 不会 emit agent_end, FE 30s 兜底已经 force 翻 streaming=false, 所以
+///   用户视觉无差异.
+#[tauri::command]
+pub async fn kill_sidecar(
+    session_id: String,
+    active: State<'_, Arc<ActiveSidecars>>,
+) -> Result<bool, String> {
+    let mut map = active.0.lock().await;
+    let existed = if let Some(mut child) = map.remove(&session_id) {
+        log::warn!("[sidecar] kill_sidecar: session={} killing child", session_id);
+        // child.kill() 是 sync, 内部用 Child::kill (Windows TerminateProcess)
+        let _ = child.kill();
+        true
+    } else {
+        log::info!("[sidecar] kill_sidecar: session={} no active child (already exited?)", session_id);
+        false
+    };
+    Ok(existed)
+}
+
 /// v0.5.0: 通用 stdin 透传 — FE 端发任意 RpcCommand 写到指定 sidecar stdin.
 /// 之前 v0.4.x 的 send_permission_response / set_permission_mode / compact_session 3 个
 /// 特殊 invoke 全部合并到这一个 — Rust 端不解析 RpcCommand, 直接 JSON.stringify 后

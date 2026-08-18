@@ -53,8 +53,63 @@ const html = computed(() => {
     /(?<!["'>])\b((?:[A-Z]:\\|\/(?:home|Users|opt|tmp|var|etc|root)\/)[^\s<>"']+)/g,
     '<a class="pad-md-path" href="javascript:void(0)" data-path="$1">$1</a>',
   );
+  // 3. v0.5.0-D 第3轮: HTML 注入 sanitizer
+  //    用户反馈 "agent 写东西时整个前端页面都变了" — 根本原因: v-html 注入的 HTML
+  //    包含 <style> 块, 选择器是全局生效的 (CSS 作用域跟 DOM 位置无关), 覆盖到整个 app.
+  //    e.g. agent 写 AI 洞察报告, 模板里有:
+  //      <style>body{background:#0a0a0a;color:#fff}...</style>
+  //    v-html 渲染时这个 <style> 仍生效, 把整个 desktop app 头部都改成深色 + 占据一整块.
+  //    修复: 剥掉所有 CSS/JS 注入向量, 保留合法 markdown 元素 (h1, p, ul, table, pre, ...).
+  //    inline style="..." 保留 (单个元素的局部样式, 不会泄漏到全局).
+  out = sanitizeHtml(out);
   return out;
 });
+
+/**
+ * v0.5.0-D 第3轮: markdown 渲染后的 HTML sanitizer.
+ *   目标: 防 LLM 输出的 HTML 通过 v-html 注入恶意/破坏性 CSS/JS 到全局.
+ *   做法: 剥掉 <script>/<style>/<link>/<meta>/<base>/<iframe>/<object>/<embed>/<form>/
+ *         <input>/<button>/<textarea>/<select>/<frame>/<frameset> 等.
+ *   也剥掉 on*= 事件属性 + javascript:/data:/vbscript: 协议 URL.
+ *
+ *   替代方案及放弃原因:
+ *     - DOMPurify: 需要装新 dep (75KB), 项目当前没引, 安装 + 配置成本不低.
+ *     - 整个内容用 iframe sandbox 渲染: 体验差, 用户在 chat 里看到的是黑盒.
+ *     - marked m.setOptions({ html: false }): 太严, 用户写 ```html ``` 代码块时也不
+ *       能渲染 (marked 走 code block 不会执行 HTML, 但不显示就更怪).
+ *   选 regex sanitization: 简单, 75 行内能搞定, 覆盖已知注入向量.
+ *
+ *   已知限制: regex 解析 HTML 不如 DOMParser 严谨, 但对 LLM 输出这种"半结构化"内容
+ *     已经够用 (LLM 不会刻意构造畸形 HTML 绕过 sanitizer).
+ */
+function sanitizeHtml(input: string): string {
+  let s = input;
+  // 1. 剥 script / style 块 (内容连同闭合标签一起剥)
+  s = s.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '');
+  s = s.replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, '');
+  // 2. 剥掉其他 CSS/JS 注入向量 (self-closing 或空内容也覆盖)
+  s = s.replace(/<link\b[^>]*\/?>/gi, '');
+  s = s.replace(/<meta\b[^>]*\/?>/gi, '');
+  s = s.replace(/<base\b[^>]*\/?>/gi, '');
+  s = s.replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe\s*>/gi, '');
+  s = s.replace(/<object\b[^>]*>[\s\S]*?<\/object\s*>/gi, '');
+  s = s.replace(/<embed\b[^>]*\/?>/gi, '');
+  s = s.replace(/<form\b[^>]*>[\s\S]*?<\/form\s*>/gi, '');
+  s = s.replace(/<input\b[^>]*\/?>/gi, '');
+  s = s.replace(/<button\b[^>]*>[\s\S]*?<\/button\s*>/gi, '');
+  s = s.replace(/<textarea\b[^>]*>[\s\S]*?<\/textarea\s*>/gi, '');
+  s = s.replace(/<select\b[^>]*>[\s\S]*?<\/select\s*>/gi, '');
+  s = s.replace(/<frame\b[^>]*\/?>/gi, '');
+  s = s.replace(/<frameset\b[^>]*>[\s\S]*?<\/frameset\s*>/gi, '');
+  // 3. 剥 on* 事件属性 (onclick / onerror / onload / onmouseover 等)
+  //    匹配 " onxxx=" 形式 (前面是空格或标签边界), 不区分大小写
+  s = s.replace(/\s+on[a-z]+\s*=\s*"[^"]*"/gi, '');
+  s = s.replace(/\s+on[a-z]+\s*=\s*'[^']*'/gi, '');
+  s = s.replace(/\s+on[a-z]+\s*=\s*[^\s>]+/gi, '');
+  // 4. 剥 javascript:/data:/vbscript: 协议 URL
+  s = s.replace(/(\b(?:href|src|action|formaction|xlink:href)\s*=\s*["']?)\s*(?:javascript|data|vbscript)\s*:/gi, '$1#');
+  return s;
+}
 
 /** 给所有 <pre> 注入 "复制" 按钮 (每次 v-html 更新后都重做) */
 function injectCopyButtons(root: HTMLElement | null) {

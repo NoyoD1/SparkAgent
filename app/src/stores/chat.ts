@@ -1,3 +1,9 @@
+// v0.5.0-D 第10轮 revert: 删 splitMessageContentIntoStep + stripLeadingUserEcho 整套函数.
+//   用户反馈 9 轮 filter 迭代原地打转 (D194 起 每轮加规则漏 case), text-based echo
+//   filter 不可靠 (model 复读有空格/标点/重复/无标点变体). 改回 v0.5.0-PR3 简单 append
+//   (在 message_update 块直接 assistant.content += ame.delta + step.stepText += ame.delta).
+//   真正 fix 在 sidecar system prompt + model 选择层, 不在 chat store 文本层.
+
 /**
  * Chat store — 真实 session 消息管理 (Phase 3 v0.3.2+)
  *
@@ -20,6 +26,7 @@ import { useSkillsStore } from './skills';
 
 export type { ChatMessage, ThinkingBlock, ToolCallBlock, Step };
 
+// ===== Helper types & functions (session data shape) =====
 interface SessionChatData {
   messages: ChatMessage[];
   thinking: ThinkingBlock[];
@@ -311,7 +318,14 @@ export const useChatStore = defineStore('chat', () => {
     // touch session updated time
     sessionStore.touchSession(sessionId);
 
-    // assistantId 提前生成, message_start 事件到了再 push assistant message
+    // v0.4.7 修 (B 方案实际生效 + 多 turn 不重复 message):
+    //   - assistantId 改回 const: 每次 sendPrompt 1 个 id, **整个 agent loop 共用**
+    //     (含多 turn / multi message_start). 之前 let + 每次 message_start 重新生成 → 推多个
+    //     message + 重复 thinking 区. 改回 const 保证: 同 sendPrompt → 1 个 message + N 个 step.
+    //   - placeholder 逻辑大改 (见下面): 只 case 'error' 推 placeholder, 其他 event
+    //     (agent_end / message_end) 不推 (它们由 message_start 之后才到, message_start 已
+    //     推 message, 不需要 placeholder). 旧逻辑 line 410 if 块同时推 agent_end/message_end
+    //     placeholder → 每次 agent_end 都多一个空 message → ChatMessage 渲染"AI 没有回复内容".
     const assistantId = genMessageId('a');
 
     // 3. 临时 listener (await 确保 listener 起来, 避免 sidecar 早早 emit 丢事件)
@@ -327,20 +341,18 @@ export const useChatStore = defineStore('chat', () => {
       // v0.3.8.12 fix: 之前 `if (idx < 0) return` 在 switch 之前, 导致 message_start
       // 事件永远到不了 case 块 (因为 message_start 时还没 push assistant message, idx=-1).
       // 现在改成: message_start 允许 idx<0 (它负责 push), 其他 case 必须 idx>=0.
-      let idx = d2.messages.findIndex((m) => m.id === assistantId);
-      // v0.4.2.x fix: error / config_error / agent_end / message_end 可能在 message_start
-      //   之前到达 (modelRuntime.checkAuth 失败 → session.prompt 抛错 → sidecar emit error),
-      //   之前 `if (idx < 0) return` 把这些事件全吞了, 用户看不到任何错误, 看起来"没回复".
-      //   修法: 提前 push 一个 placeholder assistant message, 让 ChatMain 的 error banner
-      //   有一个挂载点. placeholder 跟正常 assistant 一样在 messages 数组, 渲染逻辑通用.
-      if (
-        idx < 0 &&
-        (event.type === 'error' ||
-          event.type === 'agent_end' ||
-          event.type === 'message_end')
-      ) {
+      // v0.4.7: assistantId 改回 const (一次 sendPrompt 1 个), 所以 curId = assistantId.
+      const curId = assistantId;
+      let idx = d2.messages.findIndex((m) => m.id === curId);
+      // v0.4.7 placeholder 大改: **只 case 'error' 推 placeholder** (modelRuntime.checkAuth 失败
+      //   → session.prompt 抛错 → sidecar emit error, 此时 message_start 没到, 强 push 让
+      //   ChatMain error banner 有挂载点). 其他 event (agent_end / message_end) **不** 推
+      //   placeholder — 因为它们由 message_start 之后才到, message_start 已 push message.
+      //   旧逻辑同时推 agent_end/message_end placeholder → 每次 agent_end 都多 1 个空
+      //   message → ChatMessage 渲染"AI 没有回复内容"灰色字 (B 方案失效主因).
+      if (idx < 0 && event.type === 'error') {
         d2.messages.push({
-          id: assistantId,
+          id: curId,
           role: 'assistant',
           content: '',
           createdAt: new Date().toISOString(),
@@ -371,11 +383,17 @@ export const useChatStore = defineStore('chat', () => {
           }
           console.error('[chat] error event:', event.message);
           chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+          // Bug #5 修 (2026-08-18): error event 加 UI toast (之前用户视觉无反馈)
+          useUiStore().showToast(`生成失败: ${event.message.slice(0, 120)}`, 'error', 6000);
           off();
           return;
         case 'agent_end':
           // v0.5.0: Pi SDK AgentSessionEvent.agent_end: { messages: AgentMessage[]; willRetry: boolean }
           // 跟 v0.4.x 比, 多了 messages 全量 + willRetry 字段 (v0.4.x 自定义事件)
+          // v0.4.6 Bug 修 (willRetry=true 但 UI 显示"AI 没回复"):
+          //   Pi SDK 0.84.2 emit agent_end willRetry=true 时, agent loop 还没拿到满意结果, 要 retry.
+          //   这种情况下, **保持 streaming=true** (等下次 agent_start), 不要翻 streaming=false 触
+          //   发"AI 没回复内容"灰色提示. FE 应该把 willRetry=true 当成"还在重试".
           if (idx >= 0) {
             const assistantMsg = d2.messages[idx];
             if (assistantMsg.steps) {
@@ -386,10 +404,35 @@ export const useChatStore = defineStore('chat', () => {
               }
             }
           }
+          // v0.4.7 willRetry 分支处理: **不要** 兜底设 retryBySession (卡 1/5 根因)
+          //   之前 attempt:1 maxAttempts:5 是硬编码, Pi SDK 0.84.2 实际 maxRetries 取决于 settings
+          //   (默认不一定是 5), 而且 Pi SDK 内部 retry 不 emit auto_retry_start events → 永远卡 1/5.
+          //   修法: willRetry=true 时 **静默** 等下次 agent_start, UI 不显示"X/5 retry"
+          //   (auto_retry_start 真 emit 时才设 retryBySession).
+          if (event.willRetry) {
+            // 保持 streaming=true, 等下次 agent_start / error / agent_end (会 retry 真 emit events)
+            // 翻 retryBySession 显示"等待 LLM 重试中..." (无数字, 真 retry emit 才更新)
+            retryBySession.value = {
+              ...retryBySession.value,
+              [sessionId]: retryBySession.value[sessionId] || {
+                attempt: 0,
+                maxAttempts: 0,  // 0 = 不知道, 等真 retry emit
+                errorMessage: 'LLM 内部重试, 等待下次 agent_start',
+              },
+            };
+            chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+            console.log(
+              '[chat] agent_end willRetry=true: 保持 streaming=true, 静默等下次 agent_start / error',
+            );
+            return;  // 不 off, 不翻 streaming, 继续等 events
+          }
+          // 正常 agent_end (willRetry=false): 翻 streaming, 走完成路径
           streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
           retryBySession.value = { ...retryBySession.value, [sessionId]: null };
           // v0.5.1: phase 切回 idle
           setPhase(sessionId, 'idle');
+          // v0.4.7: assistantId 是 const (整个 sendPrompt 共用 1 个), 不再 reset
+          //   (下个 sendPrompt 重新跑 listener closure → outer const 重新初始化)
           chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
           console.log(
             '[chat] agent_end: idx=',
@@ -440,23 +483,48 @@ export const useChatStore = defineStore('chat', () => {
           }
           break;
         case 'message_start':
-          // v0.5.0: Pi SDK AgentEvent.message_start: { message: AgentMessage }
-          // 跟 v0.4.x 比, message 嵌套在 event.message 字段, 不是顶层 role/content
+          // v0.4.7 大改: assistantId 是 const (一次 sendPrompt 1 个) → 整个 agent loop 共用
+          //   1 个 message. Pi SDK 0.84.2 emit 多 message_start (每个 turn / 每个 content
+          //   块独立) 都进同一个 message, 由 step 拆分.
+          //
+          //   流程:
+          //   1. 第一次 message_start (idx < 0): push new message + lazy step 0
+          //      + 拆 event.message.content 数组进 step
+          //   2. 后续 message_start (idx >= 0): 同 message, **no-op** (不 push, 不 reset content,
+          //      不拆 content — 避免重复累积)
+          //   3. message_end: 拆 final content 数组覆盖 step (final authoritative)
+          //
+          //   v0.4.6 之前 let 每次重生成 id → 每个 turn push 新 message → 多个空 message
+          //   → "AI 没有回复内容" 灰色字 + thinking 重复 3 次 (用户实测反馈).
           if (idx < 0) {
+            // 第一次: push new message (用 curId = assistantId) + lazy step 0
             d2.messages.push({
-              id: assistantId,
+              id: curId,  // v0.4.7: 用同一个 assistantId,后续 message_start 找得到
               role: 'assistant',
               content: '',
               createdAt: new Date().toISOString(),
+              steps: [],  // 先建空数组,下面 lazy 创建 step 0
             });
-            const tbNew = d2.thinking.find((t) => t.messageId === assistantId);
-            if (tbNew) tbNew.content = '';
+            const newStep: Step = {
+              id: `step-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              thinking: [],
+              toolCalls: [],
+              stepText: '',
+              isActive: true,
+              collapsed: true,
+            };
+            d2.messages[d2.messages.length - 1].steps!.push(newStep);
+            // v0.5.0-D 第10轮 revert: 删 splitMessageContentIntoStep 死循环依赖.
+            //   message_start 不再拆 content 数组 (v0.5.0-PR3 行为: 只 push placeholder,
+            //   content 由 text_delta 累积). 第5轮加这个拆是为了修 deepseek-v4-flash 不
+            //   emit text_delta 时的空 step 问题 — 但 Pi SDK 0.84.2 + sensenova 都正常 emit
+            //   deltas, 拆 content 反而引入 REPLACE/APPEND 顺序复杂度 + 跟 text_delta 重复累积.
             break;
           }
-          // 后续 message_start: 重置内容
-          d2.messages[idx].content = '';
-          const tbRst = d2.thinking.find((t) => t.messageId === assistantId);
-          if (tbRst) tbRst.content = '';
+          // 后续 message_start (同 message 的多段): **no-op** (不 push 不 reset 不拆)
+          // Pi SDK 0.84.2 emit 顺序: turn_start → message_start* → message_update* → message_end* → turn_end
+          //   同 turn 内的多个 message_start (thinking / tool result / final answer) 都进
+          //   同一个 message, 由 message_end 一次性拆 final content 覆盖.
           break;
         case 'message_update':
         case 'message_end':
@@ -504,39 +572,42 @@ export const useChatStore = defineStore('chat', () => {
                   // thinking 路由到 currentStep
                   const step = getCurrentStep();
                   if (step) {
-                    let tb2 = step.thinking[step.thinking.length - 1];
-                    if (!tb2) {
-                      tb2 = {
+                    // v0.4.6: tb2 是 possibly undefined, ts strict null check 兜底
+                    const lastTb = step.thinking[step.thinking.length - 1];
+                    if (lastTb) {
+                      lastTb.content += ame.delta;
+                    } else {
+                      step.thinking.push({
                         id: `think-${step.id}`,
-                        messageId: assistantId,
-                        content: '',
+                        messageId: curId,
+                        content: ame.delta,
                         collapsed: false,  // step 内 thinking 默认展开
-                      };
-                      step.thinking.push(tb2);
+                      });
                     }
-                    tb2.content += ame.delta;
                   } else {
                     // fallback: 顶层 thinking (兼容无 step 数据)
-                    let tb2 = d2.thinking.find((t) => t.messageId === assistantId);
-                    if (!tb2) {
-                      tb2 = {
-                        id: `think-${assistantId}`,
-                        messageId: assistantId,
-                        content: '',
+                    const existTb = d2.thinking.find((t) => t.messageId === curId);
+                    if (existTb) {
+                      existTb.content += ame.delta;
+                    } else {
+                      d2.thinking.push({
+                        id: `think-${curId}`,
+                        messageId: curId,
+                        content: ame.delta,
                         collapsed: true,
-                      };
-                      d2.thinking.push(tb2);
+                      });
                     }
-                    tb2.content += ame.delta;
                   }
                   // v0.5.1: phase 切到 thinking
                   setPhase(sessionId, 'thinking');
                 } else if (ame.type === 'text_delta') {
-                  // text delta: 既累积到 message.content (final reply 兼容旧 UI), 也累积到 currentStep.stepText
+                  // v0.5.0-D 第10轮 revert: 删 echo filter 死循环 (9 轮迭代原地打转).
+                  //   text-based echo filter 不可靠 (model 复读有空格/标点/重复/无标点变体,
+                  //   9 轮规则一加一个, 漏一个 case). 改回 v0.5.0-PR3 简单 append.
+                  //   真正 fix 在 sidecar system prompt (短/明确/有反例) + model 选择层.
                   assistant.content += ame.delta;
                   const step = getCurrentStep();
                   if (step) step.stepText += ame.delta;
-                  // v0.5.1: phase 切到 text (文字生成)
                   setPhase(sessionId, 'text');
                 }
                 // tool_call_delta: Pi SDK 增量发送 tool call args, 当前 FE 不展示 (tool_execution_start
@@ -559,6 +630,13 @@ export const useChatStore = defineStore('chat', () => {
                 assistant.usage = finalUsage;
                 console.log(`[chat] message_end: usage=${finalUsage.input}+${finalUsage.cacheRead} (cache) + ${finalUsage.cacheWrite} (write) → contextTokens=${contextTokensBySession.value[sessionId]}`);
               }
+              // v0.5.0-D 第10轮 revert: 删 message_end 拆 final content 覆盖 (跟 message_start
+              //   一起删, 整套 splitMessageContentIntoStep 死循环去掉). v0.5.0-PR3 行为:
+              //   message_end 只处理 usage, content 由 text_delta 累积, 流式显示一直正确.
+              //   v0.4.6 加这个拆是为了修 LLM 不 emit deltas 时的空 step — 但 Pi SDK 0.84.2
+              //   + sensenova/deepseek 都正常 emit text_delta, 不需要拆. 真遇到不 emit deltas
+              //   的 model 时再单独处理, 不要在 text_delta 已经 ok 的情况下继续叠加 REPLACE 复杂度.
+              // v0.4.7: 不再 reset outer assistantId (它是 const, 整个 sendPrompt 共用)
               break;
             case 'tool_execution_start':
               {
@@ -566,7 +644,8 @@ export const useChatStore = defineStore('chat', () => {
                 const target = step ? step.toolCalls : d2.toolCalls;
                 target.push({
                   id: event.toolCallId,
-                  messageId: assistantId,
+                  // v0.4.6: curId fallback (assistantId 是 let 可能 null)
+                  messageId: curId,
                   name: event.toolName,
                   args: event.args || {},
                   status: 'running',
@@ -620,12 +699,30 @@ export const useChatStore = defineStore('chat', () => {
             },
           };
           console.log(`[chat] auto_retry_start: ${event.attempt}/${event.maxAttempts}, delayMs=${event.delayMs}, err=${event.errorMessage.slice(0, 80)}`);
+          // Bug #5/#6 修 (2026-08-18): auto_retry_start 加 UI toast, 告诉用户 LLM 失败在重试
+          //   (之前 Pi SDK 静默重试, 用户视觉"卡住了不知道在干什么")
+          useUiStore().showToast(
+            `LLM 失败, 正在重试 (${event.attempt}/${event.maxAttempts}): ${event.errorMessage.slice(0, 60)}`,
+            'warning',
+            3500,
+          );
           break;
-        case 'auto_retry_end':
+        case 'auto_retry_end': {
           // v0.5.0: event.attempt 单数 (不是 v0.4.x 的 attempts)
+          // 用 block 包裹避免 const 跨 case 共享 scope 的 lint 警告
+          const wasRetrying = retryBySession.value[sessionId] !== null;
           retryBySession.value = { ...retryBySession.value, [sessionId]: null };
           console.log(`[chat] auto_retry_end: success=${event.success}, attempt=${event.attempt}${event.finalError ? ', err=' + event.finalError.slice(0, 80) : ''}`);
+          // Bug #5/#6 修: retry 终态 toast 反馈
+          if (wasRetrying) {
+            if (event.success) {
+              useUiStore().showToast(`重试成功, 已恢复生成`, 'success', 3000);
+            } else {
+              useUiStore().showToast(`重试 ${event.attempt} 次仍失败: ${(event.finalError || '未知错误').slice(0, 60)}`, 'error', 6000);
+            }
+          }
           break;
+        }
         // v0.4.2 step 1: AgentSession 内置 compaction (手动 / 自动 threshold / overflow)
         case 'compaction_start':
           console.log(`[chat] compaction_start: reason=${event.reason}`);
@@ -647,6 +744,34 @@ export const useChatStore = defineStore('chat', () => {
               at: Date.now(),
             },
           };
+          // Bug #2 修: compaction 终态 toast 反馈 (手动 compact 成功 / 失败 / 拒绝)
+          if (event.reason === 'manual') {
+            if (event.aborted) {
+              useUiStore().showToast('压缩已中止', 'warning', 3000);
+            } else if (event.errorMessage) {
+              useUiStore().showToast(`压缩失败: ${event.errorMessage.slice(0, 80)}`, 'error', 6000);
+            } else {
+              useUiStore().showToast('压缩完成, context 已释放', 'success', 3000);
+            }
+          }
+          // v0.4.6 Bug 修 (新1): 压缩完成时, 在 chat 流里插入"分界线"消息 + 同步收尾
+          //   之前只 toast 提示, 位置太靠下不直观. 现在在最后一条 assistant 消息后插一条
+          //   system 角色消息, ChatMessage.vue 渲染为 "── 已压缩 N tokens ──" 分界线.
+          //   走 d2.messages.push 不走 streamingBySession, 立刻可见.
+          //   Pi SDK 0.84.2 emit event.result 含 CompactionResult, tokens 字段不一定稳定 → 简化
+          //   显示"上下文已压缩" + "X 条消息被合并".
+          {
+            const beforeCount = d2.messages.length;
+            d2.messages.push({
+              id: `sys-compact-${Date.now()}`,
+              role: 'system',
+              content: '__COMPACTION_DIVIDER__',  // ChatMessage.vue 检测这个 marker
+              createdAt: new Date().toISOString(),
+              compactionMarker: true,  // 标记这条 system 消息是压缩分界线
+            } as ChatMessage);
+            chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+            console.log(`[chat] compaction divider pushed (msgs ${beforeCount} → ${d2.messages.length})`);
+          }
           break;
         case 'extension_ui_request': {
           // v0.5.0: Pi SDK RPC 协议的 extension UI, 替代 v0.4.x 的 permission_request
@@ -692,11 +817,11 @@ export const useChatStore = defineStore('chat', () => {
       const workspacePath = activeWs?.path ?? null;
       // v0.4.1+: 注入当前 permission mode 作为初始值
       const permissionMode = config.permissionMode;
-      // v0.4.2 step 1+: 注入 per-workspace stable sessionId, 让 sidecar 加载同一 session 历史
-      // v0.5.4 hotfix: 之前用 getSessionIdForWorkspace 永远返回 undefined (没人调 setSessionIdForWorkspace
-      //   写回), 改用 ensureSessionIdForWorkspace 拿保证存在的 id (没就生成 v4 UUID + persist),
-      //   修"AI 永远第一次对话"bug
-      const piSessionId = workspacePath ? config.ensureSessionIdForWorkspace(workspacePath) : undefined;
+      // Bug #1 修 (2026-08-18): 改用 per-session 独立 piSessionId (不用 per-workspace 固定)
+      //   之前 per-workspace 固定 id  → 不同 FE session 串了 (都写到同一个 jsonl)
+      //   现在每个 FE session 独立   → 各自独立 jsonl, 切 session 真隔离
+      //   旧 data: 旧 session 升级时 piSessionId undefined → ensurePiSessionId lazy 生成
+      const piSessionId = sessionId ? sessionStore.ensurePiSessionId(sessionId) : undefined;
       // v0.4.4 Skills (Pi SDK 暴露): 传 enabled skill names 给 sidecar, 走 formatSkillsForPrompt
       //   注入 system prompt override. enabledByName 改后必须重启 sidecar (D165 systemPrompt
       //   不可动态改), SkillsButton toggle 触发 Tauri sidecar kill+spawn.
@@ -748,28 +873,69 @@ export const useChatStore = defineStore('chat', () => {
    * → 走 LLM 总结 + 替换 message history. 完成 emit compaction_start / compaction_end 事件.
    *
    * 限制: 当前 session 正在 streaming 时不能触发 (会冲突), 调用方自己保证.
+   *
+   * Bug #2 修 (2026-08-18): 改走独立 `compact_session` invoke (force-spawn sidecar),
+   *   跟 send_prompt 解耦, 闲置 session 也能压缩. 同时加 UI toast 反馈成功/失败
+   *   (之前 silently 失败用户视觉"没反应").
    */
   async function compact(sessionId?: string) {
     const sid = sessionId ?? sessionStore.activeSessionId;
     if (!sid) {
       console.warn('[chat] compact: no active session, ignoring');
+      useUiStore().showToast('没有 active session, 无法压缩', 'warning');
       return;
     }
     if (isStreaming(sid)) {
       console.warn('[chat] compact: session is streaming, ignoring (用户应先 abort)');
+      useUiStore().showToast('当前 session 正在生成, 请先停止后再压缩', 'warning');
       return;
     }
     if (isCompacting(sid)) {
       console.warn('[chat] compact: already compacting, ignoring');
+      useUiStore().showToast('已在压缩中, 请等待完成', 'info');
       return;
     }
     console.log(`[chat] compact: triggering manual compaction for session=${sid}, currentContextTokens=${getContextTokens(sid)}`);
+    // Bug #2 修: 走 force-spawn 路径 (compact_session invoke), 不依赖 active sidecar
+    const config = useConfigStore();
+    const active = config.activeProvider;
+    const model = config.activeModel;
+    if (!active || !model) {
+      useUiStore().showToast('未配置 provider + model, 无法压缩', 'error');
+      return;
+    }
+    const activeWs = sessionStore.activeWorkspace;
+    const workspacePath = activeWs?.path ?? null;
+    // Bug #1 修: 用当前 active session 的独立 piSessionId (不用 per-workspace 固定)
+    const piSessionId = sessionStore.ensurePiSessionId(sid);
+    const skills = useSkillsStore();
+    const enabledNames = skills.getEnabledNames();
     try {
-      await piTauri.sendRpcCommand(sid, { type: 'compact' });
+      await piTauri.compactSession(sid, () => ({
+        providerId: active.id,
+        provider: active.type,
+        model: model.id,
+        baseUrl: active.baseUrl,
+        thinkingLevel: config.thinkingLevel,
+        workspacePath,
+        permissionMode: config.permissionMode,
+        sessionId: piSessionId,
+        skills: { enabledNames },
+        modelMetadata: {
+          type: model.type,
+          vision: model.vision,
+          contextWindow: model.contextWindow,
+          maxOutput: model.maxOutput,
+          maxRounds: model.maxRounds,
+          reasoning: model.reasoning,
+        },
+      }));
+      useUiStore().showToast('开始压缩 context…', 'info', 2000);
     } catch (e) {
-      console.error('[chat] compact RpcCommand failed', e);
+      console.error('[chat] compactSession invoke failed', e);
       // 失败时清掉 in_progress 状态, 避免 UI 卡住
       compactionBySession.value = { ...compactionBySession.value, [sid]: 'idle' };
+      useUiStore().showToast(`压缩失败: ${e instanceof Error ? e.message : String(e)}`, 'error', 6000);
     }
   }
 
@@ -825,8 +991,12 @@ export const useChatStore = defineStore('chat', () => {
    *
    * 副作用: 当前 active step 关闭 (isActive=false, collapsed=true), 但不修改已累积的
    *   thinking / toolCalls / stepText — 用户能继续发下一条消息, 已生成的回复保留.
+   *
+   * v0.4.6 Bug 修 (abort 后重发继续走): 同时调 Rust 端 killSidecar, force kill 旧 sidecar
+   *   child 进程 (Pi SDK AgentSession state 不再 hold, 下次 send_prompt 启新 sidecar
+   *   resume 不会看到 incomplete message).
    */
-  function forceStopStreaming(sessionId: string) {
+  async function forceStopStreaming(sessionId: string) {
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
     retryBySession.value = { ...retryBySession.value, [sessionId]: null };
     const d2 = getSessionData(sessionId);
@@ -843,6 +1013,12 @@ export const useChatStore = defineStore('chat', () => {
     }
     setPhase(sessionId, 'idle');
     console.warn('[chat] forceStopStreaming:', sessionId, '(abort 30s timeout or catch 兜底)');
+    // v0.4.6: force kill 旧 sidecar 避免 state 残留
+    try {
+      await piTauri.killSidecar(sessionId);
+    } catch (e) {
+      console.warn('[chat] forceStopStreaming: killSidecar failed (ignored)', e);
+    }
   }
 
   return {

@@ -1,24 +1,31 @@
 <script setup lang="ts">
 /**
- * ChatMessage — v0.3.7+ 重写, v0.4.1 step 累加重构
+ * ChatMessage — v0.3.7+ 重写, v0.4.1 step 累加重构, v0.4.6 Cursor 卡片重构, v0.5.0-D 第4轮:
+ *   **per-step collapsible group** (Pi TUI / MiniMax Code 风格)
  *
- * 设计目标:
+ * 设计目标 (v0.5.0-D 第4轮):
  * - **user 消息**: 右侧气泡 (保留)
- * - **assistant 消息** (v0.4.1):
- *   - **步骤列表** (StepGroup[]): 1 turn = 1 step, thinking + tool_calls 都归 step 内
- *   - markdown final body (message.content, 跨 turn 累积)
- *   - 底部小 actions (复制 / 重新生成)
+ * - **assistant 消息**:
+ *   - 每个 step 独立渲染为一个 collapsible sub-section, 头部: "第 N 步 · 思考 X 次 ·
+ *     调用 M 个工具" (MiniMax Code / Pi TUI 风格)
+ *   - step body 内包含: thinking 块 (灰底斜体) + tool 卡片列表 (icon + name + args
+ *     + status) + 正文 markdown
+ *   - 已完成的 step 默认折叠 (点击 header 展开), 当前正在 streaming 的 step 自动展开,
+ *     末尾有 "进行中..." 指示 + "▌" 闪烁光标
+ *   - 错误 / retry / 空状态 / actions 仍按 message 级别挂
  *
- * 不再有 "deepseek-v4-flash" 头部卡片, 也不再硬编码 TraeWork
+ * 跟之前版本的对比:
+ *   - v0.4.6 Cursor 风格: thinking / tools / bodies 三段平铺, 多 turn 内容互相覆盖
+ *   - v0.5.0-D 第1-2轮: per-step body list, 但 thinking / tools 仍是顶层累积
+ *   - v0.5.0-D 第4轮 (现在): per-step group, 整 step 折叠, thinking/tool/text 都在组内
  *
- * v0.4.1 step 累加改造: 把 message 级别的 thinking + toolCalls 改到 step 级别
- * 一次 prompt 可能跑 N turn, 每个 turn 是 1 step, 用户能展开/折叠看过程
+ * 用户反馈驱动: "图2 自行理解当前这个流式返回, 能看到 tools, think 完全看不到效果;
+ *   你就用 Pi TUI 那种来试一下效果吧, 参考图3 做效果" — MiniMax Code / Pi TUI 风格.
  */
 import { computed, ref, watch, onUnmounted } from 'vue';
-import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2 } from 'lucide-vue-next';
-import type { ChatMessage, Step } from '@/lib/mock/types';
+import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight } from 'lucide-vue-next';
+import type { ChatMessage, Step, ToolCallBlock } from '@/lib/mock/types';
 import MarkdownContent from './MarkdownContent.vue';
-import StepGroup from './StepGroup.vue';
 import { useChatStore } from '@/stores/chat';
 
 interface Props {
@@ -47,32 +54,110 @@ const props = withDefaults(defineProps<Props>(), {
 const chatStore = useChatStore();
 const isUser = computed(() => props.message.role === 'user');
 
-const hasSteps = computed(() => (props.steps?.length ?? 0) > 0);
-// v0.4.1.2 fix: final body 渲染 last step 的 stepText (last turn 的 text)
-// 而不是 message.content (跨 turn 累积所有 text, 会显示 turn 1 + turn 2 重复内容)
-const lastStep = computed(() => {
-  const steps = props.steps || [];
-  return steps.length > 0 ? steps[steps.length - 1] : undefined;
-});
-const finalBody = computed(() => {
-  // 优先 lastStep.stepText (per-turn 隔离, 不会跨 turn 重复)
-  if (lastStep.value && lastStep.value.stepText.trim().length > 0) {
-    return lastStep.value.stepText;
+/**
+ * v0.5.0-D 第4轮: per-step 渲染. 直接用 props.steps, 每个 step 独立渲染为一个
+ *   collapsible sub-section. thinking / tools / text 都在 step 内部, 不再平铺累积.
+ *
+ * hasThinkingOrTools: 任意 step 有 thinking 或 tool 时为 true (决定是否显示空状态).
+ */
+const hasThinkingOrTools = computed(() => {
+  for (const s of props.steps || []) {
+    if (s.thinking.length > 0 || s.toolCalls.length > 0) return true;
   }
-  // fallback: message.content (单 turn 场景 / 兼容旧数据)
-  return props.message.content;
+  return false;
 });
-const hasContent = computed(() => (finalBody.value?.trim().length ?? 0) > 0);
+/**
+ * v0.5.0-D 第4轮: 任意 step 有 stepText 时为 true (决定是否显示 actions / empty).
+ */
+const hasContent = computed(() => {
+  for (const s of props.steps || []) {
+    if (s.stepText && s.stepText.trim().length > 0) return true;
+  }
+  return false;
+});
+
+/**
+ * v0.5.0-D 第4轮: per-step collapse state.
+ *   - Set<stepId> 记录被 user 手动 collapse 的 step (toggle 用)
+ *   - 默认 (没有 user 偏好): 已完成的 step 折叠, 当前正在 streaming 的 step 展开
+ *   - user 手动 toggle 后, 记到 collapsedSteps 覆盖默认
+ */
+const collapsedSteps = ref<Set<string>>(new Set());
+function isStepCollapsed(step: Step, isLast: boolean): boolean {
+  if (collapsedSteps.value.has(step.id)) return true;
+  if (collapsedSteps.value.has(`__expanded_${step.id}`)) return false;
+  // 默认: 当前 (last) step 展开, 其他折叠
+  return !isLast;
+}
+function toggleStep(step: Step) {
+  const isLast = (props.steps || []).indexOf(step) === (props.steps || []).length - 1;
+  const currentlyCollapsed = isStepCollapsed(step, isLast);
+  if (currentlyCollapsed) {
+    // 展开: 删 collapse 标记 + 加展开标记 (防止默认逻辑再次覆盖)
+    collapsedSteps.value.delete(step.id);
+    collapsedSteps.value.add(`__expanded_${step.id}`);
+  } else {
+    // 折叠: 反向
+    collapsedSteps.value.add(step.id);
+    collapsedSteps.value.delete(`__expanded_${step.id}`);
+  }
+  collapsedSteps.value = new Set(collapsedSteps.value);
+}
+
+/**
+ * 复制拼接所有 step 的正文 (per-step, 跨 turn 完整).
+ */
+const copyableText = computed(() =>
+  (props.steps || [])
+    .map((s) => s.stepText || '')
+    .filter((t) => t.trim().length > 0)
+    .join('\n\n'),
+);
 
 const copied = ref(false);
+/**
+ * v0.5.0-D 第4轮: 复制拼接所有 step 的正文 (per-step, 跨 turn 完整).
+ *   之前 finalBody = lastStep.stepText, 多 turn 时只复制最后一段.
+ *   现在 copyableText 已经按时间序拼接好.
+ */
 async function copyMessage() {
   try {
-    await navigator.clipboard.writeText(finalBody.value);
+    await navigator.clipboard.writeText(copyableText.value);
     copied.value = true;
     setTimeout(() => (copied.value = false), 1200);
   } catch (e) {
     console.warn('[msg] copy failed', e);
   }
+}
+
+/**
+ * v0.4.6 Cursor 风格: tool 卡片每行 result 默认折叠, 用户点 [+] 才展开.
+ * 用 Set<toolCallId> 记录展开状态. (v0.5.0-D 第4轮 per-step group 改造后保留, 仍有用)
+ */
+const expandedTools = ref<Set<string>>(new Set());
+
+function toggleToolExpanded(toolCallId: string) {
+  if (expandedTools.value.has(toolCallId)) {
+    expandedTools.value.delete(toolCallId);
+  } else {
+    expandedTools.value.add(toolCallId);
+  }
+  // 触发响应式
+  expandedTools.value = new Set(expandedTools.value);
+}
+function toolStatusLabel(t: ToolCallBlock): string {
+  if (t.status === 'running' || t.status === 'pending') return '运行中';
+  if (t.status === 'success') return '完成';
+  return '失败';
+}
+function toolArgsSummary(t: ToolCallBlock): string {
+  const keys = Object.keys(t.args || {});
+  if (keys.length === 0) return '';
+  const first = keys[0];
+  const v = t.args[first];
+  const s = typeof v === 'string' ? v : JSON.stringify(v);
+  const preview = s.length > 50 ? s.slice(0, 50) + '…' : s;
+  return `${first}: ${preview}`;
 }
 
 /**
@@ -147,58 +232,155 @@ const statusText = computed(() => {
     </div>
   </div>
 
-  <!-- ============== ASSISTANT MESSAGE: step 累加 + final body ============== -->
+  <!-- ============== SYSTEM MESSAGE: v0.4.6 压缩分界线 ============== -->
+  <!-- compaction 完成时 chat.ts push 一条 role:'system', compactionMarker:true 的消息,
+       这里渲染为居中灰色横线 "── 上下文已压缩 ──", 不走 markdown. -->
+  <div
+    v-else-if="message.role === 'system' && message.compactionMarker"
+    class="pad-msg__compaction-divider"
+    :data-message-id="message.id"
+  >
+    <span class="pad-msg__compaction-line" />
+    <span class="pad-msg__compaction-label">上下文已压缩</span>
+    <span class="pad-msg__compaction-line" />
+  </div>
+
+  <!-- ============== ASSISTANT MESSAGE: v0.5.0-D 第4轮 per-step group 风格 ============== -->
   <div v-else class="pad-msg pad-msg--assistant" :data-message-id="message.id">
-    <!-- v0.4.2+: 错误 banner (think 阶段出错也显示, 不只是空 message 状态)
-       之前 v0.3.8.15 只在 !hasContent && !hasSteps 时显示, 漏掉了 think 阶段有 steps 但 LLM 调失败的场景 -->
+    <!-- v0.4.2+: 错误 banner (think 阶段出错也显示, 不只是空 message 状态) -->
     <div v-if="!isStreaming && errorMessage && !retry" class="pad-msg__error">
       <span class="pad-msg__error-icon" aria-hidden="true">⚠</span>
       <span class="pad-msg__error-text">{{ errorMessage }}</span>
     </div>
 
-    <!-- v0.4.1: 步骤列表 (每个 step = 1 turn, thinking + tool_calls 都在 step 内) -->
-    <div v-if="hasSteps" class="pad-msg__steps">
-      <StepGroup
-        v-for="(step, i) in steps"
-        :key="step.id"
-        :step="step"
-        :session-id="sessionId"
-        :message-id="message.id"
-        :index="i + 1"
-        :is-last="i === steps.length - 1"
-      />
+    <!-- v0.5.0-D 第4轮: per-step collapsible group
+         用户反馈 "用 Pi TUI / MiniMax Code 那种来试一下" — 每个 step 是一个 sub-section,
+         header 显示 summary (思考 N 次, 调用 M 个工具, 当前 step 加 "进行中..."),
+         body 包含 thinking / tools / text. 已完成 step 默认折叠, 当前 step 展开. -->
+    <div
+      v-for="(step, idx) in steps || []"
+      :key="step.id"
+      class="pad-step-group"
+      :class="{
+        'is-current': idx === (steps || []).length - 1 && isStreaming,
+        'is-last': idx === (steps || []).length - 1,
+      }"
+    >
+      <button
+        type="button"
+        class="pad-step-group__head"
+        :title="isStepCollapsed(step, idx === (steps || []).length - 1) ? '展开步骤' : '折叠步骤'"
+        @click="toggleStep(step)"
+      >
+        <ChevronRight
+          :size="12"
+          :stroke-width="1.75"
+          :class="['pad-step-group__chev', { 'is-collapsed': isStepCollapsed(step, idx === (steps || []).length - 1) }]"
+        />
+        <span class="pad-step-group__index">{{ idx + 1 }}</span>
+        <Brain v-if="step.thinking.length" :size="11" :stroke-width="1.75" class="pad-step-group__icon" />
+        <Wrench v-else-if="step.toolCalls.length" :size="11" :stroke-width="1.75" class="pad-step-group__icon" />
+        <span class="pad-step-group__summary">
+          <template v-if="step.thinking.length">
+            思考 {{ step.thinking.length }} 次
+          </template>
+          <template v-if="step.thinking.length && step.toolCalls.length">，</template>
+          <template v-if="step.toolCalls.length">
+            调用 {{ step.toolCalls.length }} 个工具
+          </template>
+          <template v-if="!step.thinking.length && !step.toolCalls.length && step.stepText">
+            文字回复
+          </template>
+          <template v-if="!step.thinking.length && !step.toolCalls.length && !step.stepText">
+            空步骤
+          </template>
+        </span>
+        <span
+          v-if="idx === (steps || []).length - 1 && isStreaming"
+          class="pad-step-group__indicator"
+        >
+          <Loader2 :size="11" :stroke-width="2" class="pad-step-group__spinner" />
+          {{ statusText }}
+        </span>
+      </button>
+
+      <div
+        v-show="!isStepCollapsed(step, idx === (steps || []).length - 1)"
+        class="pad-step-group__body"
+      >
+        <!-- thinking 块 (按 step 隔离, 灰底斜体) -->
+        <div v-if="step.thinking.length" class="pad-step-group__thinking">
+          <div
+            v-for="t in step.thinking"
+            :key="t.id"
+            class="pad-step-thinking"
+          >
+            <MarkdownContent :content="t.content" />
+          </div>
+        </div>
+
+        <!-- tool 卡片 (按 step 隔离) -->
+        <div v-if="step.toolCalls.length" class="pad-step-group__tools">
+          <div
+            v-for="t in step.toolCalls"
+            :key="t.id"
+            class="pad-msg__tool-card"
+            :class="`is-${t.status}`"
+          >
+            <div class="pad-msg__tool-card-row">
+              <Wrench :size="11" :stroke-width="1.75" class="pad-msg__tool-card-icon" />
+              <span class="pad-msg__tool-card-name">{{ t.name }}</span>
+              <span v-if="toolArgsSummary(t)" class="pad-msg__tool-card-args">
+                {{ toolArgsSummary(t) }}
+              </span>
+              <span class="pad-msg__tool-card-status">{{ toolStatusLabel(t) }}</span>
+              <button
+                v-if="t.result"
+                class="pad-msg__tool-card-toggle"
+                type="button"
+                :title="expandedTools.has(t.id) ? '收起' : '展开 result'"
+                @click.stop="toggleToolExpanded(t.id)"
+              >
+                <ChevronDown
+                  :size="11"
+                  :stroke-width="1.75"
+                  :class="['pad-msg__tool-card-chev', { 'is-collapsed': !expandedTools.has(t.id) }]"
+                />
+              </button>
+            </div>
+            <pre v-if="t.result && expandedTools.has(t.id)" class="pad-msg__tool-card-result">{{ t.result }}</pre>
+          </div>
+        </div>
+
+        <!-- 正文 markdown (per-step 独立, 不被冲掉) -->
+        <div
+          v-if="step.stepText && step.stepText.trim().length > 0"
+          class="pad-msg__body"
+          :class="{ 'pad-msg__body--current': idx === (steps || []).length - 1 && isStreaming }"
+        >
+          <MarkdownContent :content="step.stepText" />
+        </div>
+      </div>
     </div>
 
-    <!-- v0.5.1: Streaming status — phase-based 旋转 icon + 文字轮换
-         替代 v0.3.8.9 的 3-dot bounce (太朴素, 长 stream 时感觉卡) -->
-    <div v-if="isStreaming" class="pad-msg__loading">
-      <Loader2 :size="13" :stroke-width="2" class="pad-msg__spinner" />
-      <Transition name="pad-msg-status" mode="out-in">
-        <span :key="statusText" class="pad-msg__loading-text">{{ statusText }}</span>
-      </Transition>
-    </div>
-
-    <!-- v0.4.2+: 重试提示 (sidecar 在 5 次重试间 emit retry_start, UI 显示"重试中 1/5...")
-       加重背景色让 retry 状态更明显, 跟 think 阶段错误区分开 -->
+    <!-- v0.4.2+: 重试提示 (sidecar 在 5 次重试间 emit retry_start, UI 显示"重试中 1/5...") -->
     <div v-if="retry" class="pad-msg__retry">
       <span class="pad-msg__retry-icon" aria-hidden="true">⟳</span>
       <span class="pad-msg__retry-text">
-        LLM 调用失败，正在重试
-        <strong>{{ retry.attempt }}/{{ retry.maxAttempts }}</strong>
+        <template v-if="retry.attempt > 0 && retry.maxAttempts > 0">
+          LLM 调用失败，正在重试
+          <strong>{{ retry.attempt }}/{{ retry.maxAttempts }}</strong>
+        </template>
+        <template v-else>
+          等待 LLM 重试中…
+        </template>
         <span class="pad-msg__retry-hint">({{ retry.errorMessage.slice(0, 80) }}{{ retry.errorMessage.length > 80 ? '…' : '' }})</span>
       </span>
     </div>
 
-    <!-- markdown body (final reply, 渲染 lastStep.stepText) -->
-    <div v-else-if="hasContent" class="pad-msg__body">
-      <MarkdownContent :content="finalBody" />
-    </div>
-
-    <!-- v0.3.8.15: stream 结束但 4 类内容都为空时, 显示具体 error 信息
-         v0.4.2.x fix: 跟上面 error banner (line 89) 互斥, 有 errorMessage 时
-         只显示 error banner, 不重复 "⚠ {{ errorMessage }}" + "AI 没有返回内容" 两个 -->
+    <!-- v0.3.8.15: stream 结束但 4 类内容都为空时, 显示具体 error 信息 -->
     <div
-      v-else-if="!isStreaming && !hasContent && !hasSteps && !errorMessage"
+      v-if="!isStreaming && !hasContent && !hasThinkingOrTools && !errorMessage"
       class="pad-msg__empty"
     >
       <span>AI 没有返回内容</span>
@@ -252,6 +434,370 @@ const statusText = computed(() => {
   line-height: var(--pad-lh-relaxed);
   color: var(--pad-fg-primary);
   word-wrap: break-word;
+}
+
+/* ===== v0.5.0-D: per-step body 列表 ===== */
+.pad-msg__body-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pad-msg__body--current {
+  /* 当前正在 streaming 的 step body — 视觉上跟已完成 step 区分 */
+  position: relative;
+}
+.pad-msg__body--current::after {
+  /* 闪烁的游标 — 表示该 step 还在追加内容 */
+  content: '▌';
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--pad-accent);
+  animation: pad-msg-cursor-blink 1s steps(2, end) infinite;
+  font-weight: var(--pad-fw-regular);
+}
+@keyframes pad-msg-cursor-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+/* ===== v0.5.0-D 第4轮: per-step group 风格 (Pi TUI / MiniMax Code) ===== */
+.pad-step-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0;
+}
+.pad-step-group__head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--pad-border);
+  border-radius: 6px;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-secondary);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--pad-dur-fast) ease, border-color var(--pad-dur-fast) ease;
+  align-self: flex-start;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+.pad-step-group__head:hover {
+  background: var(--pad-bg-hover);
+  border-color: var(--pad-fg-tertiary);
+}
+.pad-step-group.is-current > .pad-step-group__head {
+  /* 当前正在 streaming 的 step: 用 accent 色边框 + 浅色背景突出 */
+  border-color: var(--pad-accent);
+  background: var(--pad-accent-soft);
+  color: var(--pad-fg-primary);
+}
+.pad-step-group__chev {
+  flex-shrink: 0;
+  transition: transform var(--pad-dur-base) var(--pad-ease-in-out);
+}
+.pad-step-group__chev.is-collapsed {
+  transform: rotate(0deg);
+}
+.pad-step-group__chev:not(.is-collapsed) {
+  transform: rotate(90deg);
+}
+.pad-step-group__index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--pad-muted);
+  color: var(--pad-fg-secondary);
+  font-size: var(--pad-fs-10);
+  font-weight: var(--pad-fw-medium);
+  flex-shrink: 0;
+}
+.pad-step-group.is-current > .pad-step-group__head .pad-step-group__index {
+  background: var(--pad-accent);
+  color: var(--pad-fg-inverse);
+}
+.pad-step-group__icon {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.pad-step-group__summary {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pad-step-group__indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--pad-accent);
+  font-size: var(--pad-fs-11);
+  font-weight: var(--pad-fw-medium);
+  flex-shrink: 0;
+}
+.pad-step-group__spinner {
+  animation: pad-step-spin 1.4s linear infinite;
+}
+@keyframes pad-step-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.pad-step-group__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0 4px 24px;
+  border-left: 2px solid var(--pad-border);
+  margin-left: 12px;
+}
+.pad-step-group.is-current > .pad-step-group__body {
+  border-left-color: var(--pad-accent);
+}
+.pad-step-group__thinking {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px;
+  background: var(--pad-muted);
+  border-radius: 6px;
+}
+.pad-step-thinking :deep(.pad-md),
+.pad-step-thinking :deep(.pad-md p) {
+  font-style: italic;
+  color: var(--pad-fg-tertiary);
+  margin: 0;
+  font-size: var(--pad-fs-12);
+  line-height: var(--pad-lh-base);
+}
+.pad-step-group__tools {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 旧 v0.4.6 Cursor 风格 (thinking-cursor / tools-cursor / body-list) 样式已不用, 删除
+   留 v0.4.6 的 thinking / tools / body 基础样式, 上面 step-group 直接复用 padding/bg 等
+   元素 class 即可 (class 名复用, 不重复定义). */
+.pad-msg__compaction-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+  padding: 0 8px;
+}
+.pad-msg__compaction-line {
+  flex: 1;
+  height: 1px;
+  background: var(--pad-border);
+  opacity: 0.6;
+}
+.pad-msg__compaction-label {
+  font-size: var(--pad-fs-11);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-tertiary);
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+}
+
+/* ===== v0.4.6 Cursor 风格: thinking 累积区 (顶部) ===== */
+.pad-msg__thinking-cursor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.pad-msg__thinking-cursor-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--pad-fs-11);
+  font-weight: var(--pad-fw-medium);
+  font-style: italic;
+  color: var(--pad-fg-tertiary);
+  letter-spacing: 0.02em;
+}
+/* v0.5.0-D: thinking header 现在是 button, 加 cursor-toggle reset 样式 */
+.pad-msg__cursor-toggle {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  margin: 0;
+  cursor: pointer;
+  text-align: left;
+  border-radius: 4px;
+  transition: color var(--pad-dur-fast) ease, background var(--pad-dur-fast) ease;
+}
+.pad-msg__cursor-toggle:hover {
+  color: var(--pad-fg-secondary);
+  background: var(--pad-bg-hover);
+}
+.pad-msg__cursor-count {
+  font-size: var(--pad-fs-10);
+  font-weight: var(--pad-fw-regular);
+  font-style: normal;
+  color: var(--pad-fg-tertiary);
+  opacity: 0.7;
+  margin-left: 2px;
+  letter-spacing: 0.02em;
+}
+.pad-msg__cursor-chev {
+  margin-left: auto;
+  opacity: 0.7;
+  transition: transform var(--pad-dur-base) var(--pad-ease-in-out);
+}
+.pad-msg__cursor-chev.is-collapsed {
+  transform: rotate(-90deg);
+}
+.pad-msg__thinking-cursor-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px;
+  background: var(--pad-muted);
+  border-radius: 6px;
+  font-size: var(--pad-fs-12);
+  font-style: italic;
+  color: var(--pad-fg-tertiary);
+  line-height: var(--pad-lh-base);
+  /* v0.4.6: 持续显示 + 可滚动, max-height 200px 防 thinking 很长时把整屏挤掉 */
+  max-height: 200px;
+  overflow-y: auto;
+}
+/* 深穿透让 MarkdownContent 内的 .pad-md 跟 thinking 一致灰底斜体 */
+.pad-msg__thinking-cursor-body :deep(.pad-md),
+.pad-msg__thinking-cursor-body :deep(.pad-md p) {
+  font-style: italic;
+  color: var(--pad-fg-tertiary);
+  margin: 0;
+}
+
+/* ===== v0.4.6 Cursor 风格: tool 卡片列表 (中间) ===== */
+.pad-msg__tools-cursor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 6px;
+}
+.pad-msg__tools-cursor-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--pad-fs-11);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-tertiary);
+  letter-spacing: 0.02em;
+}
+.pad-msg__tools-cursor-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0;
+  list-style: none;
+}
+.pad-msg__tools-cursor {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 6px;
+  padding: 0;
+  list-style: none;
+}
+.pad-msg__tool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background var(--pad-dur-fast) ease;
+}
+.pad-msg__tool-card:hover {
+  background: var(--pad-bg-hover);
+}
+.pad-msg__tool-card-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-secondary);
+}
+.pad-msg__tool-card-icon {
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.pad-msg__tool-card-name {
+  font-family: var(--pad-font-mono);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-secondary);
+  flex-shrink: 0;
+}
+.pad-msg__tool-card-args {
+  flex: 1;
+  color: var(--pad-fg-tertiary);
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-11);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.pad-msg__tool-card-status {
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--pad-muted);
+  flex-shrink: 0;
+}
+.pad-msg__tool-card.is-running .pad-msg__tool-card-status {
+  color: var(--pad-accent);
+  background: var(--pad-accent-soft);
+}
+.pad-msg__tool-card.is-error .pad-msg__tool-card-status {
+  color: var(--pad-danger);
+  background: var(--pad-danger-subtle);
+}
+.pad-msg__tool-card-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  background: transparent;
+  border: none;
+  border-radius: var(--pad-radius-sm);
+  cursor: pointer;
+  color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
+}
+.pad-msg__tool-card-toggle:hover {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
+}
+.pad-msg__tool-card-chev {
+  transition: transform var(--pad-dur-base) var(--pad-ease-in-out);
+}
+.pad-msg__tool-card-chev.is-collapsed {
+  transform: rotate(-90deg);
+}
+.pad-msg__tool-card-result {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--pad-muted);
+  border-radius: 4px;
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-secondary);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-height: 200px;
+  overflow: auto;
 }
 
 /* ===== thinking 块 (v0.3.8.16: max-height 折叠, 之前 grid-template-rows 0fr 在某些浏览器漏边) ===== */

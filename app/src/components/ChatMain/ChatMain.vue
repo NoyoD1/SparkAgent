@@ -48,10 +48,13 @@ const isSessionStreaming = computed(() =>
   activeSession.value ? chatStore.isStreamingSession(activeSession.value.id) : false,
 );
 function isMessageStreaming(idx: number): boolean {
+  // v0.5.0-D 改: 不再检查 `!m.content`. 之前第一条 text_delta 来了就 false
+  //   → ChatMessage 的 "生成中..." pill 立刻消失, 用户看不到 "正在下笔" 的过渡.
+  //   现在整个 agent loop 期间都 true, 直到 agent_end.
   if (!isSessionStreaming.value) return false;
   if (idx !== messages.value.length - 1) return false;
   const m = messages.value[idx];
-  return !!m && m.role === 'assistant' && !m.content;
+  return !!m && m.role === 'assistant';
 }
 
 // v0.4.1 step 累加: steps 现在直接挂在 message.steps 上, 不需要 messageId 索引

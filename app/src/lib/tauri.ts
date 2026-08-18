@@ -344,7 +344,7 @@ class PiTauriClient {
    *   - 权限弹窗:  sendRpcCommand({ type: 'extension_ui_response', id, confirmed: true })
    *   - abort:     sendRpcCommand({ type: 'abort' })
    *   - set_model: sendRpcCommand({ type: 'set_model', provider, modelId })
-   *   - compact:   sendRpcCommand({ type: 'compact' })
+   *   - compact:   sendRpcCommand({ type: 'compact' })  ← ⚠️ Bug #2 修: 用 compactSession() 替代
    *   - 等等, 40+ RpcCommand 都走这一个
    */
   async sendRpcCommand(
@@ -357,6 +357,87 @@ class PiTauriClient {
       await invoke('send_rpc_command', { sessionId, commandJson });
     } catch (e) {
       console.error('[pi-tauri] sendRpcCommand FAILED', e);
+      throw e;
+    }
+  }
+
+  /**
+   * v0.4.6 Bug 修 (abort 后重发继续走): force kill sidecar child.
+   * 背景: spawn-per-prompt 模式下, abort 触发后 Pi SDK 应该 emit agent_end 然后 sidecar 退出.
+   *   但实际在某些 provider (MiniMax / DeepSeek V4 Flash) 上 agent_end 偶尔 lost, 30s 兜底
+   *   forceStopStreaming 翻 streaming=false 但旧 sidecar 还在跑, AgentSession state 还在 hold.
+   *   下次 send_prompt 启新 sidecar resume 时, 看到 incomplete message → "顺着前打断续走".
+   * 修法: 30s 兜底 catch 时调这个, 主动 kill 旧 child + 移除 active map entry.
+   * @returns true = 真杀了 child, false = 没找到 child (已退出)
+   */
+  async killSidecar(sessionId: string): Promise<boolean> {
+    try {
+      const res = await invoke<boolean>('kill_sidecar', { sessionId });
+      console.log('[pi-tauri] killSidecar', { sessionId, killed: res });
+      return res;
+    } catch (e) {
+      console.error('[pi-tauri] killSidecar FAILED', e);
+      return false;
+    }
+  }
+
+  /**
+   * Bug #2 修 (2026-08-18): 独立 compact_session invoke.
+   * 跟 sendPrompt 签名几乎一样, 但走 `compact_session` invoke 强制单独 spawn 一个
+   * sidecar 跑 compact, 不依赖当前 session 是否有 active child.
+   * 背景: 之前走 sendRpcCommand(sid, { type: 'compact' }), 但闲置 session 时
+   *   ActiveSidecars map 已空, 报 "no active sidecar for session=..." → FE 视觉
+   *   "点了没反应".
+   *
+   * 限制: 调用方需保证当前 session 不在 streaming (会跟 sidecar 写 jsonl 冲突).
+   *   chat.ts compact() 入口已经 check isStreaming.
+   */
+  async compactSession(
+    sessionId: string,
+    configGetter: () => {
+      providerId: string;
+      provider: string;
+      model: string;
+      baseUrl?: string;
+      thinkingLevel: ThinkingLevel;
+      workspacePath?: string | null;
+      permissionMode?: 'ask' | 'smart' | 'allow';
+      sessionId?: string | null;
+      skills?: { enabledNames: string[]; extraPaths?: string[] };
+      modelMetadata?: {
+        type?: 'chat' | 'image' | 'video' | 'audio' | 'embedding';
+        vision?: boolean;
+        contextWindow?: number;
+        maxOutput?: number;
+        maxRounds?: number;
+        reasoning?: boolean;
+      };
+    } | null,
+  ): Promise<void> {
+    console.log('[pi-tauri] compactSession called', { sessionId });
+    const cfg = configGetter();
+    if (!cfg || !cfg.providerId || !cfg.provider || !cfg.model) {
+      throw new Error('未配置 Provider (去 Settings → Providers 添加并选 active provider + model)');
+    }
+    try {
+      await invoke('compact_session', {
+        sessionId,
+        config: {
+          providerId: cfg.providerId,
+          provider: cfg.provider,
+          model: cfg.model,
+          baseUrl: cfg.baseUrl ?? null,
+          thinkingLevel: cfg.thinkingLevel,
+          workspacePath: cfg.workspacePath ?? null,
+          permissionMode: cfg.permissionMode ?? 'ask',
+          sessionId: cfg.sessionId ?? null,
+          skills: cfg.skills ?? { enabledNames: [] },
+          modelMetadata: cfg.modelMetadata ?? null,
+        },
+      });
+      console.log('[pi-tauri] compactSession invoke resolved');
+    } catch (e) {
+      console.error('[pi-tauri] compactSession invoke FAILED', e);
       throw e;
     }
   }

@@ -42,6 +42,16 @@ function clampWidth(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+// ====== Toast 通知类型 (Bug #2/#4/#5/#6 统一反馈) ======
+export type ToastKind = 'info' | 'success' | 'warning' | 'error';
+export interface ToastItem {
+  id: number;
+  kind: ToastKind;
+  message: string;
+  /** ms, 默认 4000; error 6000 留时间看 */
+  duration: number;
+}
+
 export const useUiStore = defineStore('ui', () => {
   // Sidebar (left)
   const sidebarCollapsed = ref(false);
@@ -163,6 +173,32 @@ export const useUiStore = defineStore('ui', () => {
     pendingPermission.value = null;
   }
 
+  // ====== Toast 通知 (Bug #2/#4/#5/#6 统一反馈) ======
+  // 之前各种失败都 console.log/console.error, 用户视觉"没反应".
+  // 现在统一走 showToast, App.vue 顶层渲染 toast 容器 (跟 pad-mig-notice 同位置).
+  const toasts = ref<ToastItem[]>([]);
+  let toastSeq = 0;
+
+  function showToast(message: string, kind: ToastKind = 'info', duration?: number) {
+    const id = ++toastSeq;
+    const item: ToastItem = {
+      id,
+      kind,
+      message,
+      duration: duration ?? (kind === 'error' ? 6000 : 4000),
+    };
+    toasts.value = [...toasts.value, item];
+    setTimeout(() => {
+      dismissToast(id);
+    }, item.duration);
+  }
+  function dismissToast(id: number) {
+    toasts.value = toasts.value.filter((t) => t.id !== id);
+  }
+  function clearToasts() {
+    toasts.value = [];
+  }
+
   return {
     // state
     sidebarCollapsed,
@@ -173,6 +209,7 @@ export const useUiStore = defineStore('ui', () => {
     settingsTab,
     themeMode,
     pendingPermission,  // v0.4.1+
+    toasts,  // Bug #2/#4/#5/#6: toast 队列
     // actions
     toggleSidebar,
     setSidebarCollapsed,
@@ -187,5 +224,8 @@ export const useUiStore = defineStore('ui', () => {
     applyTheme,  // v0.3.8.16: 初始应用 (App.vue 调)
     openPermissionDialog,  // v0.4.1+
     closePermissionDialog,  // v0.4.1+
+    showToast,  // Bug #2/#4/#5/#6: 统一错误/成功反馈
+    dismissToast,
+    clearToasts,
   };
 });

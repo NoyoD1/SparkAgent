@@ -11,6 +11,7 @@ mod keyring;
 mod sidecar;
 
 use serde::Deserialize;
+use crate::sidecar::kill_sidecar;  // v0.4.6: register tauri command (force kill sidecar on abort)
 use tauri::{AppHandle, Manager};
 use std::path::{Path, PathBuf};
 // v0.4.4.6: ClientConfig 用 sidecar::SkillsConfig / sidecar::ModelMetadataConfig
@@ -1192,6 +1193,69 @@ async fn send_prompt(
     Ok(())
 }
 
+// ====== Bug #2 修 (2026-08-18): 独立 compact_session invoke ======
+// 跟 send_prompt 签名一样, 但不走 send_rpc_command (避免闲置 session 找不到 active child).
+// force-spawn 一个新 sidecar 专门跑 compact, 收到 compaction_end 就 kill.
+// FE 端 (chat.ts compact()) 看到这个 invoke 直接调, 跟当前是否有 active sidecar 解耦.
+#[tauri::command]
+async fn compact_session(
+    app: AppHandle,
+    session_id: String,
+    config: ClientConfig,
+) -> Result<(), String> {
+    debug_log(&format!(
+        "compact_session: session={}, provider={}, model={}, workspace={:?}",
+        session_id, config.provider, config.model, config.workspace_path
+    ));
+
+    // 跟 send_prompt 一样: 走 keychain 拿 apiKey (永不在 FE)
+    let api_key = match keyring::get(&config.provider_id) {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            return Err(format!(
+                "No API key for provider \"{}\" in OS keychain.",
+                config.provider_id
+            ));
+        }
+        Err(e) => return Err(format!("Keychain read error: {e}")),
+    };
+
+    let base_url = if config.provider == "openai-compatible" {
+        config
+            .base_url
+            .clone()
+            .ok_or_else(|| "openai-compatible needs baseUrl".to_string())?
+    } else {
+        String::new()
+    };
+
+    let session_id_for_sidecar = match (&config.workspace_path, &config.session_id) {
+        (Some(ws), Some(sid)) if !ws.is_empty() && !sid.is_empty() => Some(sid.clone()),
+        _ => None,
+    };
+
+    let active = app.state::<std::sync::Arc<sidecar::ActiveSidecars>>().inner().clone();
+
+    sidecar::run_compact(
+        app,
+        sidecar::SidecarConfig {
+            provider: config.provider,
+            model: config.model,
+            base_url,
+            api_key,
+            thinking_level: config.thinking_level,
+            workspace_path: config.workspace_path,
+            permission_mode: config.permission_mode.unwrap_or_else(|| "ask".to_string()),
+            session_id: session_id_for_sidecar,
+            skills: config.skills,
+            model_metadata: config.model_metadata,
+        },
+        session_id,
+        active,
+    );
+    Ok(())
+}
+
 // ====== Migration helper ======
 // Phase 3 bootstrap: 从 server/.env 读 SHANGTANG_KEY (或任何 *_KEY), 写到 keychain.
 // 一次性命令, 跑完可以删 server/.
@@ -1386,6 +1450,8 @@ pub fn run() {
             list_api_keys,
             has_api_key,
             send_prompt,
+            compact_session,  // Bug #2 修 (2026-08-18): 独立 compact invoke
+            kill_sidecar,  // v0.4.6 修 (2026-08-18): abort 兜底时 force kill 旧 sidecar
             fetch_provider_models,
             migrate_from_env,
             ensure_default_workspace,

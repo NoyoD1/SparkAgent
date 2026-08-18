@@ -11,9 +11,11 @@
 import { onMounted, ref } from 'vue';
 import ChatView from '@/views/ChatView.vue';
 import { useConfigStore } from '@/stores/config';
+import { useSessionStore } from '@/stores/session';
 import { useUiStore } from '@/stores/ui';
 
 const config = useConfigStore();
+const sessions = useSessionStore();
 const ui = useUiStore();
 const ready = ref(false);
 const migrationNotice = ref<string>('');
@@ -30,6 +32,18 @@ onMounted(async () => {
         migrationNotice.value = `已从旧版本恢复 ${result.migrated} 个 provider 配置`;
         setTimeout(() => { migrationNotice.value = ''; }, 5000);
       }
+    }
+    // Bug #1 修 (2026-08-18): 启动时把旧 per-workspace piSessionId 派给
+    //   每个 workspace 第一个旧 session (保留旧历史), 其余生成新.
+    //   configStore.perWorkspaceSessionId 是 v0.4.2 step 1 引入, v0.4.5.x 改成
+    //   per-session 独立 → 旧数据需要迁移, 不然所有旧 session lazy 走新 id 历史清空.
+    const sessionMigrated = sessions.migrateOldSessionIds(config.perWorkspaceSessionId);
+    if (sessionMigrated > 0) {
+      ui.showToast(
+        `已迁移 ${sessionMigrated} 个旧 session (每个 session 现在独立历史, 旧 workspace 第一个 session 保留旧历史)`,
+        'info',
+        5000,
+      );
     }
   } finally {
     ready.value = true;
@@ -48,6 +62,19 @@ onMounted(async () => {
       <span>{{ migrationNotice }}</span>
     </div>
   </Transition>
+  <!-- Bug #2/#4/#5/#6: 全局 toast 容器 (跟 pad-mig-notice 同位置, 多个堆叠) -->
+  <div class="pad-toast-stack" aria-live="polite">
+    <TransitionGroup name="pad-toast">
+      <div
+        v-for="t in ui.toasts"
+        :key="t.id"
+        :class="['pad-toast', `is-${t.kind}`]"
+        @click="ui.dismissToast(t.id)"
+      >
+        <span class="pad-toast__msg">{{ t.message }}</span>
+      </div>
+    </TransitionGroup>
+  </div>
 </template>
 
 <style>
@@ -101,6 +128,70 @@ onMounted(async () => {
 .pad-mig-fade-leave-to {
   opacity: 0;
   transform: translateX(-50%) translateY(8px);
+}
+
+/* ===== Bug #2/#4/#5/#6: 全局 toast (跟 pad-mig-notice 同位置, 多个堆叠) ===== */
+.pad-toast-stack {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 9998;
+  pointer-events: none;
+  max-width: 80vw;
+}
+.pad-toast {
+  pointer-events: auto;
+  cursor: pointer;
+  padding: 10px 18px;
+  background: var(--pad-bg-card);
+  color: var(--pad-fg-primary);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-pill);
+  font-size: var(--pad-fs-13);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.pad-toast.is-success {
+  border-color: var(--pad-success, #16a34a);
+  color: var(--pad-success-text, #15803d);
+  background: var(--pad-success-soft, #f0fdf4);
+}
+.pad-toast.is-warning {
+  border-color: var(--pad-warning, #d97706);
+  color: var(--pad-warning-text, #b45309);
+  background: var(--pad-warning-soft, #fffbeb);
+}
+.pad-toast.is-error {
+  border-color: var(--pad-danger, #dc2626);
+  color: var(--pad-danger-text, #b91c1c);
+  background: var(--pad-danger-soft, #fef2f2);
+}
+.pad-toast__msg {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.pad-toast-enter-active,
+.pad-toast-leave-active {
+  transition:
+    opacity var(--pad-dur-base) var(--pad-ease-out-soft),
+    transform var(--pad-dur-base) var(--pad-ease-out-soft);
+}
+.pad-toast-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+.pad-toast-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 </style>
 

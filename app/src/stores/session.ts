@@ -24,6 +24,12 @@ export interface Session {
   title: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Bug #1 修 (2026-08-18): per-session stable piSessionId (uuid v4),
+   * 让 sidecar 用独立 jsonl 加载历史. addSession 时 lazy 生成 + 持久化.
+   * 跟 per-workspace 固定 id 解耦: 不同 session 各自独立 context.
+   */
+  piSessionId?: string;
 }
 
 const STORAGE_KEY = 'pi-agent:session:v1';
@@ -191,6 +197,8 @@ export const useSessionStore = defineStore('session', () => {
       title,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      // Bug #1 修 (2026-08-18): 每个 FE session 独立的 piSessionId
+      piSessionId: genPiSessionId(),
     };
     sessions.value = [sess, ...sessions.value];
     activeSessionId.value = sess.id;
@@ -202,6 +210,79 @@ export const useSessionStore = defineStore('session', () => {
       expandedWorkspaceIds.value = new Set([...expandedWorkspaceIds.value, workspaceId]);
     }
     return sess;
+  }
+
+  /**
+   * Bug #1 修 (2026-08-18): 给现有 session lazy 生成 piSessionId (如果还没有).
+   * 旧 session 升级上来时 piSessionId undefined → 第一次 sendPrompt 时补一个.
+   * 不会改 session.id (FE sessionId 不变, 只补 piSessionId).
+   *
+   * 启动时 App.vue 会调 migrateOldSessionIds, 把 configStore.perWorkspaceSessionId
+   * 里的旧 id 派给每个 workspace 的第一个旧 session (保留旧 per-workspace 历史),
+   * 其余旧 session lazy 生成新 id.
+   */
+  function ensurePiSessionId(sessionId: string): string | undefined {
+    const s = sessions.value.find((x) => x.id === sessionId);
+    if (!s) return undefined;
+    if (!s.piSessionId) {
+      s.piSessionId = genPiSessionId();
+    }
+    return s.piSessionId;
+  }
+
+  /**
+   * Bug #1 修 (2026-08-18): 启动时迁移旧 per-workspace piSessionId 数据.
+   *
+   * 旧实现 (v0.4.2 step 1) 是 per-workspace 固定一个 piSessionId:
+   *   configStore.perWorkspaceSessionId: { [wsPath]: piSessionId }
+   *   同一 workspace 下所有 FE session 共享同一个 jsonl → 串历史
+   *
+   * 新实现 (v0.4.5.x+ 修) 是 per-session 独立 piSessionId:
+   *   Session.piSessionId: string
+   *   每个 FE session 各自独立 jsonl → 不串
+   *
+   * 迁移策略: 对每个没有 piSessionId 的旧 session, 找它所属 workspace:
+   *   - 如果该 workspace 还没分配过旧 id (perWorkspaceIds[ws] 存在 且 该 ws 下没 session 已用这个 id)
+   *     → 用旧 id (保留该 workspace 的旧历史)
+   *   - 否则 → 生成新 uuid (历史清空, 是可接受 trade-off)
+   *
+   * 接受 fallbackPerWorkspaceIds: { [wsPath]: piSessionId } 来自 configStore,
+   * 不依赖 configStore 避免循环 import.
+   *
+   * 幂等: 多次调用安全, 已有 piSessionId 的 session 不动.
+   */
+  function migrateOldSessionIds(fallbackPerWorkspaceIds: Record<string, string> = {}): number {
+    // 记录哪些 workspace 的旧 id 已经被分给 session 了 (避免重复)
+    const usedFallbackIds = new Set<string>();
+    let migrated = 0;
+    for (const s of sessions.value) {
+      if (s.piSessionId) continue;  // 已经有, 跳过
+      const fallback = fallbackPerWorkspaceIds[s.workspaceId];
+      if (fallback && !usedFallbackIds.has(fallback)) {
+        s.piSessionId = fallback;
+        usedFallbackIds.add(fallback);
+        migrated += 1;
+        console.log(`[session] migrate: session=${s.id} (ws=${s.workspaceId}) → use old per-workspace piSessionId=${fallback.slice(0, 16)}…`);
+      } else {
+        // 没有旧 id 或已经被用 → 生成新
+        s.piSessionId = genPiSessionId();
+        migrated += 1;
+        console.log(`[session] migrate: session=${s.id} (ws=${s.workspaceId}) → new piSessionId=${s.piSessionId.slice(0, 16)}… (旧历史清空, 可接受)`);
+      }
+    }
+    if (migrated > 0) {
+      console.log(`[session] migrate: total ${migrated} session(s) migrated to per-session piSessionId`);
+    }
+    return migrated;
+  }
+
+  /** uuid v4 generator (跟 config.ensureSessionIdForWorkspace 同 pattern, 但每个 session 一个) */
+  function genPiSessionId(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    // fallback (Node 18+ / 旧 WebView)
+    return 'pi-sess-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
   }
 
   function removeSession(id: string) {
@@ -270,5 +351,7 @@ export const useSessionStore = defineStore('session', () => {
     selectSession,
     clearActiveSession,
     selectWorkspace,
+    ensurePiSessionId,  // Bug #1 修 (2026-08-18): per-session 独立 piSessionId
+    migrateOldSessionIds,  // Bug #1 修 (2026-08-18): 启动时迁移旧 per-workspace id
   };
 });

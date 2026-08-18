@@ -59,6 +59,11 @@ export interface ChatMessage {
    * UI 在 Composer 显示 + 触发 compaction 按钮高亮
    */
   usage?: MessageUsage;
+  /**
+   * v0.4.6: system 角色消息标记. 配合 ChatMessage.vue 渲染为分界线.
+   * 当前只用于 compaction 完成时分界线 ("── 已压缩 ──").
+   */
+  compactionMarker?: boolean;
 }
 
 export interface ThinkingBlock {

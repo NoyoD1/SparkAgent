@@ -329,6 +329,11 @@ async function send() {
  *     abort 后 emit `agent_end` event 偶尔 lost → 跑马灯一直转. 30s 内没收到
  *     agent_end 就 force 翻 streaming=false + 弹 "已强制终止" 提示.
  *   - catch 兜底: abort RpcCommand 本身失败时也 force 翻 streaming=false.
+ *
+ * Bug #4 修 (2026-08-18): 加 UI toast 反馈 (之前 silently, 用户视觉"点 stop 没反应").
+ *   - abort RpcCommand 成功 + agent_end 在 30s 内到: 静默 (按钮已恢复成 send)
+ *   - abort RpcCommand 失败: toast "停止失败: ..."
+ *   - 30s 内没收到 agent_end (force 兜底): toast "已强制终止 (LLM 没响应 abort, 30s 兜底)"
  */
 const userAborted = ref(false);
 let abortWatchStop: (() => void) | null = null;
@@ -344,6 +349,8 @@ async function stop() {
     console.warn('[Composer] abort 30s 内没收到 agent_end, force 翻 streaming=false');
     chatStore.forceStopStreaming(sid);
     userAborted.value = false;
+    // Bug #4 修: 30s 兜底触发时给用户明确反馈 (之前没有, 以为没生效)
+    uiStore.showToast('已强制终止生成 (LLM 30s 内未响应 abort)', 'warning', 5000);
   }, 30_000);
   // watch isStreaming 翻 false → agent_end 到了, 立刻 clear timer
   abortWatchStop = watch(
@@ -364,7 +371,11 @@ async function stop() {
   try {
     await piTauri.sendRpcCommand(sid, { type: 'abort' });
   } catch (e) {
-    console.error('[Composer] abort RpcCommand failed, force 翻 streaming=false', e);
+    // v0.5.0-D 修: abort RPC 失败时, forceStopStreaming 已经做了 killSidecar 兜底,
+    //   UI 状态确实翻回 idle (下方 forceStopStreaming 调). 之前 toast '停止失败: ...'
+    //   误导用户以为没停成. 改成 '已停止 (RPC 不可达, 强制终止)' 让用户清楚动作已完成,
+    //   不再以为 stop 按钮坏了.
+    console.warn('[Composer] abort RpcCommand failed, falling back to forceStopStreaming', e);
     resolved = true;
     clearTimeout(fallbackTimer);
     if (abortWatchStop) {
@@ -374,6 +385,7 @@ async function stop() {
     // 兜底: abort 失败也清 streaming, 让 user 继续操作
     chatStore.forceStopStreaming(sid);
     userAborted.value = false;
+    uiStore.showToast('已停止 (RPC 不可达，已强制终止 sidecar)', 'warning', 3500);
   }
 }
 
@@ -966,6 +978,10 @@ onMounted(() => nextTick(autoResize));
 }
 /* v0.4.3 redesign: ContextIndicator 已拆到独立组件 (ContextIndicator.vue), 它的样式在那边 scoped */
 /* 旧 v0.4.3 text 计数 + 独立压缩按钮 CSS 删除 (D173 UX 原则: 功能逻辑一体, 拆到独立组件) */
+/* v0.5.0-D 第2轮 workspace path chip 删除: 用户反馈 "这路径放这里有什么意义" — 占位感,
+   workspace 路径在 WorkspaceTree 树视图 + ChatHeader 标题已经能看清, Composer 重复显示
+   反而打断输入流. 沙箱限制 (createPermissionExtension 路径校验) 仍生效, 写错位置会被
+   sidecar block 并 return reason, 不会写到 workspace 之外. */
 
 .pad-composer__modelchip {
   display: inline-flex;

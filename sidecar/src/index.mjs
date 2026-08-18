@@ -29,7 +29,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve as pathResolve } from 'node:path';
 
 import {
   createAgentSessionFromServices,
@@ -345,6 +345,22 @@ history is genuinely empty. Even if a previous turn was a 429 retry or empty res
 intent across the session is still part of the conversation.
 </context_awareness>`;
 
+  // v0.5.0-D 第10轮: 简化 RESPONSE_STYLE_INSTRUCTION 为 1+1 规则.
+  //   第2-9轮加的 5 条规则太长, model (sensenova-6.7-flash-lite) 实际只遵守第 1 条但
+  //   不彻底, 还是会有 echo. 第 2-4 条都是 "软" 规则 (简洁/不重复/事件流), 跟 echo 关系不大,
+  //   而且稀释了第 1 条的权重. 第 5 条 (HTML 包代码块) 保留, 简短 + 配反例, model 实际遵守率
+  //   更高. 用户 D194 反馈 "9 轮原地打转" 后, 整体改回 v0.5.0-PR3 极简 prompt.
+  //
+  // 关键: **第 1 条带反例** — 实测 model (尤其 flash-lite 类小模型) 对 "Do NOT X" 这种
+  //   否定指令不敏感, 改成 "Bad: ... / Good: ..." 配具体反例后, 遵守率显著提升.
+  const RESPONSE_STYLE_INSTRUCTION = `<rules>
+1. Never start your reply by repeating the user's question. Jump straight to the answer.
+   Bad:  User: "What's the weather?"  Assistant: "What's the weather? It's sunny."
+   Good: User: "What's the weather?"  Assistant: "It's sunny today."
+
+2. When you generate or quote HTML, wrap it in a \`\`\`html code block. Never paste raw HTML.
+</rules>`;
+
   const services = await createAgentSessionServices({
     cwd,
     agentDir: dir,
@@ -368,6 +384,9 @@ intent across the session is still part of the conversation.
       appendSystemPromptOverride: (base) => [
         ...base,
         CONTEXT_AWARENESS_INSTRUCTION,
+        // v0.5.0-D 第10轮: 简化到 1+1 规则 (no-echo 带反例 + HTML 包代码块).
+        //   之前 5 条规则太长被 model 忽略, 用户 D194 反馈 9 轮原地打转.
+        RESPONSE_STYLE_INSTRUCTION,
         // v0.4.4 Skills: 把 enabled skills 格式化进 system prompt (Pi SDK 0.84.2 formatSkillsForPrompt
         //   返回 XML 格式, 跟 <context_awareness> 风格一致). enabledSkillNames 从 config 传, 改 enabled
         //   必须重启 sidecar (D165 systemPrompt 不可动态改).
@@ -455,6 +474,23 @@ function createPermissionExtension(permissionMode) {
       const toolArgs = event.input || {};
       const argsPreview = JSON.stringify(toolArgs).slice(0, 200);
 
+      // v0.5.0-D 第2轮: workspace 沙箱 — write / edit 工具的 path 必须在 workspacePath
+      //   之下, 否则 block 并附带 reason. 防止 LLM 误把文件写到 Pi Agent Desktop 自身目录
+      //   (e.g. D:\UnityWork\Tools\Pi) 或其他无关位置 ("agent 把桌面端程序给改掉了" 用户反馈).
+      //   - bash 工具无法静态检查 (command 字符串里可能塞路径), 由 permission mode 兜底.
+      //   - read / ls / grep / find 通常不破坏, 不强制沙箱 (避免影响跨目录查询).
+      if ((toolName === 'write' || toolName === 'edit') && workspacePath) {
+        const filePath = toolArgs.path || toolArgs.filePath;
+        if (filePath && typeof filePath === 'string' && !isPathWithinWorkspace(filePath, workspacePath)) {
+          const resolved = pathResolve(workspacePath, filePath);
+          console.error(`[perm] BLOCK ${toolName} outside workspace: ${filePath} (resolved=${resolved}, workspace=${workspacePath})`);
+          return {
+            block: true,
+            reason: `Path "${filePath}" is outside the active workspace "${workspacePath}". Use a path within the workspace, or switch workspace via the sidebar.`,
+          };
+        }
+      }
+
       if (permissionMode === 'deny') {
         console.error(`[perm] deny ${toolName} (mode=deny)`);
         return { block: true, reason: 'Tool use denied (permission mode=deny)' };
@@ -487,6 +523,32 @@ function createPermissionExtension(permissionMode) {
       }
     });
   };
+}
+
+/**
+ * v0.5.0-D 第2轮: workspace 沙箱 path 校验.
+ *   - 把 filePath 跟 workspacePath 都 resolve 成绝对路径 (跨平台)
+ *   - Windows 大小写不敏感 + 反斜杠统一转 /
+ *   - 边界: filePath === workspacePath 视为在内部
+ *   - 防 prefix 误判: workspace=D:\work, filePath=D:\workspace-evil\foo.txt → reject
+ *     (path.resolve 已 normalize 掉 ../, 后续 startsWith(w + '/') 保证边界对齐)
+ */
+function isPathWithinWorkspace(filePath, workspacePath) {
+  try {
+    const resolvedWorkspace = pathResolve(process.cwd(), workspacePath);
+    const resolvedFile = pathResolve(resolvedWorkspace, filePath);
+    const normalize = process.platform === 'win32'
+      ? (p) => p.replace(/\\/g, '/').toLowerCase()
+      : (p) => p.replace(/\\/g, '/');
+    const w = normalize(resolvedWorkspace).replace(/\/+$/, '');
+    const f = normalize(resolvedFile);
+    if (f === w) return true;
+    if (!f.startsWith(w + '/')) return false;
+    return true;
+  } catch (e) {
+    console.error(`[perm] path check error:`, e instanceof Error ? e.message : String(e));
+    return true; // 出错时保守放行, 避免误伤
+  }
 }
 
 // ====== 4. 创 runtime ======
