@@ -16,7 +16,7 @@
  */
 import { ref, computed, onMounted } from 'vue';
 import {
-  Plus, Trash2, RefreshCw, CheckCircle2, KeyRound, Server, Save,
+  Plus, Trash2, RefreshCw, CheckCircle2, KeyRound, Server, Save, Settings,
 } from 'lucide-vue-next';
 import {
   useConfigStore, PROVIDER_OPTIONS, BUILTIN_MODELS, THINKING_LEVELS,
@@ -48,6 +48,54 @@ const keyState = ref<'idle' | 'saving' | 'deleting'>('idle');
 const keyMessage = ref<string>('');
 const newKeyInput = ref<string>('');
 const newModelInput = ref<string>('');
+
+// v0.4.4.6: model metadata form (per-model 配置 5 字段: type / vision / contextWindow / maxOutput / maxRounds / reasoning)
+const editingMetadataModelId = ref<string | null>(null);
+const metadataForm = ref<{
+  type: 'chat' | 'image' | 'video' | 'audio' | 'embedding';
+  vision: boolean;
+  contextWindow: number | null;
+  maxOutput: number | null;
+  maxRounds: number | null;
+  reasoning: boolean;
+}>({
+  type: 'chat',
+  vision: false,
+  contextWindow: null,
+  maxOutput: null,
+  maxRounds: null,
+  reasoning: false,
+});
+
+function openMetadataForm(model: ModelInfo) {
+  // 复制当前 metadata 到 form (form 内部用 null 表示 "未设")
+  metadataForm.value = {
+    type: model.type ?? 'chat',
+    vision: model.vision ?? false,
+    contextWindow: model.contextWindow ?? null,
+    maxOutput: model.maxOutput ?? null,
+    maxRounds: model.maxRounds ?? null,
+    reasoning: model.reasoning ?? false,
+  };
+  editingMetadataModelId.value = model.id;
+}
+function cancelMetadataForm() {
+  editingMetadataModelId.value = null;
+}
+function saveMetadata(modelId: string) {
+  if (!selectedProvider.value) return;
+  config.updateModelMetadata(selectedProvider.value.id, modelId, {
+    type: metadataForm.value.type,
+    vision: metadataForm.value.vision,
+    contextWindow: metadataForm.value.contextWindow ?? undefined,
+    maxOutput: metadataForm.value.maxOutput ?? undefined,
+    maxRounds: metadataForm.value.maxRounds ?? undefined,
+    reasoning: metadataForm.value.reasoning,
+  });
+  editingMetadataModelId.value = null;
+  fetchState.value = 'ok';
+  fetchMessage.value = `已更新 model ${modelId} metadata`;
+}
 
 /** 派生 */
 const builtinOptions = computed(() => PROVIDER_OPTIONS.filter((o) => o.builtin));
@@ -615,42 +663,98 @@ function onProviderAdded(id: string) {
               还没模型. {{ isOpenAICompatible ? '点"拉取" 或手输 model id.' : '从下方预填列表选, 或手输 id.' }}
             </div>
             <div v-else class="pad-provider-detail__models">
-              <label
-                v-for="m in selectedProvider.models"
-                :key="m.id"
-                class="pad-provider-detail__model"
-                :class="{
-                  'is-active': selectedProvider.activeModelId === m.id,
-                  'is-disabled': !isModelEnabled(m),
-                }"
-              >
-                <input
-                  type="checkbox"
-                  class="pad-provider-detail__model-toggle"
-                  :checked="isModelEnabled(m)"
-                  @change="config.toggleModelEnabled(selectedProvider.id, m.id)"
-                />
-                <input
-                  type="radio"
-                  :name="`model-${selectedProvider.id}`"
-                  :value="m.id"
-                  :checked="selectedProvider.activeModelId === m.id"
-                  :disabled="!isModelEnabled(m)"
-                  @change="activateModel(selectedProvider.id, m.id)"
-                />
-                <div class="pad-provider-detail__model-body">
-                  <div class="pad-provider-detail__model-id">{{ m.id }}</div>
-                  <div v-if="m.label" class="pad-provider-detail__model-label">{{ m.label }}</div>
-                </div>
-                <button
-                  class="pad-provider-detail__model-remove"
-                  type="button"
-                  title="移除 model"
-                  @click.stop="removeModel(m.id)"
+              <template v-for="m in selectedProvider.models" :key="m.id">
+                <label
+                  class="pad-provider-detail__model"
+                  :class="{
+                    'is-active': selectedProvider.activeModelId === m.id,
+                    'is-disabled': !isModelEnabled(m),
+                  }"
                 >
-                  <Trash2 :size="12" :stroke-width="1.75" />
-                </button>
-              </label>
+                  <input
+                    type="checkbox"
+                    class="pad-provider-detail__model-toggle"
+                    :checked="isModelEnabled(m)"
+                    @change="config.toggleModelEnabled(selectedProvider.id, m.id)"
+                  />
+                  <input
+                    type="radio"
+                    :name="`model-${selectedProvider.id}`"
+                    :value="m.id"
+                    :checked="selectedProvider.activeModelId === m.id"
+                    :disabled="!isModelEnabled(m)"
+                    @change="activateModel(selectedProvider.id, m.id)"
+                  />
+                  <div class="pad-provider-detail__model-body">
+                    <div class="pad-provider-detail__model-id">{{ m.id }}</div>
+                    <div v-if="m.label" class="pad-provider-detail__model-label">{{ m.label }}</div>
+                    <!-- v0.4.4.6: metadata 摘要 (type / vision / ctx / maxOut / maxRounds / reasoning 已设的项) -->
+                    <div v-if="m.type || m.vision || m.contextWindow || m.maxOutput || m.maxRounds || m.reasoning" class="pad-provider-detail__model-meta">
+                      <span v-if="m.type" class="pad-provider-detail__model-meta-tag">{{ m.type }}</span>
+                      <span v-if="m.vision" class="pad-provider-detail__model-meta-tag">vision</span>
+                      <span v-if="m.contextWindow" class="pad-provider-detail__model-meta-tag">{{ Math.round(m.contextWindow / 1000) }}K ctx</span>
+                      <span v-if="m.maxOutput" class="pad-provider-detail__model-meta-tag">{{ Math.round(m.maxOutput / 1000) }}K out</span>
+                      <span v-if="m.maxRounds" class="pad-provider-detail__model-meta-tag">rounds≤{{ m.maxRounds }}</span>
+                      <span v-if="m.reasoning" class="pad-provider-detail__model-meta-tag">reasoning</span>
+                    </div>
+                  </div>
+                  <button
+                    class="pad-provider-detail__model-config"
+                    type="button"
+                    title="配置 model metadata (type/vision/上下文/单次回复/持续轮数/思考)"
+                    @click.stop="editingMetadataModelId === m.id ? cancelMetadataForm() : openMetadataForm(m)"
+                  >
+                    <Settings :size="12" :stroke-width="1.75" />
+                  </button>
+                  <button
+                    class="pad-provider-detail__model-remove"
+                    type="button"
+                    title="移除 model"
+                    @click.stop="removeModel(m.id)"
+                  >
+                    <Trash2 :size="12" :stroke-width="1.75" />
+                  </button>
+                </label>
+                <!-- v0.4.4.6: inline metadata form (展开在 row 下方) -->
+                <div v-if="editingMetadataModelId === m.id" class="pad-provider-detail__model-metadata-form">
+                  <div class="pad-provider-detail__form-row">
+                    <label class="pad-provider-detail__form-label">类型</label>
+                    <select v-model="metadataForm.type" class="pad-provider-detail__form-input">
+                      <option value="chat">chat (对话)</option>
+                      <option value="image">image (绘图)</option>
+                      <option value="video">video (视频)</option>
+                      <option value="audio">audio (音频)</option>
+                      <option value="embedding">embedding (向量)</option>
+                    </select>
+                  </div>
+                  <div class="pad-provider-detail__form-row">
+                    <label class="pad-provider-detail__form-label">
+                      <input v-model="metadataForm.vision" type="checkbox" />
+                      支持图片输入 (多模态)
+                    </label>
+                    <label class="pad-provider-detail__form-label">
+                      <input v-model="metadataForm.reasoning" type="checkbox" />
+                      思考模型 (DeepSeek-R1 / Claude extended thinking)
+                    </label>
+                  </div>
+                  <div class="pad-provider-detail__form-row">
+                    <label class="pad-provider-detail__form-label">最大上下文 token</label>
+                    <input v-model.number="metadataForm.contextWindow" type="number" min="0" step="1000" class="pad-provider-detail__form-input" placeholder="200000" />
+                  </div>
+                  <div class="pad-provider-detail__form-row">
+                    <label class="pad-provider-detail__form-label">单次回复 token 上限</label>
+                    <input v-model.number="metadataForm.maxOutput" type="number" min="0" step="100" class="pad-provider-detail__form-input" placeholder="8192" />
+                  </div>
+                  <div class="pad-provider-detail__form-row">
+                    <label class="pad-provider-detail__form-label">持续回复轮数上限 (tool call 最多 N 轮)</label>
+                    <input v-model.number="metadataForm.maxRounds" type="number" min="0" step="1" class="pad-provider-detail__form-input" placeholder="不设" />
+                  </div>
+                  <div class="pad-provider-detail__form-actions">
+                    <button class="pad-provider-detail__btn pad-provider-detail__btn--ghost" type="button" @click="cancelMetadataForm">取消</button>
+                    <button class="pad-provider-detail__btn pad-provider-detail__btn--primary" type="button" @click="saveMetadata(m.id)">保存 metadata</button>
+                  </div>
+                </div>
+              </template>
             </div>
           </div>
 
@@ -1033,6 +1137,41 @@ function onProviderAdded(id: string) {
 .pad-provider-detail__model-body { flex: 1; min-width: 0; }
 .pad-provider-detail__model-id { font-size: var(--pad-fs-13); font-family: var(--pad-font-mono); color: var(--pad-fg-primary); }
 .pad-provider-detail__model-label { font-size: var(--pad-fs-11); color: var(--pad-fg-tertiary); margin-top: 1px; }
+/* v0.4.4.6: metadata 摘要 (type/vision/ctx/out/rounds/reasoning 已设的项) */
+.pad-provider-detail__model-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.pad-provider-detail__model-meta-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 1px 6px;
+  border-radius: var(--pad-radius-sm);
+  background: var(--pad-bg-muted);
+  color: var(--pad-fg-secondary);
+  border: 1px solid var(--pad-border-subtle);
+}
+/* v0.4.4.6: 配置 metadata 按钮 (跟删除按钮同 pattern: hover 才显) */
+.pad-provider-detail__model-config {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--pad-fg-tertiary);
+  border-radius: var(--pad-radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: all var(--pad-dur-fast) ease;
+}
+.pad-provider-detail__model:hover .pad-provider-detail__model-config { opacity: 1; }
+.pad-provider-detail__model-config:hover { background: var(--pad-bg-hover); color: var(--pad-fg-primary); }
 .pad-provider-detail__model-remove {
   display: inline-flex;
   align-items: center;
@@ -1049,6 +1188,68 @@ function onProviderAdded(id: string) {
 }
 .pad-provider-detail__model:hover .pad-provider-detail__model-remove { opacity: 1; }
 .pad-provider-detail__model-remove:hover { background: var(--pad-danger-soft); color: var(--pad-danger-text); }
+
+/* v0.4.4.6: inline metadata form (展开在 model row 下方) */
+.pad-provider-detail__model-metadata-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  margin: 4px 0 8px 0;
+  background: var(--pad-bg-subtle);
+  border: 1px solid var(--pad-border-subtle);
+  border-radius: var(--pad-radius-md);
+}
+.pad-provider-detail__form-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.pad-provider-detail__form-label {
+  flex: 1;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pad-provider-detail__form-input {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: var(--pad-fs-13);
+  background: var(--pad-bg-base);
+  border: 1px solid var(--pad-border-subtle);
+  border-radius: var(--pad-radius-sm);
+  color: var(--pad-fg-primary);
+}
+.pad-provider-detail__form-input:focus {
+  outline: none;
+  border-color: var(--pad-accent);
+}
+.pad-provider-detail__form-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+.pad-provider-detail__btn {
+  padding: 6px 14px;
+  font-size: var(--pad-fs-12);
+  border-radius: var(--pad-radius-sm);
+  cursor: pointer;
+  border: 1px solid var(--pad-border-subtle);
+  background: var(--pad-bg-base);
+  color: var(--pad-fg-primary);
+  transition: all var(--pad-dur-fast) ease;
+}
+.pad-provider-detail__btn:hover { background: var(--pad-bg-hover); }
+.pad-provider-detail__btn--primary {
+  background: var(--pad-accent);
+  border-color: var(--pad-accent);
+  color: var(--pad-fg-on-accent);
+}
+.pad-provider-detail__btn--primary:hover { opacity: 0.9; }
+.pad-provider-detail__btn--ghost { background: transparent; }
 
 .pad-provider-detail__seg {
   display: inline-flex;

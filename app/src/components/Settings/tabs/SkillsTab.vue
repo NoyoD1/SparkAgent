@@ -14,7 +14,7 @@
  * 新 enabled skills. user 必须重启 release .exe (D165 systemPrompt 不可动态改).
  * 完整"toggle 后自动重启 sidecar"是 v0.4.4.x polish.
  */
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import { Sparkles, Plus, AlertCircle, Info, Check } from 'lucide-vue-next';
 import { useSkillsStore } from '@/stores/skills';
@@ -22,6 +22,12 @@ import AddSkillForm from './AddSkillForm.vue';
 
 const skillsStore = useSkillsStore();
 const { skills, hasSnapshot, diagnostics } = storeToRefs(skillsStore);
+
+// v0.4.4.6: 切到 Skills tab 立刻调 list_skills 刷新 (跟 sidecar skills_snapshot 解耦,
+//   不必等 send_prompt sidecar 启动). user 进 tab 立刻看到列表.
+onMounted(async () => {
+  await skillsStore.refreshFromTauri();
+});
 
 const viewMode = ref<'list' | 'add'>('list');
 const toast = ref<{ type: 'ok' | 'fail'; message: string } | null>(null);

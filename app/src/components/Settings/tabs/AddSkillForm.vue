@@ -22,6 +22,7 @@ import { ArrowLeft, Save, AlertCircle, Loader2, Check, FileText, Sparkles, Uploa
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { piTauri } from '@/lib/tauri';
 import { useSessionStore } from '@/stores/session';
+import { useSkillsStore } from '@/stores/skills';
 
 const emit = defineEmits<{
   close: [];
@@ -141,6 +142,9 @@ async function importFromZip() {
       workspacePath: isWorkspace ? wsPath : null,
       agentDir: null, // global: Rust 端 fallback 算 (跟 write_skill_file 一致)
     });
+    // v0.4.4.6: 写完后立刻调 list_skills 刷新 skills store (跟 sidecar skills_snapshot 解耦, user 不用重启 .exe 也能看到)
+    const skillsStore = useSkillsStore();
+    await skillsStore.refreshFromTauri();
     // 4. emit zipImported (SkillsTab 关 form + 显示 toast)
     importState.value = 'idle';
     importMessage.value = `已解压 ${result.fileCount} 个文件到 ${result.targetDir}`;
@@ -185,6 +189,9 @@ async function importFromUrl() {
       workspacePath: isWorkspace ? wsPath : null,
       agentDir: null, // global: Rust 端 fallback 算 (跟 write_skill_file 一致)
     });
+    // v0.4.4.6: 写完后立刻调 list_skills 刷新 skills store
+    const skillsStore = useSkillsStore();
+    await skillsStore.refreshFromTauri();
     importState.value = 'idle';
     importMessage.value = `已 fetch ${result.bytes} bytes 到 ${result.targetPath}`;
     importUrl.value = ''; // 清空输入
@@ -243,6 +250,9 @@ async function submit() {
     const filePath = await piTauri.writeSkillFile(args);
     submitState.value = 'ok';
     submitMessage.value = `已写入 ${filePath}`;
+    // v0.4.4.6: 写完后立刻调 list_skills 刷新 skills store (跟 sidecar skills_snapshot 解耦, user 不用重启 .exe 也能看到)
+    const skillsStore = useSkillsStore();
+    await skillsStore.refreshFromTauri();
     // v0.4.4 占位: 提示 user 重启 .exe. skills store 不会自动刷新 (sidecar 没重启).
     // 后续 v0.4.4.x polish: 写完自动 restart sidecar.
     console.warn('[skills] created at', filePath, '— 重启 release .exe 让 sidecar 重新加载 skills 注入 system prompt (D165 systemPrompt 不可动态改).');

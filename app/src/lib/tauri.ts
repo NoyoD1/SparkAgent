@@ -279,6 +279,22 @@ class PiTauriClient {
        *  send_prompt 时传 sidecar, sidecar 走 formatSkillsForPrompt 注入 system prompt.
        *  enabled 改变必须重启 sidecar (D165 systemPrompt 不可动态改). */
       skills?: { enabledNames: string[]; extraPaths?: string[] };
+      /** v0.4.4.6 model metadata (从 configStore.activeModel 读):
+       *  - type: 模型类型, 决定路由 (chat/image/video/audio/embedding)
+       *  - vision: 是否支持图片输入 (Pi SDK input: ['text', 'image'])
+       *  - contextWindow: 最大上下文 token (Pi SDK contextWindow)
+       *  - maxOutput: 单次回复 token 上限 (Pi SDK maxTokens)
+       *  - maxRounds: LLM 连续 tool call 最多多少轮 (我们自己的, 后续 Extension 层拦截)
+       *  - reasoning: 是否思考模型 (Pi SDK reasoning)
+       *  sidecar 收到后把 metadata 拼到 user-custom model object (内置 provider 走 Pi SDK catalog 不需要). */
+      modelMetadata?: {
+        type?: 'chat' | 'image' | 'video' | 'audio' | 'embedding';
+        vision?: boolean;
+        contextWindow?: number;
+        maxOutput?: number;
+        maxRounds?: number;
+        reasoning?: boolean;
+      };
     } | null,
   ): Promise<void> {
     console.log('[pi-tauri] sendPrompt called', { sessionId, contentLen: content.length });
@@ -301,6 +317,7 @@ class PiTauriClient {
           permissionMode: cfg.permissionMode ?? 'ask',  // v0.4.1+ tool permission 初始值
           sessionId: cfg.sessionId ?? null,  // v0.4.2 step 1+
           skills: cfg.skills ?? { enabledNames: [] },  // v0.4.4 Skills (Pi SDK 暴露)
+          modelMetadata: cfg.modelMetadata ?? null,  // v0.4.4.6 model metadata (user-custom path only)
         },
       });
       console.log('[pi-tauri] sendPrompt invoke resolved', res);
@@ -355,6 +372,21 @@ class PiTauriClient {
       configured: boolean;
       preview: string | null;
     }>;
+  }
+
+  // ====== v0.4.4.6 Skills list (FE 主动拉) ======
+  // 之前 v0.4.4.x sidecar 启动时 emit skills_snapshot 一次, 写完 skill 后 UI 不刷新
+  // 修法: Tauri 端 list_skills 走 std::fs::read_dir 扫两个目录 (workspace + global),
+  //   跟 sidecar 的 skills_snapshot 解耦, 纯 UI 列表用.
+  // 写完/导入完成后 FE 调这个, 立刻刷新.
+  async listSkills(args: { workspacePath?: string | null; agentDir?: string | null }): Promise<{
+    skills: TauriSkillInfo[];
+    diagnostics: TauriSkillDiagnostic[];
+  }> {
+    return (await invoke('list_skills', {
+      workspacePath: args.workspacePath ?? null,
+      agentDir: args.agentDir ?? null,
+    })) as { skills: TauriSkillInfo[]; diagnostics: TauriSkillDiagnostic[] };
   }
 
   async migrateFromEnv(envPath?: string): Promise<{
@@ -487,6 +519,26 @@ export interface AppModelInfo {
   label?: string;
   enabled?: boolean;
   fetchedAt?: string;
+}
+
+/** v0.4.4.6: Tauri 端 list_skills 返回的单个 skill (跟 sidecar skills_snapshot schema 对齐) */
+export interface TauriSkillInfo {
+  name: string;
+  description?: string;
+  /** 文件绝对路径 */
+  filePath: string;
+  /** 父目录 (workspace: <ws>/.pi/skills/ 或 global: <agentDir>/skills/) */
+  baseDir: string;
+  /** "workspace" | "global" */
+  scope: string;
+  disableModelInvocation: boolean;
+}
+
+/** v0.4.4.6: Tauri 端 list_skills 返回的诊断信息 */
+export interface TauriSkillDiagnostic {
+  type: string;
+  message: string;
+  path?: string;
 }
 
 export const piTauri = new PiTauriClient();

@@ -12,7 +12,9 @@ mod sidecar;
 
 use serde::Deserialize;
 use tauri::{AppHandle, Manager};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+// v0.4.4.6: ClientConfig 用 sidecar::SkillsConfig / sidecar::ModelMetadataConfig
+use sidecar::{SkillsConfig, ModelMetadataConfig};
 
 /// Debug log to <project>/.tauri-debug.log (DEBUG ONLY).
 /// 用 file 而非 stderr 是因为 cargo tauri dev 的 stderr 被 bash task pipe 吃了看不见.
@@ -53,6 +55,14 @@ pub struct ClientConfig {
     /// 让 sidecar 用同一 session 加载历史. None 时 sidecar 内部生成新 sessionId (跟 v0.4.1 兼容).
     #[serde(default)]
     pub session_id: Option<String>,
+    /// v0.4.4 Skills (Pi SDK 暴露): FE 维护 enabled skill names, sidecar 走 formatSkillsForPrompt
+    ///   注入 system prompt. enabled 改变必须重启 sidecar (D165 systemPrompt 不可动态改).
+    #[serde(default)]
+    pub skills: Option<SkillsConfig>,
+    /// v0.4.4.6 model metadata: type / vision / contextWindow / maxOutput / maxRounds / reasoning.
+    ///   FE 从 configStore.activeModel 读, sidecar 拼到 user-custom model object.
+    #[serde(default)]
+    pub model_metadata: Option<ModelMetadataConfig>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -657,6 +667,171 @@ async fn import_skill_zip(args: ImportSkillZipArgs) -> Result<ImportedSkillZip, 
     })
 }
 
+// ====== v0.4.4.6: list_skills (FE 主动拉, 写完 skill 后立刻刷新 UI 列表) ======
+// 之前 v0.4.4.x: sidecar 启动时 emit skills_snapshot 一次, 写完/导入后 UI 不刷新, 必须重启 .exe
+//   才能看到新 skill (D175 / v0.4.4 已知坑, user 反馈 "skill添加后不立刻显示").
+// 修法: Tauri 端 list_skills 走 std::fs::read_dir 扫两个目录 (workspace + global), 解析 frontmatter,
+//   跟 sidecar 的 skills_snapshot 解耦 — 跟 system prompt 注入无关, 纯 UI 列表.
+//   FE 在 write_skill_file / import_skill_zip / import_skill_url 完成后调 list_skills 立刻刷新.
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListSkillsArgs {
+    /// workspace 目录绝对路径 (用于扫 <ws>/.pi/skills/)
+    ///   跟 write_skill_file / import_skill_zip 走同一目录
+    workspace_path: Option<String>,
+    /// global agentDir 路径 (用于扫 <agentDir>/skills/)
+    ///   跟 Pi SDK 0.84.2 getAgentDir() 默认路径一致
+    ///   FE 可以不传, Rust 端 fallback 算 (USERPROFILE/HOME + .pi/agent)
+    agent_dir: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillListItem {
+    /// skill name (frontmatter.name 或 basename 去 .md)
+    name: String,
+    /// description (frontmatter.description)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    /// 文件绝对路径
+    file_path: String,
+    /// 父目录 (workspace: <ws>/.pi/skills/ 或 global: <agentDir>/skills/)
+    base_dir: String,
+    /// "workspace" | "global" — 跟 Pi SDK 0.84.2 getAgentDir 默认路径一致
+    scope: String,
+    /// frontmatter.disable-model-invocation
+    disable_model_invocation: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListSkillsResponse {
+    skills: Vec<SkillListItem>,
+    /// 解析错误 (skill 文件存在但 frontmatter 坏了等), 不阻塞主流程
+    diagnostics: Vec<ListSkillsDiagnostic>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListSkillsDiagnostic {
+    #[serde(rename = "type")]
+    diag_type: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+}
+
+fn resolve_agent_dir(override_dir: Option<String>) -> Result<PathBuf, String> {
+    if let Some(d) = override_dir.filter(|s| !s.is_empty()) {
+        return Ok(PathBuf::from(d));
+    }
+    let home = std::env::var("USERPROFILE")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok())
+        .or_else(|| {
+            std::env::var("HOMEDRIVE").ok()
+                .zip(std::env::var("HOMEPATH").ok())
+                .map(|(d, p)| format!("{}\\{}", d, p))
+        })
+        .ok_or_else(|| "无法定位 home dir (USERPROFILE/HOME 都未设)".to_string())?;
+    Ok(PathBuf::from(home).join(".pi").join("agent"))
+}
+
+fn list_skills_in_dir(dir: &Path, scope: &str, diagnostics: &mut Vec<ListSkillsDiagnostic>) -> Vec<SkillListItem> {
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
+        Err(e) => {
+            diagnostics.push(ListSkillsDiagnostic {
+                diag_type: "read_dir_failed".to_string(),
+                message: format!("read_dir({}): {}", dir.display(), e),
+                path: Some(dir.to_string_lossy().to_string()),
+            });
+            return out;
+        }
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        // 多文件 skill: <dir>/<name>/SKILL.md, 单文件: <dir>/<name>.md
+        let skill_md_path = if p.is_dir() {
+            p.join("SKILL.md")
+        } else if p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("md") {
+            p.clone()
+        } else {
+            continue;
+        };
+        if !skill_md_path.exists() {
+            // 多文件 skill 但没 SKILL.md, 跳过 (不是有效 skill)
+            if p.is_dir() {
+                diagnostics.push(ListSkillsDiagnostic {
+                    diag_type: "missing_skill_md".to_string(),
+                    message: format!("目录存在但没 SKILL.md: {}", p.display()),
+                    path: Some(p.to_string_lossy().to_string()),
+                });
+            }
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&skill_md_path) {
+            Ok(s) => s,
+            Err(e) => {
+                diagnostics.push(ListSkillsDiagnostic {
+                    diag_type: "read_failed".to_string(),
+                    message: format!("read({}): {}", skill_md_path.display(), e),
+                    path: Some(skill_md_path.to_string_lossy().to_string()),
+                });
+                continue;
+            }
+        };
+        let parsed = parse_skill_frontmatter(&raw);
+        // name fallback: frontmatter 缺失 → 文件名去 .md
+        let name = if !parsed.name.is_empty() {
+            parsed.name
+        } else {
+            skill_md_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("skill")
+                .to_string()
+        };
+        out.push(SkillListItem {
+            name,
+            description: parsed.description,
+            file_path: skill_md_path.to_string_lossy().to_string(),
+            base_dir: dir.to_string_lossy().to_string(),
+            scope: scope.to_string(),
+            disable_model_invocation: parsed.disable_model_invocation,
+        });
+    }
+    out
+}
+
+#[tauri::command]
+async fn list_skills(args: ListSkillsArgs) -> Result<ListSkillsResponse, String> {
+    let mut diagnostics = Vec::new();
+    let mut all_skills: Vec<SkillListItem> = Vec::new();
+
+    // 1. workspace scope: <ws>/.pi/skills/
+    if let Some(ws) = args.workspace_path.as_ref().filter(|s| !s.is_empty()) {
+        let skills_dir = PathBuf::from(ws).join(".pi").join("skills");
+        all_skills.extend(list_skills_in_dir(&skills_dir, "workspace", &mut diagnostics));
+    }
+
+    // 2. global scope: <agentDir>/skills/  (跟 Pi SDK 0.84.2 loadSkills 默认路径一致)
+    let agent_dir = resolve_agent_dir(args.agent_dir)?;
+    let global_skills_dir = agent_dir.join("skills");
+    all_skills.extend(list_skills_in_dir(&global_skills_dir, "global", &mut diagnostics));
+
+    // 3. 按 name 排序 (稳定顺序, UI 一致)
+    all_skills.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(ListSkillsResponse {
+        skills: all_skills,
+        diagnostics,
+    })
+}
+
 // ====== LLM command ======
 
 #[tauri::command]
@@ -735,6 +910,8 @@ async fn send_prompt(
             workspace_path: config.workspace_path,  // v0.3.8.11
             permission_mode: config.permission_mode.unwrap_or_else(|| "ask".to_string()),  // v0.4.1+
             session_id: session_id_for_sidecar,  // v0.4.2 step 1+
+            skills: config.skills,  // v0.4.4 Skills (Pi SDK 暴露) — 已存在但没传, 补上
+            model_metadata: config.model_metadata,  // v0.4.4.6 model metadata
         },
         session_id.clone(),
         prompt_cmd_json,
@@ -950,6 +1127,8 @@ pub fn run() {
             import_skill_zip,
             // v0.4.4.5 Skill 导入: 从 URL fetch raw .md (走 ureq sync HTTP)
             import_skill_url,
+            // v0.4.4.6 Skill 列表: FE 主动拉, 写完/导入后立刻刷新 UI (跟 sidecar skills_snapshot 解耦)
+            list_skills,
             // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
             sidecar::send_rpc_command,
         ])

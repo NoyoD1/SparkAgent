@@ -84,6 +84,25 @@ pub struct ModelInfoDto {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub fetched_at: Option<String>,
+    // v0.4.4.6: model metadata (跟 FE ModelInfo 对齐, Pi SDK 0.84.2 ModelDefinitionSchema 简化白名单)
+    //   - type: 模型类型 (chat / image / video / audio / embedding), 决定路由
+    //   - vision: 是否支持图片输入 (Pi SDK input: ['text', 'image'])
+    //   - context_window: 最大上下文 token (Pi SDK contextWindow)
+    //   - max_output: 单次回复 token 上限 (Pi SDK maxTokens)
+    //   - max_rounds: LLM 连续 tool call 最多多少轮 (我们自己的, Pi SDK 没对应, 后续 Extension 层拦截)
+    //   - reasoning: 是否思考模型 (Pi SDK reasoning)
+    #[serde(default)]
+    pub model_type: Option<String>,  // "chat" | "image" | "video" | "audio" | "embedding"
+    #[serde(default)]
+    pub vision: Option<bool>,
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    #[serde(default)]
+    pub max_output: Option<u32>,
+    #[serde(default)]
+    pub max_rounds: Option<u32>,
+    #[serde(default)]
+    pub reasoning: Option<bool>,
 }
 
 /// 配置文件路径: <app_data_dir>/config.json

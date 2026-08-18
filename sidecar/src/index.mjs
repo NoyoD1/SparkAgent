@@ -159,6 +159,10 @@ if (config.baseUrl) {
   // 调 apiKey.resolve({ ctx, credential, signal })), 优先用 credential?.key (来自
   // RuntimeCredentials override = setRuntimeApiKey 写的真 key), 退到 config.apiKey (closure 初始).
   const initialApiKey = config.apiKey || '';
+  // v0.4.4.6: 从 config.modelMetadata 拿 user 配的 model 参数, 拼到 model object.
+  //   缺省 → 用 hardcoded 默认值 (跟 v0.4.4.5 之前一致, 向后兼容).
+  const mm = config.modelMetadata ?? {};
+  const hasVision = mm.vision === true;
   userCustomProvider = createProvider({
     id: 'user-custom',
     name: config.providerLabel || 'Custom',
@@ -178,16 +182,23 @@ if (config.baseUrl) {
       name: config.model,
       api: 'openai-completions',
       baseUrl: config.baseUrl,
-      input: ['text'],
+      // Pi SDK 0.84.2 input 字段: vision → ['text', 'image'], 默认 'text' only
+      input: hasVision ? ['text', 'image'] : ['text'],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 128000,
-      maxTokens: 8192,
+      contextWindow: mm.contextWindow ?? 128000,  // v0.4.4.6: user 配的上下文, 缺省 128K
+      maxTokens: mm.maxOutput ?? 8192,           // v0.4.4.6: user 配的单次回复上限, 缺省 8K
+      // Pi SDK reasoning: true 走 thinking mode (DeepSeek-R1 / Claude extended thinking)
+      ...(mm.reasoning === true ? { reasoning: true } : {}),
     }],
     api: {
       stream: openaiCompletionsStream,
       streamSimple: openaiCompletionsStreamSimple,
     },
   });
+  // v0.4.4.6: modelType (我们自己的路由概念) + maxRounds (后续 Extension 层拦截) 存到
+  //   config 上, sidecar 不直接传给 Pi SDK (Pi SDK 没对应 schema). 这样 FE / Tauri 端
+  //   都能读, 后续 v0.4.4.7 polish 加 maxRounds enforcement 时直接用 config.modelMetadata.maxRounds.
+  console.error(`[sidecar] user-custom model: id=${config.model} type=${mm.modelType ?? 'chat'} vision=${hasVision} contextWindow=${mm.contextWindow ?? 128000} maxOutput=${mm.maxOutput ?? 8192} maxRounds=${mm.maxRounds ?? 'unset'} reasoning=${mm.reasoning === true}`);
 }
 
 // ====== 3. createAgentSessionRuntime factory ======

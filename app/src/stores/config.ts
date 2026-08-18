@@ -36,6 +36,19 @@ export interface ModelInfo {
   fetchedAt?: string;
   /** v0.3.2+: 用户在 Settings 手动启停. undefined/true = 启用, false = 停用 */
   enabled?: boolean;
+  // v0.4.4.6: model metadata (跟 Pi SDK 0.84.2 ModelDefinitionSchema 白名单对齐, 简化).
+  //   - type: 模型类型, 决定路由 (chat → LLM, image → image gen, video/audio/embedding → 后续 polish)
+  //   - vision: 是否支持图片输入 (Pi SDK input: ['text', 'image'])
+  //   - contextWindow: 最大上下文 token (Pi SDK contextWindow)
+  //   - maxOutput: 单次回复 token 上限 (Pi SDK maxTokens)
+  //   - maxRounds: LLM 连续 tool call 最多多少轮 (我们自己的, Pi SDK 没对应, 后续 Extension 层拦截)
+  //   - reasoning: 是否思考模型 (Pi SDK reasoning)
+  type?: 'chat' | 'image' | 'video' | 'audio' | 'embedding';
+  vision?: boolean;
+  contextWindow?: number;
+  maxOutput?: number;
+  maxRounds?: number;
+  reasoning?: boolean;
 }
 
 export interface ProviderOption {
@@ -333,6 +346,24 @@ export const useConfigStore = defineStore('config', () => {
     p.updatedAt = new Date().toISOString();
   }
 
+  // v0.4.4.6: 单独更新某个 model 的 metadata (5 字段: type/vision/contextWindow/maxOutput/maxRounds/reasoning)
+  //   partial 合并到现有 m 上, 不会重置 enabled/label/fetchedAt
+  function updateModelMetadata(
+    providerId: string,
+    modelId: string,
+    metadata: Partial<Pick<ModelInfo, 'type' | 'vision' | 'contextWindow' | 'maxOutput' | 'maxRounds' | 'reasoning'>>,
+  ) {
+    const p = providers.value.find((x) => x.id === providerId);
+    if (!p) return;
+    const m = p.models.find((x) => x.id === modelId);
+    if (!m) return;
+    // partial 合并, undefined 不动 (这样 form 留空可以保留之前的值)
+    for (const [k, v] of Object.entries(metadata)) {
+      if (v !== undefined) (m as any)[k] = v;
+    }
+    p.updatedAt = new Date().toISOString();
+  }
+
   function setActiveModel(providerId: string, modelId: string) {
     const p = providers.value.find((x) => x.id === providerId);
     if (!p) return;
@@ -478,6 +509,7 @@ export const useConfigStore = defineStore('config', () => {
     removeProvider,
     setProviderModels,
     toggleModelEnabled,
+    updateModelMetadata,
     setActiveModel,
     setActiveProvider,
     setThinkingLevel,

@@ -75,6 +75,49 @@ pub struct SidecarConfig {
     /// 第一次没有 → sidecar 内部生成一个 (跟 v0.4.1 兼容).
     #[serde(default)]
     pub session_id: Option<String>,
+    /// v0.4.4 Skills (Pi SDK 暴露): FE 维护 enabled skill names, sidecar 走 formatSkillsForPrompt
+    ///   注入 system prompt. enabled 改变必须重启 sidecar (D165 systemPrompt 不可动态改).
+    #[serde(default)]
+    pub skills: Option<SkillsConfig>,
+    /// v0.4.4.6 model metadata: type / vision / contextWindow / maxOutput / maxRounds / reasoning.
+    ///   FE 从 configStore.activeModel 读, sidecar 拼到 user-custom model object
+    ///   (内置 provider 走 Pi SDK catalog 不需要). 缺省 → sidecar 用 hardcoded 默认值.
+    #[serde(default)]
+    pub model_metadata: Option<ModelMetadataConfig>,
+}
+
+/// v0.4.4 Skills (Pi SDK 暴露): enabled skill names + 额外 skill paths.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsConfig {
+    #[serde(default)]
+    pub enabled_names: Vec<String>,
+    #[serde(default)]
+    pub extra_paths: Vec<String>,
+}
+
+/// v0.4.4.6 model metadata (Pi SDK 0.84.2 ModelDefinitionSchema 简化白名单).
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelMetadataConfig {
+    /// 'chat' | 'image' | 'video' | 'audio' | 'embedding'
+    #[serde(default)]
+    pub model_type: Option<String>,
+    /// 是否支持图片输入 (Pi SDK input: ['text', 'image'])
+    #[serde(default)]
+    pub vision: Option<bool>,
+    /// 最大上下文 token (Pi SDK contextWindow)
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    /// 单次回复 token 上限 (Pi SDK maxTokens)
+    #[serde(default)]
+    pub max_output: Option<u32>,
+    /// LLM 连续 tool call 最多多少轮 (我们自己的, Pi SDK 没对应, 后续 Extension 层拦截)
+    #[serde(default)]
+    pub max_rounds: Option<u32>,
+    /// 是否思考模型 (Pi SDK reasoning)
+    #[serde(default)]
+    pub reasoning: Option<bool>,
 }
 
 fn default_permission_mode() -> String {
@@ -125,6 +168,8 @@ pub fn run_prompt(
             "workspacePath": config.workspace_path,
             "permissionMode": config.permission_mode,
             "sessionId": config.session_id,
+            "skills": config.skills,        // v0.4.4 Skills (Pi SDK 暴露)
+            "modelMetadata": config.model_metadata,  // v0.4.4.6 model metadata
         })) {
             Ok(s) => s,
             Err(e) => {
