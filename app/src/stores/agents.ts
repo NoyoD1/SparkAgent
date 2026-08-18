@@ -133,6 +133,21 @@ export const useAgentsStore = defineStore('agents', () => {
     if (!ws) {
       throw new Error('请先选一个 workspace');
     }
+    // v0.4.6.2: per-session 切 (D184 v9 ❸), 同时保留 per-workspace 全局 (向后兼容 + 旧数据迁移)
+    const sessionId = sessionStore.activeSessionId;
+    if (sessionId) {
+      try {
+        await piTauri.writeSessionActiveAgent({
+          workspacePath: ws.path,
+          sessionId,
+          name,
+        });
+        console.log(`[agents] set main (per-session): ${name} for session ${sessionId}`);
+      } catch (e) {
+        console.warn(`[agents] per-session write failed, fallback to global:`, e);
+      }
+    }
+    // 也写 per-workspace 全局 (向后兼容, 没 per-session 数据时走全局)
     await piTauri.setMainAgent({
       workspacePath: ws.path,
       agentDir: null,
@@ -140,6 +155,25 @@ export const useAgentsStore = defineStore('agents', () => {
     });
     activeName.value = name;
     console.log(`[agents] set main: ${name} (生效: 下次发 prompt 时 sidecar 启动自动 reload)`);
+  }
+
+  /** v0.4.6.2: 读 per-session active agent (D184 v9 ❸).
+   *  优先读 per-session, 缺省 fallback 到 per-workspace 全局 (向后兼容). */
+  async function getActiveAgentNameForSession(sessionId: string | null): Promise<string | null> {
+    if (!sessionId) return activeName.value;
+    const sessionStore = useSessionStore();
+    const ws = sessionStore.activeWorkspace;
+    if (!ws) return activeName.value;
+    try {
+      const perSession = await piTauri.readSessionActiveAgent({
+        workspacePath: ws.path,
+        sessionId,
+      });
+      if (perSession) return perSession;
+    } catch (e) {
+      console.warn(`[agents] readSessionActiveAgent failed:`, e);
+    }
+    return activeName.value;
   }
 
   async function create(name: string, body: string, role: 'main' | 'sub' = 'sub'): Promise<void> {
@@ -185,18 +219,22 @@ export const useAgentsStore = defineStore('agents', () => {
 
   /** 给 chat store send_prompt 用: 拿当前 active agent 的 body 拼成 activeAgent 字段 */
   async function getActiveAgentConfig(): Promise<{ name: string; body: string } | null> {
-    if (!activeName.value) return null;
+    // v0.4.6.2: 优先 per-session, fallback per-workspace 全局 (D184 v9 ❸)
     const sessionStore = useSessionStore();
+    const sessionId = sessionStore.activeSessionId;
+    const name = await getActiveAgentNameForSession(sessionId);
+    if (!name) return null;
     const ws = sessionStore.activeWorkspace;
     if (!ws) return null;
     try {
       const info = await piTauri.readAgent({
         workspacePath: ws.path,
         agentDir: null,
-        name: activeName.value,
+        name,
       });
       return { name: info.name, body: info.body };
-    } catch {
+    } catch (e) {
+      console.error(`[agents] readAgent failed for ${name}:`, e instanceof Error ? e.message : String(e));
       return null;
     }
   }
@@ -212,5 +250,6 @@ export const useAgentsStore = defineStore('agents', () => {
     update,
     remove,
     getActiveAgentConfig,
+    getActiveAgentNameForSession,
   };
 });

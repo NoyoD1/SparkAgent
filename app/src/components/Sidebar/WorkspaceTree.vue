@@ -7,27 +7,58 @@
  * 2. Session hover 预览 popover 位置动态 (跟 hovered session bbox 对齐, 右边越界翻左边)
  * 3. 顶部 "项目" section label (跟 sidebar 其他 label 风格统一)
  * 4. 底部 "Agent 团队" placeholder section
+ *
+ * v0.4.6.2: 改造底部 "Agent 团队" group 显示真实 agent 数据 (D184 v9 ❷ + ❼)
+ *   - 删硬编码 "Code Reviewer / Refactor / + 更多即将推出" placeholder
+ *   - 改读 useAgentsStore.agents (跟 SidebarFunctionList 之前新加的素材一致)
+ *   - 加折叠 state (isCollapsed, 默认 false = 展开)
+ *   - 主 agent 标 [主] 绿点, 子 agent 标 [子] 灰点
+ *   - 点击切主 (per-session 隔离, v0.4.6.2 后续)
+ *   - 当前 session 显示主 agent (跟 Composer 顶部 selector 同步)
  */
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import {
   ChevronRight,
+  ChevronDown,
   Folder,
   Plus,
   Trash2,
   MessageCircle,
-  Sparkles,
+  Circle,
   Users,
 } from 'lucide-vue-next';
 import { useSessionStore } from '@/stores/session';
 import { useChatStore } from '@/stores/chat';
+import { useAgentsStore } from '@/stores/agents';
 import { pickFolder } from '@/lib/dialog';
 
 const sessionStore = useSessionStore();
 const chatStore = useChatStore();
+const agentsStore = useAgentsStore();
 const { workspaces, expandedWorkspaceIds, activeSessionId } = storeToRefs(sessionStore);
+const { agents, activeName, hasTauriList } = storeToRefs(agentsStore);
 
 const pickingFolder = ref(false);
+
+// v0.4.6.2: AGENT 团队 group 折叠 state (D184 v9 ❼)
+const agentsGroupCollapsed = ref(false);
+
+async function pickMainAgent(name: string) {
+  if (name === activeName.value) return;
+  try {
+    await agentsStore.setMain(name);
+  } catch (e) {
+    console.error('[WorkspaceTree] setMain failed', e);
+  }
+}
+
+onMounted(() => {
+  // v0.4.6.2: 第一次 mount 时拉一次 agents (跟 SidebarFunctionList 之前同 pattern)
+  if (!agentsStore.hasTauriList) {
+    agentsStore.refreshFromTauri();
+  }
+});
 
 // ===== session hover 预览 popover =====
 const hoverSessionId = ref<string | null>(null);
@@ -257,24 +288,37 @@ function removeSession(id: string) {
       </div>
     </div>
 
-    <!-- ====== 底部: Agent 团队 (placeholder) ====== -->
+    <!-- ====== 底部: Agent 团队 (v0.4.6.2 改造: 真实数据 + 折叠 + 切主) ====== -->
     <div class="pad-wstree__bottom">
-      <span class="pad-wstree__section-label">
+      <button
+        class="pad-wstree__section-label pad-wstree__section-label--button"
+        @click="agentsGroupCollapsed = !agentsGroupCollapsed"
+      >
+        <ChevronRight v-if="agentsGroupCollapsed" :size="12" :stroke-width="2" class="pad-wstree__chevron" />
+        <ChevronDown v-else :size="12" :stroke-width="2" class="pad-wstree__chevron" />
         <Users :size="12" :stroke-width="1.75" />
         <span>Agent 团队</span>
-      </span>
-      <div class="pad-wstree__agents">
-        <div class="pad-wstree__agent">
-          <Sparkles :size="11" :stroke-width="1.75" />
-          <span>Code Reviewer</span>
-        </div>
-        <div class="pad-wstree__agent">
-          <Sparkles :size="11" :stroke-width="1.75" />
-          <span>Refactor</span>
-        </div>
-        <div class="pad-wstree__agent is-soon">
-          <span>+ 更多即将推出</span>
-        </div>
+        <span class="pad-wstree__count">{{ agents.length }}</span>
+      </button>
+      <div v-if="!agentsGroupCollapsed" class="pad-wstree__agents">
+        <div v-if="!hasTauriList" class="pad-wstree__agent-empty">⏳ 加载中…</div>
+        <div v-else-if="agents.length === 0" class="pad-wstree__agent-empty">暂无 agent</div>
+        <button
+          v-for="a in agents"
+          :key="a.name"
+          class="pad-wstree__agent pad-wstree__agent--button"
+          :class="{ 'is-main': a.name === activeName }"
+          :title="a.description || a.name"
+          @click="pickMainAgent(a.name)"
+        >
+          <Circle
+            :size="8"
+            :stroke-width="0"
+            :fill="a.name === activeName ? 'var(--pad-fg-success, #22c55e)' : 'var(--pad-fg-tertiary)'"
+          />
+          <span class="pad-wstree__agent-name">{{ a.name }}</span>
+          <span class="pad-wstree__agent-tag" :class="`is-${a.role}`">{{ a.role === 'main' ? '主' : '子' }}</span>
+        </button>
       </div>
     </div>
 
@@ -668,14 +712,53 @@ function removeSession(id: string) {
   text-align: center;
 }
 
-/* ====== 底部 Agent 团队 ====== */
+/* ====== 底部 Agent 团队 (v0.4.6.2 改造: 真实数据 + 折叠 + 切主) ====== */
 .pad-wstree__bottom {
   border-top: 1px solid var(--pad-divider);
   padding: var(--pad-sp-2) 0 var(--pad-sp-2);
   margin-top: 4px;
 }
 .pad-wstree__bottom .pad-wstree__section-label {
-  padding: 0 var(--pad-sp-2) var(--pad-sp-2);
+  padding: 4px var(--pad-sp-2) 4px var(--pad-sp-2);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: var(--pad-fw-medium);
+  user-select: none;
+}
+.pad-wstree__section-label--button {
+  width: calc(100% - var(--pad-sp-2) * 2);
+  margin: 0 var(--pad-sp-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--pad-radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
+  font-family: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  font-weight: inherit;
+}
+.pad-wstree__section-label--button:hover {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-secondary);
+}
+.pad-wstree__chevron {
+  flex-shrink: 0;
+  transition: transform var(--pad-dur-fast) ease;
+}
+.pad-wstree__count {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--pad-fg-tertiary);
+  background: var(--pad-bg-muted, rgba(0,0,0,0.04));
+  padding: 0 6px;
+  border-radius: 8px;
 }
 .pad-wstree__agents {
   display: flex;
@@ -693,11 +776,51 @@ function removeSession(id: string) {
   border-radius: var(--pad-radius-sm);
   cursor: default;
 }
-.pad-wstree__agent.is-soon {
+.pad-wstree__agent--button {
+  width: 100%;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
+}
+.pad-wstree__agent--button:hover {
+  background: var(--pad-bg-hover, rgba(0,0,0,0.04));
+  color: var(--pad-fg-primary);
+}
+.pad-wstree__agent.is-main {
+  background: var(--pad-bg-success-soft, rgba(34,197,94,0.08));
+  color: var(--pad-fg-primary);
+}
+.pad-wstree__agent-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pad-wstree__agent-tag {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: var(--pad-fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+.pad-wstree__agent-tag.is-main {
+  background: var(--pad-bg-success, rgba(34,197,94,0.15));
+  color: var(--pad-fg-success, #22c55e);
+}
+.pad-wstree__agent-tag.is-sub {
+  background: var(--pad-bg-muted, rgba(0,0,0,0.04));
+  color: var(--pad-fg-tertiary);
+}
+.pad-wstree__agent-empty {
+  padding: 4px 8px;
+  font-size: 11px;
   color: var(--pad-fg-tertiary);
   font-style: italic;
-  font-size: var(--pad-fs-11);
-  padding-left: 19px;
 }
 
 /* ====== 过渡 ====== */
