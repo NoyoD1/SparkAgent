@@ -98,6 +98,33 @@ const sessionDir = join(agentDir, 'sessions', hash);
 // emit {type:'skills_snapshot', skills:[...]} (类似 v0.4.x config_ok, runRpcMode
 // 接管 stdout 之前), FE 同步解析存 skills store.
 import { loadSkills, formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
+// v0.4.5: Pi SDK 0.84.2 BUILTIN_SLASH_COMMANDS 不在主入口 export, 走 subpath 不稳
+//   (package.json 没声明 ./core/* exports). 复制 21 个常量过来, 跟 Pi SDK 0.84.2 一致.
+//   源: pi-sdk/packages/coding-agent/src/core/slash-commands.ts
+const BUILTIN_SLASH_COMMANDS = [
+  { name: 'settings', description: 'Open settings menu' },
+  { name: 'model', description: 'Select model (opens selector UI)', argumentHint: '<provider/model>' },
+  { name: 'scoped-models', description: 'Enable/disable models for Ctrl+P cycling' },
+  { name: 'export', description: 'Export session (HTML default, or specify path: .html/.jsonl)' },
+  { name: 'import', description: 'Import and resume a session from a JSONL file' },
+  { name: 'share', description: 'Share session as a secret GitHub gist' },
+  { name: 'copy', description: 'Copy last agent message to clipboard' },
+  { name: 'name', description: 'Set session display name' },
+  { name: 'session', description: 'Show session info and stats' },
+  { name: 'changelog', description: 'Show changelog entries' },
+  { name: 'hotkeys', description: 'Show all keyboard shortcuts' },
+  { name: 'fork', description: 'Create a new fork from a previous user message' },
+  { name: 'clone', description: 'Duplicate the current session at the current position' },
+  { name: 'tree', description: 'Navigate session tree (switch branches)' },
+  { name: 'trust', description: 'Save project trust decision for future sessions' },
+  { name: 'login', description: 'Configure provider authentication', argumentHint: '<provider>' },
+  { name: 'logout', description: 'Remove provider authentication' },
+  { name: 'new', description: 'Start a new session' },
+  { name: 'compact', description: 'Manually compact the session context' },
+  { name: 'resume', description: 'Resume a different session' },
+  { name: 'reload', description: 'Reload keybindings, extensions, skills, prompts, themes, and context files' },
+  { name: 'quit', description: 'Quit Pi Agent' },
+];
 const skillsConfig = config.skills ?? { enabledNames: [], extraPaths: [] };
 const skillsResult = loadSkills({
   cwd: workspacePath,
@@ -135,6 +162,24 @@ process.stdout.write(JSON.stringify({
     disableModelInvocation: s.disableModelInvocation,
   })),
   diagnostics: skillsDiagnostics,
+}) + '\n');
+
+// ====== v0.4.5: slash_snapshot (Pi SDK BUILTIN_SLASH_COMMANDS 21 个 + 自定义 command 路径) ======
+// 跟 skills_snapshot 同 pattern: sidecar 启动时 emit 一次性 snapshot, FE 同步存 slash store.
+// source: 'builtin' (21 个 Pi SDK 内置) / 'custom' (.pi/commands/*.md 后续 v0.4.5c 加)
+// 实际触发: 走 RpcCommand 'slash' (v0.4.5d), Pi SDK _tryExecuteExtensionCommand
+//   只支持 extension command, 所以 BUILTIN_SLASH_COMMANDS 走 Pi CLI 内部, 标 "不支持 RPC 触发"
+const builtinSlashCommands = BUILTIN_SLASH_COMMANDS.map((cmd) => ({
+  name: cmd.name,
+  description: cmd.description,
+  argumentHint: cmd.argumentHint ?? null,
+  source: 'builtin',  // 标记不能 RPC 触发, UI 灰显
+}));
+console.error(`[sidecar] slash commands: ${builtinSlashCommands.length} builtin (Pi CLI 内部, 不支持 RPC 触发)`);
+process.stdout.write(JSON.stringify({
+  type: 'slash_snapshot',
+  commands: builtinSlashCommands,
+  // 后续 v0.4.5c 加: custom: customSlashCommands,
 }) + '\n');
 
 // Pi SDK 0.84.2 SessionManager.create(cwd, sessionDir, {id}) 每次用新 timestamp 创 file,

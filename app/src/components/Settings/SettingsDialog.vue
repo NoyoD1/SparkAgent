@@ -19,6 +19,7 @@ import {
   Keyboard,         // 快捷键
   Plug,             // 扩展 / MCP
   Sparkles,         // Skills (v0.4.4)
+  Terminal,         // Slash (v0.4.5)
   Info,             // 关于
   ArrowLeft,        // 关闭
   RotateCcw,        // 重置
@@ -31,6 +32,7 @@ import AppearanceTab from './tabs/AppearanceTab.vue';
 import ShortcutsTab from './tabs/ShortcutsTab.vue';
 import ExtensionsTab from './tabs/ExtensionsTab.vue';
 import SkillsTab from './tabs/SkillsTab.vue';
+import SlashTab from './tabs/SlashTab.vue';
 import AboutTab from './tabs/AboutTab.vue';
 
 interface TabDef {
@@ -49,6 +51,7 @@ const TABS: TabDef[] = [
   { id: 'shortcuts',  label: '快捷键',   icon: markRaw(Keyboard),   component: markRaw(ShortcutsTab),  group: 'Agent 能力', implemented: false },
   { id: 'extensions', label: '扩展 / MCP', icon: markRaw(Plug),      component: markRaw(ExtensionsTab), group: 'Agent 能力', implemented: false },
   { id: 'skills',     label: 'Skills',  icon: markRaw(Sparkles),   component: markRaw(SkillsTab),     group: 'Agent 能力', implemented: true  },
+  { id: 'slash',      label: 'Slash',   icon: markRaw(Terminal),    component: markRaw(SlashTab),      group: 'Agent 能力', implemented: true  },
   { id: 'about',      label: '关于',     icon: markRaw(Info),       component: markRaw(AboutTab),      group: '数据与统计', implemented: true  },
 ];
 

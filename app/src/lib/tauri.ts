@@ -152,6 +152,16 @@ export type ServerToClient =
       }>;
       diagnostics: Array<{ type: string; message: string; path?: string }>;
     }
+  // v0.4.5: slash commands snapshot (Pi SDK BUILTIN_SLASH_COMMANDS 21 个, 跟 skills_snapshot 同 pattern)
+  | {
+      type: 'slash_snapshot';
+      commands: Array<{
+        name: string;
+        description: string;
+        argumentHint: string | null;
+        source: 'builtin' | 'custom' | 'extension' | 'prompt' | 'skill';
+      }>;
+    }
   // v0.4.2 step 1+ retry (5x exponential backoff, Pi SDK AgentSession 内置)
   | {
       type: 'auto_retry_start';
