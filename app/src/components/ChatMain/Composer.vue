@@ -80,6 +80,23 @@ const filteredSlashItems = computed<SlashItem[]>(() => {
     (it) => it.label.toLowerCase().includes(q) || it.description.toLowerCase().includes(q),
   );
 });
+
+// v0.4.7b: 从 inputText 解析已引用的 skill names (一次性 @ 引用, D184 v9 ❹)
+const selectedSkillRefs = computed<string[]>(() => {
+  const re = /\[\[skill:([A-Za-z0-9._-]+)\]\]/g;
+  const names = new Set<string>();
+  let m;
+  while ((m = re.exec(inputText.value)) !== null) {
+    names.add(m[1]);
+  }
+  return Array.from(names);
+});
+
+function removeSkillRef(name: string) {
+  // 从 inputText 删所有 [[skill:<name>]] marker
+  const re = new RegExp(`\\[\\[skill:${name}\\]\\]`, 'g');
+  inputText.value = inputText.value.replace(re, '').replace(/ +/g, ' ').trim();
+}
 // v0.4.1+ tool permission 菜单
 const showPermissionMenu = ref(false);
 
@@ -233,29 +250,33 @@ async function pickSlashItem(item: SlashItem) {
     console.log('[Composer / popover] mcp placeholder, no-op');
     return;
   }
-  // 把光标前 /xxx 替换成空, 触发对应 action
+  // 把光标前 /xxx 替换成对应 marker 或触发动作
   const text = inputText.value;
   const cursor = textareaRef.value?.selectionStart ?? text.length;
   const before = text.slice(0, cursor);
   const after = text.slice(cursor);
   const lastNl = before.lastIndexOf('\n');
   const lineStart = lastNl + 1;
-  const newBefore = before.slice(0, lineStart);
-  inputText.value = newBefore + after;
-  nextTick(() => {
-    if (textareaRef.value) {
-      const newCursor = newBefore.length;
-      textareaRef.value.setSelectionRange(newCursor, newCursor);
-      textareaRef.value.focus();
-      autoResize();
-    }
-  });
   closeSlashPopover();
   // 触发对应 action
   if (item.group === 'Skills') {
-    skillsStore.toggle(item.label);
-    console.log(`[Composer / popover] skill toggled: ${item.label}`);
+    // v0.4.7b: 一次性 @ 引用嵌入 user prompt (D184 v9 ❹ user 14:30 原话)
+    //   跟 v0.4.4 skills 切 enabled (持续注入 system prompt) 完全不同
+    //   marker `[[skill:code-review]]` 插入到文本框, send 时解析替换成 skill body 拼到 user prompt 前面
+    const marker = `[[skill:${item.label}]]`;
+    const newBefore = before.slice(0, lineStart) + marker + before.slice(cursor);
+    inputText.value = newBefore + after;
+    nextTick(() => {
+      if (textareaRef.value) {
+        const newCursor = newBefore.length;
+        textareaRef.value.setSelectionRange(newCursor, newCursor);
+        textareaRef.value.focus();
+        autoResize();
+      }
+    });
+    console.log(`[Composer / popover] skill reference inserted: ${item.label} (一次性 @ 引用)`);
   } else if (item.group === 'Agents') {
+    // v0.4.6.1 + v0.4.6.2: 切主 agent 走 per-session storage (D184 v9 ❸)
     try {
       await agentsStore.setMain(item.label);
       console.log(`[Composer / popover] agent set main: ${item.label} (下次发 prompt 生效)`);
@@ -305,16 +326,41 @@ function openSettings() {
 }
 
 async function send() {
-  const text = inputText.value.trim();
+  const rawText = inputText.value;
+  const text = rawText.trim();
   if (!text) return;
   if (isStreaming.value) return;
   if (!hasConfig.value) {
     openSettings();
     return;
   }
+  // v0.4.7b: 解析 [[skill:xxx]] marker, 替换成 skill body 拼到 user prompt 前面 (D184 v9 ❹)
+  //   一次性 @ 引用, 不写 system prompt (跟 v0.4.4 skills 切 enabled 完全不同)
+  const skillRefs: Array<{ name: string; body: string }> = [];
+  const markerRe = /\[\[skill:([A-Za-z0-9._-]+)\]\]/g;
+  let m;
+  while ((m = markerRe.exec(rawText)) !== null) {
+    const skillName = m[1];
+    // 实际拿 skill body: 走 skills store 缓存 (listSkills emit) + 找 name
+    const cached = skillsStore.skills.find((s: any) => s.name === skillName);
+    if (cached) {
+      skillRefs.push({ name: skillName, body: cached.description || '' });
+    } else {
+      console.warn(`[Composer] skill reference not found: ${skillName}`);
+    }
+  }
+  // 拼 skill references 到 user prompt 前面
+  let finalPrompt = text;
+  if (skillRefs.length > 0) {
+    const skillSection = skillRefs
+      .map((s) => `<skill_reference name="${s.name}">\n${s.body}\n</skill_reference>`)
+      .join('\n\n');
+    finalPrompt = `${skillSection}\n\n---\n\n${text}`;
+    console.log(`[Composer] embedded ${skillRefs.length} skill reference(s) into user prompt`);
+  }
   inputText.value = '';
   // v0.3.5+: sendPrompt 自动确保 session 存在 (无 workspace 会弹 folder picker)
-  await chatStore.sendPrompt(text);
+  await chatStore.sendPrompt(finalPrompt);
 }
 
 /**
@@ -424,6 +470,20 @@ onMounted(() => nextTick(autoResize));
       @keydown="onTextareaKeydown"
       @keydown.enter.exact.prevent="showSlashPopover ? pickSlashItem(filteredSlashItems[slashPopoverCursor] || filteredSlashItems[0]) : send()"
     />
+
+    <!-- v0.4.7b: 已选 skill 引用 preview (一次性 @ 引用嵌入 user prompt, D184 v9 ❹) -->
+    <div v-if="selectedSkillRefs.length > 0" class="pad-composer__skill-refs">
+      <Paperclip :size="11" :stroke-width="1.75" />
+      <span class="pad-composer__skill-refs-label">已引用 skills:</span>
+      <span
+        v-for="name in selectedSkillRefs"
+        :key="name"
+        class="pad-composer__skill-ref-chip"
+      >
+        <code>[[skill:{{ name }}]]</code>
+        <button class="pad-composer__skill-ref-remove" :title="`移除 ${name}`" @click="removeSkillRef(name)">×</button>
+      </span>
+    </div>
 
     <!-- v0.4.7a: Composer / popover 3 类 (skill / agent / mcp, 不含 builtin 22) -->
     <div v-if="showSlashPopover" ref="slashPopoverRef" class="pad-composer__slash-popover">
@@ -744,6 +804,58 @@ onMounted(() => nextTick(autoResize));
 .pad-composer__agent-item-check {
   color: var(--pad-fg-success, #22c55e);
   flex-shrink: 0;
+}
+
+/* v0.4.7b: 已选 skill 引用 preview (D184 v9 ❹ user 14:30: "灰底skill的引用") */
+.pad-composer__skill-refs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  margin-top: 4px;
+  background: var(--pad-bg-muted, rgba(0,0,0,0.02));
+  border: 1px solid var(--pad-border-subtle, rgba(0,0,0,0.06));
+  border-radius: var(--pad-radius-sm, 4px);
+  font-size: 11px;
+  color: var(--pad-fg-tertiary);
+}
+.pad-composer__skill-refs-label { font-size: 10px; }
+.pad-composer__skill-ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 4px 1px 6px;
+  background: var(--pad-bg-muted, rgba(99,102,241,0.08));
+  border: 1px solid rgba(99,102,241,0.2);
+  border-radius: 10px;
+  font-size: 10px;
+  font-family: var(--pad-font-mono);
+  color: var(--pad-accent, #6366f1);
+}
+.pad-composer__skill-ref-chip code {
+  font-family: var(--pad-font-mono);
+  font-size: 10px;
+  color: var(--pad-accent, #6366f1);
+}
+.pad-composer__skill-ref-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  color: var(--pad-fg-tertiary);
+  cursor: pointer;
+  line-height: 1;
+}
+.pad-composer__skill-ref-remove:hover {
+  background: var(--pad-bg-hover, rgba(0,0,0,0.08));
+  color: var(--pad-fg-danger, #dc2626);
 }
 
 /* v0.4.7a: Composer / popover (skill / agent / mcp, 不含 builtin 22) */
