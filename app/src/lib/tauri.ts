@@ -379,13 +379,18 @@ class PiTauriClient {
   // 修法: Tauri 端 list_skills 走 std::fs::read_dir 扫两个目录 (workspace + global),
   //   跟 sidecar 的 skills_snapshot 解耦, 纯 UI 列表用.
   // 写完/导入完成后 FE 调这个, 立刻刷新.
+  // v0.4.4.6.3: 必须用 { args } 包裹, 跟 write_skill_file / import_skill_* 同 pattern.
+  //   Rust 端 fn list_skills(args: ListSkillsArgs) 期望 { args: { workspacePath, agentDir } },
+  //   直接展开会报 "command list-skills missing required key args" (D183 现场重演).
   async listSkills(args: { workspacePath?: string | null; agentDir?: string | null }): Promise<{
     skills: TauriSkillInfo[];
     diagnostics: TauriSkillDiagnostic[];
   }> {
     return (await invoke('list_skills', {
-      workspacePath: args.workspacePath ?? null,
-      agentDir: args.agentDir ?? null,
+      args: {
+        workspacePath: args.workspacePath ?? null,
+        agentDir: args.agentDir ?? null,
+      },
     })) as { skills: TauriSkillInfo[]; diagnostics: TauriSkillDiagnostic[] };
   }
 
