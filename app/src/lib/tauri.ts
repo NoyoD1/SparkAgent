@@ -469,6 +469,64 @@ class PiTauriClient {
     return (await invoke('set_main_agent', { args })) as string
   }
 
+  // ====== v0.4.6.2: per-session active agent (D184 v9 ❸) ======
+  // 存储: <workspace>/.pi/active_agents/<sessionId>.json
+  // 跟 SessionManager 同目录, per-session 隔离, 切不同 session 不影响
+  async readSessionActiveAgent(args: {
+    workspacePath?: string | null;
+    sessionId: string;
+  }): Promise<string | null> {
+    return (await invoke('read_session_active_agent', { args })) as string | null
+  }
+
+  async writeSessionActiveAgent(args: {
+    workspacePath?: string | null;
+    sessionId: string;
+    name: string;
+  }): Promise<string> {
+    return (await invoke('write_session_active_agent', { args })) as string
+  }
+
+  // ====== v0.4.5.2: User 自定义快捷提示词模板 (Slash commands) ======
+  // 跟 v0.4.6.1 agents 同 pattern, Tauri 2 invoke 必须 { args } 包裹 (D193 教训)
+  // D184 v9 ❷ user 14:30: 只显示 user 自定义, 不显示 builtin 22
+  async listCommands(args: {
+    workspacePath?: string | null;
+    agentDir?: string | null;
+  }): Promise<TauriCommandInfo[]> {
+    return (await invoke('list_commands', {
+      args: {
+        workspacePath: args.workspacePath ?? null,
+        agentDir: args.agentDir ?? null,
+      },
+    })) as TauriCommandInfo[]
+  }
+
+  async readCommand(args: {
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+  }): Promise<TauriCommandInfo> {
+    return (await invoke('read_command', { args })) as TauriCommandInfo
+  }
+
+  async writeCommand(args: {
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+    content: string;
+  }): Promise<string> {
+    return (await invoke('write_command', { args })) as string
+  }
+
+  async deleteCommand(args: {
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+  }): Promise<boolean> {
+    return (await invoke('delete_command', { args })) as boolean
+  }
+
   // ====== v0.4.6 Project rules / 自定义指令 (跟 Claude 桌面端 "自定义指令" 模式) ======
   // 持久化到 <workspace>/AGENTS.md (per-workspace) + <agentDir>/AGENTS.md (global).
   // Pi SDK 0.84.2 DefaultResourceLoader 自动 load AGENTS.md (resource-loader.ts:71),
@@ -683,6 +741,15 @@ export interface TauriAgentInfo {
   /** frontmatter 后的 markdown body */
   body: string;
   /** 文件绝对路径 */
+  filePath: string;
+}
+
+/** v0.4.5.2: Tauri 端 list_commands / read_command 返回的单个 user 自定义 command */
+export interface TauriCommandInfo {
+  name: string;
+  description: string;
+  /** frontmatter 后的 markdown body (用户自定义的提示词模板) */
+  body: string;
   filePath: string;
 }
 

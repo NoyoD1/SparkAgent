@@ -19,8 +19,8 @@ import {
   Keyboard,         // 快捷键
   Plug,             // 扩展 / MCP
   Sparkles,         // Skills (v0.4.4)
-  // Terminal,         // Slash (v0.4.5) — v0.4.5.1 砍掉 (D184 v8 Q1: 内置 22 无法修改, 没价值单开 tab)
-  Bot,              // Agents (v0.4.6.1) — 改造 CustomInstructionsTab, 多套 agent persona 库
+  Terminal,         // Slash (v0.4.5.2 恢复, D184 v9 ❷: user 14:30 要求, 只显示 user 自定义 .pi/commands/*.md)
+  Bot,              // Agents (v0.4.6.1)
   Info,             // 关于
   ArrowLeft,        // 关闭
   RotateCcw,        // 重置
@@ -33,7 +33,7 @@ import AppearanceTab from './tabs/AppearanceTab.vue';
 import ShortcutsTab from './tabs/ShortcutsTab.vue';
 import ExtensionsTab from './tabs/ExtensionsTab.vue';
 import SkillsTab from './tabs/SkillsTab.vue';
-// import SlashTab from './tabs/SlashTab.vue'; — v0.4.5.1 砍掉
+import SlashTab from './tabs/SlashTab.vue';  // v0.4.5.2 恢复 (D184 v9 ❷)
 import CustomInstructionsTab from './tabs/CustomInstructionsTab.vue';
 import AboutTab from './tabs/AboutTab.vue';
 
@@ -53,7 +53,7 @@ const TABS: TabDef[] = [
   { id: 'shortcuts',  label: '快捷键',   icon: markRaw(Keyboard),   component: markRaw(ShortcutsTab),  group: 'Agent 能力', implemented: false },
   { id: 'extensions', label: '扩展 / MCP', icon: markRaw(Plug),      component: markRaw(ExtensionsTab), group: 'Agent 能力', implemented: false },
   { id: 'skills',     label: 'Skills',  icon: markRaw(Sparkles),   component: markRaw(SkillsTab),     group: 'Agent 能力', implemented: true  },
-  // { id: 'slash',   label: 'Slash',   ... } — v0.4.5.1 砍掉 (D184 v8 Q1: 内置 22 无法修改, 没价值单开 tab)
+  { id: 'slash',      label: 'Slash',   icon: markRaw(Terminal),   component: markRaw(SlashTab),      group: 'Agent 能力', implemented: true  },  // v0.4.5.2 恢复 (D184 v9 ❷)
   { id: 'instructions', label: 'Agents', icon: markRaw(Bot), component: markRaw(CustomInstructionsTab), group: 'Agent 能力', implemented: true  },  // v0.4.6.1: 改造 CustomInstructionsTab 内容 (单 AGENTS.md → 多套 .pi/agents/*.md)
   { id: 'about',      label: '关于',     icon: markRaw(Info),       component: markRaw(AboutTab),      group: '数据与统计', implemented: true  },
 ];

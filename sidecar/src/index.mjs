@@ -28,7 +28,7 @@
 //   - 现在: 写 config 1 行, 后续 RpcCommand 走 passthrough (Tauri 不用解析)
 
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -152,6 +152,8 @@ console.error(`[sidecar] skills: loaded ${allSkills.length} total, ${enabledSkil
 // format: config.activeAgent = { name: "engineer", body: "..." }  (FE 端 list_agents 后
 //   取 active_name + read_agent 拿 body 拼好传过来)
 const activeAgentConfig = config.activeAgent ?? null;
+// v0.4.6.2: 加详细 debug log 排查 "切 agent 没生效" bug (D186 教训)
+console.error(`[sidecar] active agent config: type=${typeof activeAgentConfig} value=${activeAgentConfig ? JSON.stringify({name: activeAgentConfig.name, body_len: activeAgentConfig.body?.length ?? 0}) : 'null/undefined'}`);
 let activeAgentPromptFragment = '';
 if (activeAgentConfig && activeAgentConfig.body) {
   activeAgentPromptFragment = `\n\n<current_agent_persona>
@@ -161,7 +163,7 @@ ${activeAgentConfig.body}
 </current_agent_persona>`;
   console.error(`[sidecar] active agent: name=${activeAgentConfig.name} body_len=${activeAgentConfig.body.length}`);
 } else {
-  console.error(`[sidecar] active agent: none (no persona injected)`);
+  console.error(`[sidecar] active agent: none (no persona injected) — activeAgentConfig=${JSON.stringify(activeAgentConfig)}`);
 }
 if (skillsDiagnostics.length > 0) {
   for (const d of skillsDiagnostics.slice(0, 5)) {
@@ -192,17 +194,64 @@ process.stdout.write(JSON.stringify({
 // source: 'builtin' (21 个 Pi SDK 内置) / 'custom' (.pi/commands/*.md 后续 v0.4.5c 加)
 // 实际触发: 走 RpcCommand 'slash' (v0.4.5d), Pi SDK _tryExecuteExtensionCommand
 //   只支持 extension command, 所以 BUILTIN_SLASH_COMMANDS 走 Pi CLI 内部, 标 "不支持 RPC 触发"
+import { join as pathJoin } from 'node:path';
 const builtinSlashCommands = BUILTIN_SLASH_COMMANDS.map((cmd) => ({
   name: cmd.name,
   description: cmd.description,
   argumentHint: cmd.argumentHint ?? null,
   source: 'builtin',  // 标记不能 RPC 触发, UI 灰显
 }));
-console.error(`[sidecar] slash commands: ${builtinSlashCommands.length} builtin (Pi CLI 内部, 不支持 RPC 触发)`);
+
+// v0.4.5.2: 扫描 <workspace>/.pi/commands/*.md 作为 user 自定义快捷提示词模板
+//   (D184 v9 ❷ user 14:30 原话: "Slash tab是单独用于给用户自定义快捷提示词模板的,
+//   不是用来显示builtin的")
+const customCommands = [];
+try {
+  const commandsDir = pathJoin(workspacePath, '.pi', 'commands');
+  if (existsSync(commandsDir)) {
+    for (const file of readdirSync(commandsDir)) {
+      if (!file.endsWith('.md')) continue;
+      const name = file.slice(0, -3);
+      const filePath = pathJoin(commandsDir, file);
+      let content = '';
+      try { content = readFileSync(filePath, 'utf-8'); } catch { continue; }
+      // 极简 frontmatter 解析 (跟 v0.4.6.1 agents 一样)
+      let description = '';
+      let body = content;
+      if (content.startsWith('---')) {
+        const rest = content.slice(3);
+        const endIdx = rest.indexOf('\n---');
+        if (endIdx >= 0) {
+          const header = rest.slice(0, endIdx);
+          const after = rest.slice(endIdx + 4);
+          const bodyStart = after.indexOf('\n') >= 0 ? after.indexOf('\n') + 1 : 0;
+          body = after.slice(bodyStart);
+          for (const line of header.split('\n')) {
+            const colon = line.indexOf(':');
+            if (colon < 0) continue;
+            const k = line.slice(0, colon).trim();
+            const v = line.slice(colon + 1).trim();
+            if (k === 'description') description = v.replace(/^["']|["']$/g, '');
+          }
+        }
+      }
+      customCommands.push({
+        name,
+        description: description || '(无描述)',
+        argumentHint: null,
+        body,
+        source: 'custom',  // v0.4.5.2: 跟 builtin 区分
+      });
+    }
+  }
+} catch (e) {
+  console.error(`[sidecar] failed to scan .pi/commands/: ${e instanceof Error ? e.message : String(e)}`);
+}
+console.error(`[sidecar] slash commands: ${builtinSlashCommands.length} builtin (Pi CLI 内部, 不支持 RPC 触发) + ${customCommands.length} custom`);
 process.stdout.write(JSON.stringify({
   type: 'slash_snapshot',
   commands: builtinSlashCommands,
-  // 后续 v0.4.5c 加: custom: customSlashCommands,
+  custom: customCommands,  // v0.4.5.2: FE 端用这个显示, 不显示 builtin
 }) + '\n');
 
 // Pi SDK 0.84.2 SessionManager.create(cwd, sessionDir, {id}) 每次用新 timestamp 创 file,

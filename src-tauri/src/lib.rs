@@ -1188,6 +1188,205 @@ async fn set_main_agent(args: AgentArgs) -> Result<String, String> {
     write_active_agent_name(args.workspace_path, name)
 }
 
+// ====== v0.4.6.2: per-session active agent ======
+// 存储: <workspace>/.pi/active_agents/<sessionId>.json
+// 跟 SessionManager 同目录 (sessions/<hash>), per-session 隔离, 切不同 session 不影响.
+// D184 v9 ❸ user 14:30: "每个会话应该自己有不同的 agent, 而不是A对话切换了, B对话也受影响"
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionAgentArgs {
+    /// workspace 路径
+    workspace_path: Option<String>,
+    /// session id (跟 SessionManager.sessionId 一致)
+    session_id: String,
+    /// 切主时: agent name; read 时不需要
+    #[serde(default)]
+    name: Option<String>,
+}
+
+fn resolve_session_agent_path(workspace_path: Option<String>, session_id: &str) -> Result<PathBuf, String> {
+    let ws = workspace_path.as_ref().filter(|s| !s.is_empty())
+        .ok_or("session_agent 操作需要 workspacePath")?;
+    if session_id.is_empty() {
+        return Err("session_id 不能为空".to_string());
+    }
+    // 校验 session_id 防止 path traversal
+    if !session_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        return Err("session_id 只能含 [a-zA-Z0-9._-]".to_string());
+    }
+    Ok(PathBuf::from(ws).join(".pi").join("active_agents").join(format!("{}.json", session_id)))
+}
+
+#[tauri::command]
+async fn read_session_active_agent(args: SessionAgentArgs) -> Result<Option<String>, String> {
+    let path = resolve_session_agent_path(args.workspace_path, &args.session_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read({}): {}", path.display(), e))?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("parse json ({}): {}", path.display(), e))?;
+    Ok(json.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+}
+
+#[tauri::command]
+async fn write_session_active_agent(args: SessionAgentArgs) -> Result<String, String> {
+    let name = args.name.as_ref().ok_or("write_session_active_agent 需要 name 字段")?;
+    parse_agent_name(name)?;
+    // 验证 agent 文件存在 (per-workspace, 跟 v0.4.6.1 list_agents 一样)
+    let workspace_path = args.workspace_path.clone();
+    let dir = resolve_agents_dir(workspace_path.clone())?;
+    let agent_path = dir.join(format!("{}.md", name));
+    if !agent_path.exists() {
+        return Err(format!("agent 不存在: {}", agent_path.display()));
+    }
+    let path = resolve_session_agent_path(workspace_path, &args.session_id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create_dir_all({}): {}", parent.display(), e))?;
+    }
+    let json = serde_json::json!({
+        "name": name,
+        "sessionId": args.session_id,
+        "updatedAt": chrono::Utc::now().to_rfc3339(),
+    });
+    let pretty = serde_json::to_string_pretty(&json)
+        .map_err(|e| format!("ser json: {}", e))?;
+    std::fs::write(&path, pretty)
+        .map_err(|e| format!("write({}): {}", path.display(), e))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+// ====== v0.4.5.2: User 自定义快捷提示词模板 (Slash commands) ======
+// 跟 v0.4.6.1 agents 同 pattern, 但存 <workspace>/.pi/commands/*.md
+// D184 v9 ❷ user 14:30: "Slash tab是单独用于给用户自定义快捷提示词模板的,
+//   不是用来显示builtin的". builtin 22 个走 Pi CLI 内部, 不显示.
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommandArgs {
+    workspace_path: Option<String>,
+    #[serde(default)]
+    agent_dir: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommandInfo {
+    name: String,
+    description: String,
+    body: String,
+    file_path: String,
+}
+
+fn parse_command_name(name: &str) -> Result<String, String> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(format!("command name 长度必须 1-64, got {}", name.len()));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        return Err(format!("command name 只能含 [a-zA-Z0-9._-], got '{}'", name));
+    }
+    Ok(name.to_string())
+}
+
+fn resolve_commands_dir(workspace_path: Option<String>) -> Result<PathBuf, String> {
+    let ws = workspace_path.as_ref().filter(|s| !s.is_empty())
+        .ok_or("command 操作需要 workspacePath")?;
+    Ok(PathBuf::from(ws).join(".pi").join("commands"))
+}
+
+#[tauri::command]
+async fn list_commands(args: CommandArgs) -> Result<Vec<CommandInfo>, String> {
+    let mut commands = Vec::new();
+    let dir = resolve_commands_dir(args.workspace_path)?;
+    if dir.exists() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(commands),
+            Err(e) => return Err(format!("read_dir({}): {}", dir.display(), e)),
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("md") { continue; }
+            let filename = match p.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let content = match std::fs::read_to_string(&p) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let (fm, body) = parse_agent_frontmatter(&content);  // 复用极简 frontmatter 解析
+            commands.push(CommandInfo {
+                name: fm.get("name").cloned().unwrap_or_else(|| filename.clone()),
+                description: fm.get("description").cloned().unwrap_or_else(|| "(无描述)".to_string()),
+                body,
+                file_path: p.to_string_lossy().to_string(),
+            });
+        }
+    }
+    commands.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(commands)
+}
+
+#[tauri::command]
+async fn read_command(args: CommandArgs) -> Result<CommandInfo, String> {
+    let name = args.name.as_ref().ok_or("read_command 需要 name 字段")?;
+    parse_command_name(name)?;
+    let dir = resolve_commands_dir(args.workspace_path)?;
+    let path = dir.join(format!("{}.md", name));
+    if !path.exists() {
+        return Err(format!("command 不存在: {}", path.display()));
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read({}): {}", path.display(), e))?;
+    let (fm, body) = parse_agent_frontmatter(&content);
+    Ok(CommandInfo {
+        name: fm.get("name").cloned().unwrap_or_else(|| name.clone()),
+        description: fm.get("description").cloned().unwrap_or_else(|| "(无描述)".to_string()),
+        body,
+        file_path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+async fn write_command(args: CommandArgs) -> Result<String, String> {
+    let name = args.name.as_ref().ok_or("write_command 需要 name 字段")?;
+    parse_command_name(name)?;
+    let content = args.content.as_ref().ok_or("write_command 需要 content 字段")?;
+    let dir = resolve_commands_dir(args.workspace_path)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create_dir_all({}): {}", dir.display(), e))?;
+    let path = dir.join(format!("{}.md", name));
+    let final_content = if content.starts_with("---") {
+        content.clone()
+    } else {
+        format!("---\nname: {}\ndescription: (无描述)\n---\n\n{}", name, content)
+    };
+    std::fs::write(&path, &final_content)
+        .map_err(|e| format!("write({}): {}", path.display(), e))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn delete_command(args: CommandArgs) -> Result<bool, String> {
+    let name = args.name.as_ref().ok_or("delete_command 需要 name 字段")?;
+    parse_command_name(name)?;
+    let dir = resolve_commands_dir(args.workspace_path)?;
+    let path = dir.join(format!("{}.md", name));
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path)
+        .map_err(|e| format!("remove_file({}): {}", path.display(), e))?;
+    Ok(true)
+}
+
 // ====== LLM command ======
 
 #[tauri::command]
@@ -1496,6 +1695,14 @@ pub fn run() {
             write_agent,
             delete_agent,
             set_main_agent,
+            // v0.4.6.2: per-session active agent (D184 v9 ❸)
+            read_session_active_agent,
+            write_session_active_agent,
+            // v0.4.5.2: User 自定义快捷提示词模板 (Slash commands, 不含 builtin)
+            list_commands,
+            read_command,
+            write_command,
+            delete_command,
             // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
             sidecar::send_rpc_command,
         ])
