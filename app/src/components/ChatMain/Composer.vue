@@ -56,17 +56,22 @@ function pickPermission(mode: PermissionMode) {
   console.log('[Composer] permission mode changed (v0.5.0: only applies to new sessions)', { mode });
 }
 
-// ===== v0.4.1+ 点外部关闭 permission menu =====
+// ===== v0.4.1+ 点外部关闭 permission menu + v0.4.4.6 model menu =====
 // 标准 pattern: document.addEventListener('click') + contains 检查. 跟 ChatMain.vue / PadSelect.vue 一致.
+// v0.4.4.6: 一起处理 model menu (以前只有 perm menu 走这个 pattern, model menu 点空白不关, user 反馈)
 const permMenuRef = ref<HTMLElement | null>(null);
-function onPermClickOutside(e: MouseEvent) {
-  if (!showPermissionMenu.value) return;
-  if (permMenuRef.value && !permMenuRef.value.contains(e.target as Node)) {
+const modelMenuRef = ref<HTMLElement | null>(null);
+function onClickOutsideAnyMenu(e: MouseEvent) {
+  const target = e.target as Node;
+  if (showPermissionMenu.value && permMenuRef.value && !permMenuRef.value.contains(target)) {
     showPermissionMenu.value = false;
   }
+  if (showModelMenu.value && modelMenuRef.value && !modelMenuRef.value.contains(target)) {
+    showModelMenu.value = false;
+  }
 }
-onMounted(() => document.addEventListener('click', onPermClickOutside));
-onUnmounted(() => document.removeEventListener('click', onPermClickOutside));
+onMounted(() => document.addEventListener('click', onClickOutsideAnyMenu));
+onUnmounted(() => document.removeEventListener('click', onClickOutsideAnyMenu));
 
 const activeProvider = computed(() => configStore.activeProvider);
 const activeModel = computed(() => configStore.activeModel);
@@ -239,7 +244,7 @@ onMounted(() => nextTick(autoResize));
         <!-- v0.4.3 redesign: ContextIndicator 组件 (compact 83% + click 展开 popover) -->
         <!-- 位置: 切换 model chip 左侧, 跟 model 一体 (UX 原则: 功能逻辑是一体的) -->
         <ContextIndicator />
-        <div class="pad-composer__model-wrap">
+        <div ref="modelMenuRef" class="pad-composer__model-wrap">
           <button
             class="pad-composer__modelchip"
             :class="{ 'is-warn': !hasConfig, 'is-open': showModelMenu }"

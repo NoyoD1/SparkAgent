@@ -58,6 +58,7 @@ function emptySessionData(): SessionChatData {
 
 export const useChatStore = defineStore('chat', () => {
   const sessionStore = useSessionStore();
+  const configStore = useConfigStore();  // v0.4.4.6: getContextWindow 读 activeModel.contextWindow
   const initial = loadFromStorage();
 
   // 清理已删除 session 的 messages (在 session 列表初始化后)
@@ -98,6 +99,27 @@ export const useChatStore = defineStore('chat', () => {
         }
       }
       if (changed) chatData.value = next;
+    },
+  );
+
+  // v0.4.4.6: 同步删除 session 时清理对应的 usage (避免 localStorage 越积越多)
+  watch(
+    () => sessionStore.sessions.map((s) => s.id),
+    (ids) => {
+      const idSet = new Set(ids);
+      let usageChanged = false;
+      const nextUsage = { ...lastUsageBySession.value };
+      const nextCtx = { ...contextTokensBySession.value };
+      for (const k of Object.keys(nextUsage)) {
+        if (!idSet.has(k)) { delete nextUsage[k]; usageChanged = true; }
+      }
+      for (const k of Object.keys(nextCtx)) {
+        if (!idSet.has(k)) { delete nextCtx[k]; usageChanged = true; }
+      }
+      if (usageChanged) {
+        lastUsageBySession.value = nextUsage;
+        contextTokensBySession.value = nextCtx;
+      }
     },
   );
 
@@ -152,8 +174,46 @@ export const useChatStore = defineStore('chat', () => {
   // - 手动点 "压缩" → compact(sessionId) → sendRpcCommand({ type: 'compact' })
   // - Pi SDK emit compaction_start → 按钮变 "压缩中..." (spinner)
   // - Pi SDK emit compaction_end → 按钮恢复, lastCompaction 更新 (用于 toast "压缩成功, 节省 X tokens")
-  const lastUsageBySession = ref<Record<string, import('@/lib/mock/types').MessageUsage | undefined>>({});
-  const contextTokensBySession = ref<Record<string, number>>({});
+  //
+  // v0.4.4.6: 持久化 lastUsageBySession / contextTokensBySession 到 localStorage
+  //   修 user 反馈: 重启 .exe 后 contextTokens 从 0 开始, 不显示之前的用量
+  //   只持久化 lastUsage (够恢复 contextTokens, 后者能从 lastUsage.input+cacheRead 重算)
+  //   compaction 状态不持久化 (重启时所有 session 都视作 idle, 是合理默认)
+  const USAGE_STORAGE_KEY = 'pi-agent:usage:v1';
+  function loadUsageFromStorage(): {
+    lastUsage: Record<string, import('@/lib/mock/types').MessageUsage | undefined>;
+    contextTokens: Record<string, number>;
+  } {
+    try {
+      const raw = localStorage.getItem(USAGE_STORAGE_KEY);
+      if (!raw) return { lastUsage: {}, contextTokens: {} };
+      const parsed = JSON.parse(raw);
+      if (typeof parsed !== 'object' || parsed === null) return { lastUsage: {}, contextTokens: {} };
+      return {
+        lastUsage: (parsed.lastUsage ?? {}) as Record<string, import('@/lib/mock/types').MessageUsage | undefined>,
+        contextTokens: (parsed.contextTokens ?? {}) as Record<string, number>,
+      };
+    } catch {
+      return { lastUsage: {}, contextTokens: {} };
+    }
+  }
+  function saveUsageToStorage(lastUsage: Record<string, import('@/lib/mock/types').MessageUsage | undefined>, contextTokens: Record<string, number>) {
+    try {
+      // 不持久化 compaction 状态 (in_progress 重启后归零, 是合理默认)
+      localStorage.setItem(USAGE_STORAGE_KEY, JSON.stringify({ lastUsage, contextTokens }));
+    } catch (e) {
+      console.warn('[chat] usage localStorage save failed', e);
+    }
+  }
+  const usageInitial = loadUsageFromStorage();
+  const lastUsageBySession = ref<Record<string, import('@/lib/mock/types').MessageUsage | undefined>>(usageInitial.lastUsage);
+  const contextTokensBySession = ref<Record<string, number>>(usageInitial.contextTokens);
+  // watch 持久化 (deep: true 跟踪 ref 内部变化)
+  watch(
+    [lastUsageBySession, contextTokensBySession],
+    ([u, c]) => saveUsageToStorage(u, c),
+    { deep: true },
+  );
   const compactionBySession = ref<Record<string, 'idle' | 'in_progress'>>({});
   const lastCompactionBySession = ref<Record<string, {
     reason: 'manual' | 'threshold' | 'overflow';
@@ -164,16 +224,22 @@ export const useChatStore = defineStore('chat', () => {
   } | undefined>>({});
 
   // v0.4.3: contextWindow (硬编码 200K, 跟主流 LLM 默认对齐; 后续可走 config)
-  // 为什么不读 Pi SDK 的 contextWindow: Pi SDK 0.84.2 model config 暴露了 model.contextWindow,
-  //   但我们 v0.5.0+ 走 OpenAI-compatible custom provider, FE 端没存. 短期硬编码, 后期 v0.4.7 usage
-  //   完整化时一起处理 (FE 拿 model contextWindow)
+  // v0.4.4.6: 改从 user 配置的 activeModel.contextWindow 读, 缺省 200K (向后兼容)
+  // 之前: 硬编码 200K (跟主流 LLM 默认对齐, 但 user 配小模型时 context % 永远不触发压缩)
+  // 现在: user 在 Settings → Provider tab 配 model.contextWindow 后, Composer 显示的
+  //   "X.XK / YK" 跟压缩阈值都用 user 配的值.
   const DEFAULT_CONTEXT_WINDOW = 200_000;
 
   function getContextTokens(sessionId: string): number {
     return contextTokensBySession.value[sessionId] ?? 0;
   }
   function getContextWindow(): number {
-    return DEFAULT_CONTEXT_WINDOW;
+    // v0.4.4.6: 优先读 activeModel.contextWindow, 缺省回退到 200K.
+    //   activeModel 来自 configStore.activeProvider?.activeModelId 找到的 model
+    const active = sessionStore.activeSessionId;  // sessionId 不会影响 getContextWindow, 保留为了语义
+    void active;
+    const activeModel = configStore.activeModel;
+    return activeModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
   }
   function isCompacting(sessionId: string): boolean {
     return compactionBySession.value[sessionId] === 'in_progress';
@@ -183,7 +249,7 @@ export const useChatStore = defineStore('chat', () => {
   }
   function isContextHigh(sessionId: string): boolean {
     const tokens = getContextTokens(sessionId);
-    return tokens > DEFAULT_CONTEXT_WINDOW * 0.7;
+    return tokens > getContextWindow() * 0.7;
   }
 
   // ===== Actions ====
@@ -646,6 +712,14 @@ export const useChatStore = defineStore('chat', () => {
         permissionMode,
         sessionId: piSessionId,
         skills: { enabledNames },
+        modelMetadata: {
+          type: model.type,
+          vision: model.vision,
+          contextWindow: model.contextWindow,
+          maxOutput: model.maxOutput,
+          maxRounds: model.maxRounds,
+          reasoning: model.reasoning,
+        },
       }));
       console.log('[chat] sendPrompt: piTauri.sendPrompt resolved');
     } catch (e) {
