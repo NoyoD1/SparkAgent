@@ -18,7 +18,7 @@
  *   - 上传 .md 文件
  */
 import { ref, computed } from 'vue';
-import { ArrowLeft, Save, AlertCircle, Loader2, Check, FileText, Sparkles, Upload, FileArchive } from 'lucide-vue-next';
+import { ArrowLeft, Save, AlertCircle, Loader2, Check, FileText, Sparkles, Upload, FileArchive, Link } from 'lucide-vue-next';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { piTauri } from '@/lib/tauri';
 import { useSessionStore } from '@/stores/session';
@@ -27,10 +27,12 @@ const emit = defineEmits<{
   close: [];
   created: [filePath: string];
   zipImported: [info: { name: string; targetDir: string; fileCount: number }];
+  urlImported: [info: { name: string; targetPath: string; bytes: number }];
 }>();
 
 const importState = ref<'idle' | 'importing' | 'fail'>('idle');
 const importMessage = ref<string>('');
+const importUrl = ref<string>('');
 
 const sessionStore = useSessionStore();
 
@@ -150,6 +152,50 @@ async function importFromZip() {
   }
 }
 
+/**
+ * v0.4.4.5: 从 URL 导入 (raw .md content, 走 Tauri ureq sync HTTP)
+ * 跟 .zip 一样跳过 form, 直接 emit urlImported. 限制: 必须是单文件 raw .md,
+ * 不支持 URL 指向 zip (那是 v0.4.4.4 工作), 不支持 git clone.
+ */
+async function importFromUrl() {
+  const url = importUrl.value.trim();
+  if (!url) {
+    importState.value = 'fail';
+    importMessage.value = '请输入 URL';
+    return;
+  }
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    importState.value = 'fail';
+    importMessage.value = 'URL 必须以 http:// 或 https:// 开头';
+    return;
+  }
+  importState.value = 'importing';
+  importMessage.value = '';
+  try {
+    const wsPath = activeWorkspacePath.value;
+    const isWorkspace = scope.value === 'workspace';
+    if (isWorkspace && !wsPath) {
+      importState.value = 'fail';
+      importMessage.value = '当前没有 active workspace. 切到一个 workspace 或选 "Global" 范围';
+      return;
+    }
+    const result = await piTauri.importSkillUrl({
+      url,
+      scope: scope.value,
+      workspacePath: isWorkspace ? wsPath : null,
+      agentDir: null, // global: Rust 端 fallback 算 (跟 write_skill_file 一致)
+    });
+    importState.value = 'idle';
+    importMessage.value = `已 fetch ${result.bytes} bytes 到 ${result.targetPath}`;
+    importUrl.value = ''; // 清空输入
+    console.log('[skills] url imported:', result);
+    emit('urlImported', { name: result.name, targetPath: result.targetPath, bytes: result.bytes });
+  } catch (e) {
+    importState.value = 'fail';
+    importMessage.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
 async function submit() {
   if (!name.value.trim()) {
     submitState.value = 'fail';
@@ -251,6 +297,32 @@ async function submit() {
       <span v-if="importMessage" class="pad-addskill__import-hint" :class="{ 'is-fail': importState === 'fail' }">
         {{ importMessage }}
       </span>
+    </div>
+
+    <!-- v0.4.4.5: URL 导入 (raw .md content, 走 Tauri ureq sync HTTP) -->
+    <div class="pad-addskill__import-url">
+      <label class="pad-addskill__import-url-label" for="addskill-url">从 URL 导入 (raw .md)</label>
+      <div class="pad-addskill__import-url-row">
+        <input
+          id="addskill-url"
+          v-model="importUrl"
+          type="url"
+          class="pad-addskill__input pad-addskill__import-url-input"
+          placeholder="https://raw.githubusercontent.com/.../SKILL.md"
+          :disabled="importState === 'importing'"
+          @keyup.enter="importFromUrl"
+        />
+        <button
+          type="button"
+          class="pad-addskill__import-btn pad-addskill__import-btn--url"
+          :disabled="importState === 'importing' || !importUrl.trim()"
+          @click="importFromUrl"
+        >
+          <Loader2 v-if="importState === 'importing'" :size="14" :stroke-width="1.75" class="pad-addskill__spinner" />
+          <Link v-else :size="14" :stroke-width="1.75" />
+          <span>{{ importState === 'importing' ? 'fetch 中...' : '导入' }}</span>
+        </button>
+      </div>
     </div>
 
     <form class="pad-addskill__form" @submit.prevent="submit">
@@ -448,6 +520,35 @@ async function submit() {
 }
 .pad-addskill__import-hint.is-fail {
   color: var(--pad-fg-warning, #d97706);
+}
+
+/* v0.4.4.5 URL 导入行 */
+.pad-addskill__import-url {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.02));
+  border: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  border-radius: var(--pad-radius-md);
+  margin-bottom: 16px;
+}
+.pad-addskill__import-url-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--pad-fg-secondary);
+}
+.pad-addskill__import-url-row {
+  display: flex;
+  gap: 6px;
+}
+.pad-addskill__import-url-input {
+  flex: 1;
+  font-family: var(--pad-font-mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+.pad-addskill__import-btn--url {
+  flex-shrink: 0;
 }
 
 .pad-addskill__form {

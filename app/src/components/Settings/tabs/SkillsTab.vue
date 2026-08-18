@@ -67,6 +67,20 @@ function onZipImported(info: { name: string; targetDir: string; fileCount: numbe
     if (toast.value?.message.includes(info.name)) toast.value = null;
   }, 5000);
 }
+
+/**
+ * v0.4.4.5: URL 导入完成 (跟 zip 同 pattern, 直接 install 跳过 form)
+ */
+function onUrlImported(info: { name: string; targetPath: string; bytes: number }) {
+  viewMode.value = 'list';
+  toast.value = {
+    type: 'ok',
+    message: `已从 URL 导入 ${info.name} (${info.bytes} bytes) 到 ${info.targetPath} — 记得重启 release .exe 让 sidecar 重新加载 skills`,
+  };
+  setTimeout(() => {
+    if (toast.value?.message.includes(info.name)) toast.value = null;
+  }, 5000);
+}
 </script>
 
 <template>
@@ -168,6 +182,7 @@ function onZipImported(info: { name: string; targetDir: string; fileCount: numbe
       @close="closeAdd"
       @created="onCreated"
       @zipImported="onZipImported"
+      @urlImported="onUrlImported"
     />
   </div>
 </template>

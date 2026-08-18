@@ -429,6 +429,21 @@ class PiTauriClient {
     return (await invoke('import_skill_zip', { args })) as any;
   }
 
+  // ====== v0.4.4.5 Skill 导入: 从 URL fetch raw .md (走 Tauri ureq sync HTTP) ======
+  async importSkillUrl(args: {
+    url: string;
+    scope: 'workspace' | 'global';
+    workspacePath?: string | null;
+    agentDir?: string | null;
+  }): Promise<{
+    name: string;
+    targetPath: string;
+    description: string | null;
+    bytes: number;
+  }> {
+    return (await invoke('import_skill_url', { args })) as any;
+  }
+
   // ====== App config (v0.3.8+: 持久化到 Rust 文件, 替代 localStorage) ======
   // 走 Rust 持久化是因为 WebView2 缓存被清时 localStorage 也被擦, provider 配置会丢.
   // 文件位置: %APPDATA%\com.piagent.desktop\config.json

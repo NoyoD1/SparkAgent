@@ -327,6 +327,134 @@ async fn read_skill_file(path: String) -> Result<ParsedSkillFile, String> {
     Ok(parsed)
 }
 
+// ====== v0.4.4.5 Skill 导入: 从 URL 导入 (raw .md content) ======
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportSkillUrlArgs {
+    /// raw URL (https://...) — 假设 server 返回 text/markdown 或 text/plain
+    /// 限制: 必须是单文件 .md raw content, 不支持 zip 指向 (zip 走 v0.4.4.4)
+    url: String,
+    /// scope: "workspace" | "global", 跟 write_skill_file 一样
+    scope: String,
+    /// workspace scope 必填
+    workspace_path: Option<String>,
+    /// global scope 不传, Rust fallback 算
+    agent_dir: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedSkillUrl {
+    /// skill name (从 URL 文件名去 .md 或 frontmatter.name)
+    name: String,
+    /// 写入的最终路径
+    target_path: String,
+    /// 描述 (从 SKILL.md frontmatter.description)
+    description: Option<String>,
+    /// raw content 大小 (bytes)
+    bytes: usize,
+}
+
+#[tauri::command]
+async fn import_skill_url(args: ImportSkillUrlArgs) -> Result<ImportedSkillUrl, String> {
+    // 1. URL 校验
+    if !args.url.starts_with("https://") && !args.url.starts_with("http://") {
+        return Err("URL 必须以 http:// 或 https:// 开头".to_string());
+    }
+
+    // 2. 同步 fetch (ureq, 不引 async runtime / 不引 SSL cert chain 依赖)
+    //    timeout 30s 避免 user 误贴无效 URL 卡住 UI
+    let response = ureq::get(&args.url)
+        .timeout(std::time::Duration::from_secs(30))
+        .call()
+        .map_err(|e| format!("fetch URL 失败: {}", e))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP {} — {}", status, args.url));
+    }
+    let raw = response
+        .into_string()
+        .map_err(|e| format!("解码 response 失败: {}", e))?;
+
+    // 3. 解析 frontmatter
+    let parsed = parse_skill_frontmatter(&raw);
+
+    // 4. name: 优先 frontmatter.name, fallback URL 文件名去 .md
+    let name = if !parsed.name.is_empty() {
+        parsed.name
+    } else {
+        // URL 末段去 .md, 手切 (不引 url crate)
+        let last = args.url.rsplit(|c| c == '/' || c == '?').next().unwrap_or("skill");
+        last.trim_end_matches(".md").trim_end_matches(".markdown").to_string()
+    };
+
+    // 5. name 校验 (跟 write_skill_file 一致)
+    if name.is_empty() || name.len() > 64 {
+        return Err(format!("skill name 长度必须 1-64, got {} ({})", name.len(), name));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        return Err(format!("skill name 只能含 [a-zA-Z0-9._-], got '{}'", name));
+    }
+    if name == "." || name == ".." {
+        return Err("skill name 不能是 '.' 或 '..'".to_string());
+    }
+
+    // 6. 拼 frontmatter + body (跟 AddSkillForm 行为一致)
+    let body = if parsed.has_frontmatter {
+        raw.clone()
+    } else {
+        // 没 frontmatter, 拼一个
+        format!("---\nname: {}\ndescription: {}\n---\n\n{}", name, parsed.description.as_deref().unwrap_or("(imported from URL)"), raw)
+    };
+
+    // 7. 决定 target 路径 (跟 write_skill_file 一样, 但单文件)
+    let target_path = match args.scope.as_str() {
+        "workspace" => {
+            let ws = args.workspace_path.as_ref().ok_or("workspace scope 需要 workspacePath")?;
+            if ws.is_empty() {
+                return Err("workspace path 不能为空".to_string());
+            }
+            PathBuf::from(ws).join(".pi").join("skills").join(format!("{}.md", name))
+        }
+        "global" => {
+            let dir = match args.agent_dir.as_ref().filter(|s| !s.is_empty()) {
+                Some(d) => PathBuf::from(d),
+                None => {
+                    let home = std::env::var("USERPROFILE")
+                        .ok()
+                        .or_else(|| std::env::var("HOME").ok())
+                        .or_else(|| std::env::var("HOMEDRIVE").ok().zip(std::env::var("HOMEPATH").ok()).map(|(d, p)| format!("{}\\{}", d, p)))
+                        .ok_or("global scope 没传 agentDir, 也找不到 USERPROFILE/HOME env")?;
+                    PathBuf::from(home).join(".pi").join("agent")
+                }
+            };
+            dir.join("skills").join(format!("{}.md", name))
+        }
+        other => return Err(format!("scope 必须是 'workspace' 或 'global', got '{}'", other)),
+    };
+
+    // 8. target 已存在 → 拒绝
+    if target_path.exists() {
+        return Err(format!("target 已存在: {:?} — 请先删除或选不同 name", target_path));
+    }
+
+    // 9. 创建 parent dir + 写文件
+    let parent = target_path.parent().ok_or("invalid target path")?;
+    if !parent.exists() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建 parent 失败: {}", e))?;
+    }
+    std::fs::write(&target_path, body.as_bytes()).map_err(|e| format!("写文件失败: {}", e))?;
+
+    let abs = std::fs::canonicalize(&target_path).unwrap_or(target_path);
+    Ok(ImportedSkillUrl {
+        name,
+        target_path: abs.to_string_lossy().to_string(),
+        description: parsed.description,
+        bytes: body.len(),
+    })
+}
+
 // ====== v0.4.4.4 Skill 导入: 从 zip 压缩包导入 (多文件 skill pack 支持) ======
 
 #[derive(Debug, Deserialize)]
@@ -820,6 +948,8 @@ pub fn run() {
             read_skill_file,
             // v0.4.4.4 Skill 导入: 从 zip 压缩包导入 (支持多文件 skill pack)
             import_skill_zip,
+            // v0.4.4.5 Skill 导入: 从 URL fetch raw .md (走 ureq sync HTTP)
+            import_skill_url,
             // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
             sidecar::send_rpc_command,
         ])
