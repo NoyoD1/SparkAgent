@@ -32,6 +32,11 @@ export interface AgentInfo {
   filePath: string;
 }
 
+// v0.5.0-PR1: DEFAULT marker = 走 Pi SDK 默认 agent 思维 (user 反馈 2: 默认出厂保证一个 agent,
+// 全删就用默认 pi 的 agent 思维, 不追加自定义 AGENTS.md). sidecar 看到 body === 'DEFAULT'
+// → 不拼 persona 段, 走 Pi SDK 内置默认 prompt (跟 v0.4.6 之前无 agent 时的行为一致).
+export const BUILTIN_DEFAULT_AGENT_BODY = 'DEFAULT';
+
 export const useAgentsStore = defineStore('agents', () => {
   const agents = ref<AgentInfo[]>([]);
   const activeName = ref<string | null>(null);
@@ -105,6 +110,29 @@ export const useAgentsStore = defineStore('agents', () => {
         await tryMigrateFromAgentsMd(ws.path);
         // 迁移完后重新拉一次 (新加了 default)
         if (migrationChecked) {
+          const res2 = await piTauri.listAgents({
+            workspacePath: ws.path,
+            agentDir: null,
+          });
+          agents.value = res2.agents.map((a) => ({
+            name: a.name,
+            description: a.description ?? '',
+            role: a.role,
+            body: a.body,
+            filePath: a.filePath,
+          }));
+          activeName.value = res2.activeName;
+        }
+      }
+
+      // v0.5.0-PR1: default fallback — list 完空时自动建 default agent
+      //  user 反馈 2: "默认出厂就需要保证一个 agent, 如果用户全部删除则使用默认 pi 的 agent 思维"
+      //  触发场景: 全新 workspace / 用户全删 agents / active agent 删空
+      if (ws && agents.value.length === 0) {
+        console.log(`[agents] list 空 (${agents.value.length} agents), 自动建 default agent (v0.5.0 default fallback)`);
+        const created = await ensureDefaultAgent(ws.path);
+        if (created) {
+          // 重新拉一次 (新加了 default)
           const res2 = await piTauri.listAgents({
             workspacePath: ws.path,
             agentDir: null,
@@ -215,6 +243,12 @@ export const useAgentsStore = defineStore('agents', () => {
       name,
     });
     await refreshFromTauri();
+    // v0.5.0-PR1: default fallback — 删完空时自动恢复 default (user 反馈 2: 不能删到 0)
+    if (agents.value.length === 0) {
+      console.warn(`[agents] remove(${name}) 后 agents 空, 自动恢复 default agent (v0.5.0 default fallback)`);
+      await ensureDefaultAgent(ws.path);
+      await refreshFromTauri();
+    }
   }
 
   /** 给 chat store send_prompt 用: 拿当前 active agent 的 body 拼成 activeAgent 字段 */
@@ -232,10 +266,44 @@ export const useAgentsStore = defineStore('agents', () => {
         agentDir: null,
         name,
       });
+      // v0.5.0-PR1: DEFAULT marker / empty body = 走 Pi SDK 默认 (不传 activeAgent 给 sidecar,
+      //  让 sidecar 不拼 persona 段, LLM 走 Pi SDK 内置默认 prompt — 跟 v0.4.6 之前无 agent 行为一致)
+      if (!info.body || info.body === BUILTIN_DEFAULT_AGENT_BODY) {
+        console.log(`[agents] getActiveAgentConfig: ${name} → DEFAULT marker / empty body, 走 Pi SDK 默认 (不传 activeAgent)`);
+        return null;
+      }
       return { name: info.name, body: info.body };
     } catch (e) {
       console.error(`[agents] readAgent failed for ${name}:`, e instanceof Error ? e.message : String(e));
       return null;
+    }
+  }
+
+  /**
+   * v0.5.0-PR1: 自动建 default agent (user 反馈 2: 出厂必须保证一个 agent, 全删恢复 Pi SDK 默认).
+   * body = BUILTIN_DEFAULT_AGENT_BODY ('DEFAULT' marker), sidecar 看到 → 走 Pi SDK 默认
+   * + setMain('default') 让其成为主 agent. 返回 true = 建了, false = 没建 (失败).
+   * D186 教训: 已被 refreshFromTauri + remove 复用, 不重复逻辑.
+   */
+  async function ensureDefaultAgent(workspacePath: string): Promise<boolean> {
+    try {
+      const fullContent = `---\nname: default\ndescription: Pi SDK 默认 agent (出厂必备, 全删自动恢复)\nrole: main\n---\n\n${BUILTIN_DEFAULT_AGENT_BODY}`;
+      await piTauri.writeAgent({
+        workspacePath,
+        agentDir: null,
+        name: 'default',
+        content: fullContent,
+      });
+      await piTauri.setMainAgent({
+        workspacePath,
+        agentDir: null,
+        name: 'default',
+      });
+      console.log('[agents] auto-created default agent (Pi SDK default persona, v0.5.0 default fallback)');
+      return true;
+    } catch (e) {
+      console.error('[agents] auto-create default failed:', e instanceof Error ? e.message : String(e));
+      return false;
     }
   }
 

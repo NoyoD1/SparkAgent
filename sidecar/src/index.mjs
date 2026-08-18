@@ -153,18 +153,29 @@ console.error(`[sidecar] skills: loaded ${allSkills.length} total, ${enabledSkil
 //   取 active_name + read_agent 拿 body 拼好传过来)
 const activeAgentConfig = config.activeAgent ?? null;
 // v0.4.6.2: 加详细 debug log 排查 "切 agent 没生效" bug (D186 教训)
-console.error(`[sidecar] active agent config: type=${typeof activeAgentConfig} value=${activeAgentConfig ? JSON.stringify({name: activeAgentConfig.name, body_len: activeAgentConfig.body?.length ?? 0}) : 'null/undefined'}`);
+console.error(`[sidecar] active agent config: type=${typeof activeAgentConfig} value=${activeAgentConfig ? JSON.stringify({name: activeAgentConfig.name, body_len: activeAgentConfig.body?.length ?? 0, body_is_DEFAULT: activeAgentConfig.body === 'DEFAULT'}) : 'null/undefined'}`);
 let activeAgentPromptFragment = '';
-if (activeAgentConfig && activeAgentConfig.body) {
+if (activeAgentConfig && activeAgentConfig.body && activeAgentConfig.body !== 'DEFAULT') {
   activeAgentPromptFragment = `\n\n<current_agent_persona>
 You are currently operating under the "${activeAgentConfig.name}" persona. Follow these persona rules:
 
 ${activeAgentConfig.body}
 </current_agent_persona>`;
-  console.error(`[sidecar] active agent: name=${activeAgentConfig.name} body_len=${activeAgentConfig.body.length}`);
+  console.error(`[sidecar] active agent: name=${activeAgentConfig.name} body_len=${activeAgentConfig.body.length} → 拼 persona 段`);
+} else if (activeAgentConfig && activeAgentConfig.body === 'DEFAULT') {
+  // v0.5.0-PR1: DEFAULT marker = 走 Pi SDK 默认 (不拼 persona 段, 让 LLM 走 Pi 内置默认 prompt)
+  console.error(`[sidecar] active agent: ${activeAgentConfig.name} marker=DEFAULT → 走 Pi SDK 默认, 不拼 persona 段`);
 } else {
   console.error(`[sidecar] active agent: none (no persona injected) — activeAgentConfig=${JSON.stringify(activeAgentConfig)}`);
 }
+// v0.5.0-PR1: 4 段 system prompt 显式 log (Persona / Skills / Context Awareness / Project)
+//  让 user 装新 .msi 跑端到端时, 能从 sidecar stderr log 看到 4 段拼装, 验证切 agent 真生效.
+//  self-verify 范围: sidecar log + agents store init log (D186 教训诚实承认: LLM 是否真看到, 只有 user 端到端能验)
+const _personaSegLabel = activeAgentConfig?.body === 'DEFAULT'
+  ? 'persona=Pi-SDK-default'
+  : (activeAgentConfig?.name && activeAgentConfig.body ? `persona=${activeAgentConfig.name}` : 'persona=Pi-SDK-default');
+const _personaSegLen = activeAgentPromptFragment.length;
+console.error(`[sidecar] system prompt: 4 segments [${_personaSegLabel}(${_personaSegLen} chars) skills=${enabledSkills.length}(${skillsPromptFragment.length} chars) context_awareness=set project_context=Pi-SDK-auto]`);
 if (skillsDiagnostics.length > 0) {
   for (const d of skillsDiagnostics.slice(0, 5)) {
     console.error(`[sidecar] skills diag: ${d.type} ${d.message} ${d.path ?? ''}`);

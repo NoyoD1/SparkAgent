@@ -240,3 +240,40 @@ async function setMainAgent(name) {
 - [ ] ✅ v0.4.5.1 + v0.4.6.1 + v0.4.7a 一次 build（5.5h 出 .msi）
 - [ ] ✅ 接受 session 重建丢 transient state（切主 agent = abort 当前 turn + 重建）
 - [ ] ⏸ v0.5.1 sub-agent 实施时复用本 ADR data layer
+
+---
+
+## v0.5.0-PR1 增量（2026-08-18，user 反馈 2 + 3 + D184 v9 推论）
+
+**触发**: user 16:00 反馈 5 个 bug + 整体脆弱, 选 v0.5.0 大改版 (3 commit 6h), PR1 = System Prompt 显式化.
+
+### 1. sidecar 4 段 system prompt 显式 log
+
+加 `[sidecar] system prompt: 4 segments [persona=<name>(<len>) skills=<n>(<len>) context_awareness=set project_context=Pi-SDK-auto]` 让 user 装 .msi 跑端到端能从 sidecar stderr 看 4 段拼装, 验证切 agent 真生效 (D186 + user 反馈 3 排查).
+
+### 2. DEFAULT marker 走 Pi SDK 默认
+
+- `BUILTIN_DEFAULT_AGENT_BODY = 'DEFAULT'`
+- sidecar 接 `body === 'DEFAULT'` → 不拼 persona 段, 走 Pi SDK 内置默认 prompt
+- 跟 v0.4.6 之前无 agent 行为一致 (LLM 走 Pi SDK 默认 system prompt)
+- user 反馈 2: "默认出厂保证一个 agent, 全删走 Pi SDK 默认"
+
+### 3. agents store default fallback
+
+- `refreshFromTauri` 后 agents 空 → `ensureDefaultAgent` (writeAgent + setMainAgent, 复用迁移 pattern)
+- `remove` 后 agents 空 → 警告 + 自动 `ensureDefaultAgent` (防止删到 0)
+- `getActiveAgentConfig` 接 `body === 'DEFAULT'` / empty body → null (不传 activeAgent 给 sidecar)
+
+### 跟原 ADR 决策的关系
+
+- ✅ 不动方案 A (session 重建 + 复用 SessionManager)
+- ✅ 不动 appendSystemPromptOverride 注入机制 (D183 v3 实测 Pi SDK 0.84.2 唯一可行 path)
+- ✅ 数据层 (`.pi/agents/*.md` + frontmatter) 不变
+- 🆕 增量: DEFAULT marker + default fallback 显式化 + 4 段 log 可观察
+- 🆕 D186 教训诚实承认: self-verify 范围 = log + init, LLM 真看到 4 段只有 user 端到端能验
+
+### 何时 Revisit（本节增量）
+
+- user 反馈"切 agent 后 LLM 不遵守 body 内容" → 排查 reload 链 + 考虑调高 system prompt 权重 / 加 user reminder
+- DEFAULT marker 太抽象 → 改用真实 Pi SDK 默认 prompt 内容 (需要找 Pi SDK export)
+- ADR-0022 v0.5.1 sub-agent 实施 → 复用本 ADR data layer + DEFAULT marker (sub-agent 启动也走 SDK 默认 if 不指定)
