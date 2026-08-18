@@ -9,11 +9,12 @@
  */
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
-import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck } from 'lucide-vue-next';
+import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck, Bot, Circle } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
 import { useConfigStore, PROVIDER_OPTIONS, PERMISSION_MODE_OPTIONS, type PermissionMode } from '@/stores/config';
 import { useUiStore } from '@/stores/ui';
+import { useAgentsStore } from '@/stores/agents';
 import { piTauri } from '@/lib/tauri';
 import ContextIndicator from './ContextIndicator.vue';
 
@@ -21,10 +22,13 @@ const chatStore = useChatStore();
 const sessionStore = useSessionStore();
 const configStore = useConfigStore();
 const uiStore = useUiStore();
+const agentsStore = useAgentsStore();
 const { activeSession } = storeToRefs(sessionStore);
+const { agents, activeName } = storeToRefs(agentsStore);
 
 const inputText = ref('');
 const showModelMenu = ref(false);
+const showAgentMenu = ref(false);  // v0.4.6.1 agent selector dropdown
 // v0.4.1+ tool permission 菜单
 const showPermissionMenu = ref(false);
 
@@ -56,11 +60,13 @@ function pickPermission(mode: PermissionMode) {
   console.log('[Composer] permission mode changed (v0.5.0: only applies to new sessions)', { mode });
 }
 
-// ===== v0.4.1+ 点外部关闭 permission menu + v0.4.4.6 model menu =====
+// ===== v0.4.1+ 点外部关闭 permission menu + v0.4.4.6 model menu + v0.4.6.1 agent menu =====
 // 标准 pattern: document.addEventListener('click') + contains 检查. 跟 ChatMain.vue / PadSelect.vue 一致.
 // v0.4.4.6: 一起处理 model menu (以前只有 perm menu 走这个 pattern, model menu 点空白不关, user 反馈)
+// v0.4.6.1: 加 agent menu (跟 Trae IDE 红框一致, D184 v8 Q2 拍板)
 const permMenuRef = ref<HTMLElement | null>(null);
 const modelMenuRef = ref<HTMLElement | null>(null);
+const agentMenuRef = ref<HTMLElement | null>(null);
 function onClickOutsideAnyMenu(e: MouseEvent) {
   const target = e.target as Node;
   if (showPermissionMenu.value && permMenuRef.value && !permMenuRef.value.contains(target)) {
@@ -69,8 +75,17 @@ function onClickOutsideAnyMenu(e: MouseEvent) {
   if (showModelMenu.value && modelMenuRef.value && !modelMenuRef.value.contains(target)) {
     showModelMenu.value = false;
   }
+  if (showAgentMenu.value && agentMenuRef.value && !agentMenuRef.value.contains(target)) {
+    showAgentMenu.value = false;
+  }
 }
-onMounted(() => document.addEventListener('click', onClickOutsideAnyMenu));
+onMounted(() => {
+  document.addEventListener('click', onClickOutsideAnyMenu);
+  // v0.4.6.1: 第一次 mount 时拉一次 agents list
+  if (!agentsStore.hasTauriList) {
+    agentsStore.refreshFromTauri();
+  }
+});
 onUnmounted(() => document.removeEventListener('click', onClickOutsideAnyMenu));
 
 const activeProvider = computed(() => configStore.activeProvider);
@@ -89,6 +104,24 @@ const isStreaming = computed(() =>
 
 function toggleModelMenu() {
   showModelMenu.value = !showModelMenu.value;
+}
+
+function toggleAgentMenu() {
+  showAgentMenu.value = !showAgentMenu.value;
+  if (showAgentMenu.value) showModelMenu.value = false;  // 二选一开
+}
+
+async function pickMainAgent(name: string) {
+  if (name === activeName.value) {
+    showAgentMenu.value = false;
+    return;
+  }
+  try {
+    await agentsStore.setMain(name);
+    showAgentMenu.value = false;
+  } catch (e) {
+    console.error('[Composer] setMain failed', e);
+  }
 }
 
 function pickModel(providerId: string, modelId: string) {
@@ -179,6 +212,38 @@ onMounted(() => nextTick(autoResize));
 
 <template>
   <div class="pad-composer">
+    <!-- v0.4.6.1: Composer 顶部 agent selector (跟 Trae IDE 截图红框一致, D184 v8 Q2 拍板) -->
+    <div v-if="agents.length > 0" ref="agentMenuRef" class="pad-composer__agent-selector">
+      <button
+        class="pad-composer__agent-btn"
+        :class="{ 'is-active': showAgentMenu }"
+        :title="activeName ? `当前主 agent: ${activeName} (切了下条 prompt 生效)` : '未选主 agent (LLM 走默认行为)'"
+        @click="toggleAgentMenu"
+      >
+        <Bot :size="13" :stroke-width="1.75" />
+        <span class="pad-composer__agent-name">{{ activeName || '选主 agent' }}</span>
+        <ChevronDown :size="12" :stroke-width="2" />
+      </button>
+      <div v-if="showAgentMenu" class="pad-composer__agent-menu">
+        <div class="pad-composer__agent-menu-hint">点击切换主 agent (下次发 prompt 生效)</div>
+        <button
+          v-for="a in agents"
+          :key="a.name"
+          class="pad-composer__agent-item"
+          :class="{ 'is-active': a.name === activeName }"
+          @click="pickMainAgent(a.name)"
+        >
+          <Circle
+            :size="8"
+            :stroke-width="0"
+            :fill="a.name === activeName ? 'var(--pad-fg-success, #22c55e)' : 'var(--pad-fg-tertiary)'"
+          />
+          <span class="pad-composer__agent-item-name">{{ a.name }}</span>
+          <span class="pad-composer__agent-item-tag" :class="`is-${a.role}`">{{ a.role === 'main' ? '主' : '子' }}</span>
+          <Check v-if="a.name === activeName" :size="12" :stroke-width="2" class="pad-composer__agent-item-check" />
+        </button>
+      </div>
+    </div>
     <textarea
       ref="textareaRef"
       v-model="inputText"
@@ -378,6 +443,109 @@ onMounted(() => nextTick(autoResize));
 .pad-composer__input::placeholder {
   color: var(--pad-fg-tertiary);
 }
+/* v0.4.6.1: 顶部 agent selector (跟 Trae IDE 红框一致) */
+.pad-composer__agent-selector {
+  position: relative;
+  display: flex;
+  margin-bottom: var(--pad-sp-2);
+}
+.pad-composer__agent-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-secondary);
+  background: var(--pad-bg-muted, rgba(0,0,0,0.03));
+  border: 1px solid var(--pad-border-subtle, rgba(0,0,0,0.08));
+  border-radius: var(--pad-radius-pill, 13px);
+  cursor: pointer;
+  transition: background var(--pad-dur-fast) ease, border-color var(--pad-dur-fast) ease;
+}
+.pad-composer__agent-btn:hover,
+.pad-composer__agent-btn.is-active {
+  background: var(--pad-bg-hover, rgba(0,0,0,0.06));
+  border-color: var(--pad-accent, #6366f1);
+  color: var(--pad-fg-primary);
+}
+.pad-composer__agent-name {
+  font-weight: var(--pad-fw-medium);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pad-composer__agent-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  min-width: 240px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--pad-card, #fff);
+  border: 1px solid var(--pad-border, rgba(0,0,0,0.1));
+  border-radius: var(--pad-radius-md, 8px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  padding: 4px;
+}
+.pad-composer__agent-menu-hint {
+  padding: 6px 10px;
+  font-size: 10px;
+  color: var(--pad-fg-tertiary);
+  border-bottom: 1px solid var(--pad-border-subtle, rgba(0,0,0,0.06));
+  margin-bottom: 4px;
+}
+.pad-composer__agent-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--pad-radius-sm, 4px);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--pad-dur-fast) ease;
+}
+.pad-composer__agent-item:hover {
+  background: var(--pad-bg-hover, rgba(0,0,0,0.04));
+  color: var(--pad-fg-primary);
+}
+.pad-composer__agent-item.is-active {
+  background: var(--pad-bg-success-soft, rgba(34,197,94,0.08));
+  color: var(--pad-fg-primary);
+}
+.pad-composer__agent-item-name {
+  flex: 1;
+  font-weight: var(--pad-fw-medium);
+}
+.pad-composer__agent-item-tag {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: var(--pad-fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.pad-composer__agent-item-tag.is-main {
+  background: var(--pad-bg-success, rgba(34,197,94,0.15));
+  color: var(--pad-fg-success, #22c55e);
+}
+.pad-composer__agent-item-tag.is-sub {
+  background: var(--pad-bg-muted, rgba(0,0,0,0.04));
+  color: var(--pad-fg-tertiary);
+}
+.pad-composer__agent-item-check {
+  color: var(--pad-fg-success, #22c55e);
+  flex-shrink: 0;
+}
+
 .pad-composer__bar {
   display: flex;
   align-items: center;

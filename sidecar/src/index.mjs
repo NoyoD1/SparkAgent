@@ -140,6 +140,29 @@ const skillsPromptFragment = enabledSkills.length > 0
   ? '\n\n' + formatSkillsForPrompt(enabledSkills)
   : '';
 console.error(`[sidecar] skills: loaded ${allSkills.length} total, ${enabledSkills.length} enabled, ${skillsDiagnostics.length} diagnostics`);
+
+// ====== v0.4.6.1 Multi-agent persona (主/子 agent 库) ======
+// Pi SDK 0.84.2 `_baseSystemPrompt` + `appendSystemPrompt` 都是 ResourceLoader 私有内部 state
+//   (D183 v3 现场重演 + D171 实测确认), 没有公开 setter, 走 session 重建 path 太复杂.
+//   跟 v0.4.4 skills 同 pattern: 切主 agent = FE 写 active_agent.json + 下次发 prompt
+//   sidecar 启动时读 config.activeAgent, 拼到 appendSystemPromptOverride (D165 systemPrompt
+//   不可动态改, 走 "下次发 prompt 时生效" UX). 切了下条 LLM 用新 persona, history 保留
+//   (SessionManager 自动从 jsonl 读回).
+//
+// format: config.activeAgent = { name: "engineer", body: "..." }  (FE 端 list_agents 后
+//   取 active_name + read_agent 拿 body 拼好传过来)
+const activeAgentConfig = config.activeAgent ?? null;
+let activeAgentPromptFragment = '';
+if (activeAgentConfig && activeAgentConfig.body) {
+  activeAgentPromptFragment = `\n\n<current_agent_persona>
+You are currently operating under the "${activeAgentConfig.name}" persona. Follow these persona rules:
+
+${activeAgentConfig.body}
+</current_agent_persona>`;
+  console.error(`[sidecar] active agent: name=${activeAgentConfig.name} body_len=${activeAgentConfig.body.length}`);
+} else {
+  console.error(`[sidecar] active agent: none (no persona injected)`);
+}
 if (skillsDiagnostics.length > 0) {
   for (const d of skillsDiagnostics.slice(0, 5)) {
     console.error(`[sidecar] skills diag: ${d.type} ${d.message} ${d.path ?? ''}`);
@@ -316,6 +339,9 @@ intent across the session is still part of the conversation.
         //   返回 XML 格式, 跟 <context_awareness> 风格一致). enabledSkillNames 从 config 传, 改 enabled
         //   必须重启 sidecar (D165 systemPrompt 不可动态改).
         ...(skillsPromptFragment ? [skillsPromptFragment] : []),
+        // v0.4.6.1 Multi-agent persona: 拼 active agent 内容进 system prompt (跟 skills 同 pattern,
+        //   改 active 必须重启 sidecar = 下次发 prompt 自动生效).
+        ...(activeAgentPromptFragment ? [activeAgentPromptFragment] : []),
       ],
     },
   });

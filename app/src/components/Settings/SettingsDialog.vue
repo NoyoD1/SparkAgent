@@ -20,7 +20,7 @@ import {
   Plug,             // 扩展 / MCP
   Sparkles,         // Skills (v0.4.4)
   // Terminal,         // Slash (v0.4.5) — v0.4.5.1 砍掉 (D184 v8 Q1: 内置 22 无法修改, 没价值单开 tab)
-  FileText,         // 自定义指令 (v0.4.6) — v0.4.6.1 改造成 Agents (主/子 agent 库)
+  Bot,              // Agents (v0.4.6.1) — 改造 CustomInstructionsTab, 多套 agent persona 库
   Info,             // 关于
   ArrowLeft,        // 关闭
   RotateCcw,        // 重置
@@ -54,7 +54,7 @@ const TABS: TabDef[] = [
   { id: 'extensions', label: '扩展 / MCP', icon: markRaw(Plug),      component: markRaw(ExtensionsTab), group: 'Agent 能力', implemented: false },
   { id: 'skills',     label: 'Skills',  icon: markRaw(Sparkles),   component: markRaw(SkillsTab),     group: 'Agent 能力', implemented: true  },
   // { id: 'slash',   label: 'Slash',   ... } — v0.4.5.1 砍掉 (D184 v8 Q1: 内置 22 无法修改, 没价值单开 tab)
-  { id: 'instructions', label: '自定义指令', icon: markRaw(FileText), component: markRaw(CustomInstructionsTab), group: 'Agent 能力', implemented: true  },
+  { id: 'instructions', label: 'Agents', icon: markRaw(Bot), component: markRaw(CustomInstructionsTab), group: 'Agent 能力', implemented: true  },  // v0.4.6.1: 改造 CustomInstructionsTab 内容 (单 AGENTS.md → 多套 .pi/agents/*.md)
   { id: 'about',      label: '关于',     icon: markRaw(Info),       component: markRaw(AboutTab),      group: '数据与统计', implemented: true  },
 ];
 

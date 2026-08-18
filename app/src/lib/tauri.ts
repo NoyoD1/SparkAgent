@@ -305,6 +305,14 @@ class PiTauriClient {
         maxRounds?: number;
         reasoning?: boolean;
       };
+      /** v0.4.6.1 Multi-agent persona: 当前 active agent (FE 端 list_agents + read_agent 拿 body 拼好).
+       *   sidecar 启动时拼到 appendSystemPromptOverride 注入 system prompt.
+       *   改 active 必须重启 sidecar (D165 systemPrompt 不可动态改, 走 v0.4.4 skills 同 pattern:
+       *   下次发 prompt 时 sidecar 启动自动生效). 缺省 → 没有 active agent, 不拼. */
+      activeAgent?: {
+        name: string;
+        body: string;
+      };
     } | null,
   ): Promise<void> {
     console.log('[pi-tauri] sendPrompt called', { sessionId, contentLen: content.length });
@@ -328,6 +336,7 @@ class PiTauriClient {
           sessionId: cfg.sessionId ?? null,  // v0.4.2 step 1+
           skills: cfg.skills ?? { enabledNames: [] },  // v0.4.4 Skills (Pi SDK 暴露)
           modelMetadata: cfg.modelMetadata ?? null,  // v0.4.4.6 model metadata (user-custom path only)
+          activeAgent: cfg.activeAgent ?? null,  // v0.4.6.1 multi-agent persona
         },
       });
       console.log('[pi-tauri] sendPrompt invoke resolved', res);
@@ -402,6 +411,62 @@ class PiTauriClient {
         agentDir: args.agentDir ?? null,
       },
     })) as { skills: TauriSkillInfo[]; diagnostics: TauriSkillDiagnostic[] };
+  }
+
+  // ====== v0.4.6.1 Multi-agent persona (主/子 agent 库 + Composer 顶部 selector) ======
+  // 存储: <workspace>/.pi/agents/<name>.md (frontmatter name/description/role: main|sub)
+  // 激活态: <workspace>/.pi/active_agent.json
+  // 跟 write_skill_file / list_skills / read_custom_instructions 同 pattern:
+  //   Tauri 2 invoke 必须 { args } 包裹, fn cmd(args: AgentArgs) (D193 教训)
+  // 切主 agent → sidecar 走 v0.4.4 skills 同 pattern (D165 systemPrompt 不可动态改):
+  //   FE 写 active_agent.json → 下次发 prompt sidecar 启动拼到 appendSystemPromptOverride
+  //   → LLM 看到新 persona, history 完整保留 (SessionManager 从 jsonl 读回).
+  async listAgents(args: {
+    workspacePath?: string | null;
+    agentDir?: string | null;
+  }): Promise<{
+    agents: TauriAgentInfo[];
+    activeName: string | null;
+  }> {
+    return (await invoke('list_agents', {
+      args: {
+        workspacePath: args.workspacePath ?? null,
+        agentDir: args.agentDir ?? null,
+      },
+    })) as { agents: TauriAgentInfo[]; activeName: string | null };
+  }
+
+  async readAgent(args: {
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+  }): Promise<TauriAgentInfo> {
+    return (await invoke('read_agent', { args })) as TauriAgentInfo
+  }
+
+  async writeAgent(args: {
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+    content: string;
+  }): Promise<string> {
+    return (await invoke('write_agent', { args })) as string
+  }
+
+  async deleteAgent(args: {
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+  }): Promise<boolean> {
+    return (await invoke('delete_agent', { args })) as boolean
+  }
+
+  async setMainAgent(args: {
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+  }): Promise<string> {
+    return (await invoke('set_main_agent', { args })) as string
   }
 
   // ====== v0.4.6 Project rules / 自定义指令 (跟 Claude 桌面端 "自定义指令" 模式) ======
@@ -607,6 +672,18 @@ export interface TauriSkillDiagnostic {
   type: string;
   message: string;
   path?: string;
+}
+
+/** v0.4.6.1: Tauri 端 list_agents / read_agent 返回的单个 agent (跟 list_skills schema 对齐) */
+export interface TauriAgentInfo {
+  name: string;
+  description?: string | null;
+  /** 'main' | 'sub' (frontmatter role 字段, 缺省 'sub') */
+  role: string;
+  /** frontmatter 后的 markdown body */
+  body: string;
+  /** 文件绝对路径 */
+  filePath: string;
 }
 
 export const piTauri = new PiTauriClient();
