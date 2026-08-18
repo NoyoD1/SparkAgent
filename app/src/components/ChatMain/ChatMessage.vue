@@ -409,11 +409,13 @@ const statusText = computed(() => {
 /* ===== 通用 ===== */
 .pad-msg { display: flex; width: 100%; }
 .pad-msg--user { justify-content: flex-end; }
+/* v0.5.0-D 第11轮: assistant message narrative 风格 — 更紧凑, 更像 paragraph 流,
+   跟 user bubble 的"框"风格对称. 不再有 step group box 突兀感 (D197). */
 .pad-msg--assistant {
   justify-content: flex-start;
   flex-direction: column;
   align-items: stretch;
-  gap: 6px;
+  gap: 2px;
   max-width: 100%;
 }
 
@@ -434,6 +436,8 @@ const statusText = computed(() => {
   line-height: var(--pad-lh-relaxed);
   color: var(--pad-fg-primary);
   word-wrap: break-word;
+  /* 跟 step head 缩进对齐: step head padding-left 4px, 缩进 0 让正文跟 step head 对齐 */
+  margin-top: 2px;
 }
 
 /* ===== v0.5.0-D: per-step body 列表 ===== */
@@ -460,39 +464,50 @@ const statusText = computed(() => {
   50.01%, 100% { opacity: 0; }
 }
 
-/* ===== v0.5.0-D 第4轮: per-step group 风格 (Pi TUI / MiniMax Code) ===== */
+/* ===== v0.5.0-D 第11轮: per-step group 风格 (MiniMax Code narrative 风格)
+   跟第4轮比, 去掉所有 box/card border, 让 step 头部变纯文字 inline 按钮, thinking
+   用纯斜体文字 (无背景块), tool card 变 inline pill. 整体跟 assistant message 主体
+   融合, 不再有"框框"突兀感 (D197 用户反馈).
+
+   关键变化:
+   - step head: 去掉 border + background, 仅保留 hover 微高亮
+   - step body: 去掉 left border, 仅 padding-left 缩进
+   - thinking: 去掉 background block, 纯 italic text
+   - tool: 变 inline pill (小标签, 不再是 full-width card)
+   - step number 圆形标签: 隐藏 (图2 风格不显示 step 编号)
+   - current step: 用 opacity 1 + 颜色微调, 不再 accent border ===== */
 .pad-step-group {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin: 4px 0;
+  gap: 2px;
+  margin: 0;
 }
 .pad-step-group__head {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
+  gap: 4px;
+  padding: 2px 4px;
   background: transparent;
-  border: 1px solid var(--pad-border);
-  border-radius: 6px;
-  font-size: var(--pad-fs-12);
-  color: var(--pad-fg-secondary);
+  border: none;
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
   cursor: pointer;
   text-align: left;
-  transition: background var(--pad-dur-fast) ease, border-color var(--pad-dur-fast) ease;
   align-self: flex-start;
   max-width: 100%;
   flex-wrap: wrap;
+  opacity: 0.7;
+  border-radius: 4px;
+  transition: opacity var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease, background var(--pad-dur-fast) ease;
 }
 .pad-step-group__head:hover {
+  opacity: 1;
   background: var(--pad-bg-hover);
-  border-color: var(--pad-fg-tertiary);
+  color: var(--pad-fg-secondary);
 }
 .pad-step-group.is-current > .pad-step-group__head {
-  /* 当前正在 streaming 的 step: 用 accent 色边框 + 浅色背景突出 */
-  border-color: var(--pad-accent);
-  background: var(--pad-accent-soft);
-  color: var(--pad-fg-primary);
+  opacity: 1;
+  color: var(--pad-fg-secondary);
 }
 .pad-step-group__chev {
   flex-shrink: 0;
@@ -505,22 +520,7 @@ const statusText = computed(() => {
   transform: rotate(90deg);
 }
 .pad-step-group__index {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--pad-muted);
-  color: var(--pad-fg-secondary);
-  font-size: var(--pad-fs-10);
-  font-weight: var(--pad-fw-medium);
-  flex-shrink: 0;
-}
-.pad-step-group.is-current > .pad-step-group__head .pad-step-group__index {
-  background: var(--pad-accent);
-  color: var(--pad-fg-inverse);
+  display: none;  /* 图2 风格不显示步骤编号, 隐藏 */
 }
 .pad-step-group__icon {
   flex-shrink: 0;
@@ -532,6 +532,7 @@ const statusText = computed(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-feature-settings: 'tnum';  /* 数字等宽对齐 */
 }
 .pad-step-group__indicator {
   display: inline-flex;
@@ -553,20 +554,17 @@ const statusText = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 4px 0 4px 24px;
-  border-left: 2px solid var(--pad-border);
-  margin-left: 12px;
-}
-.pad-step-group.is-current > .pad-step-group__body {
-  border-left-color: var(--pad-accent);
+  padding: 0 0 0 16px;
+  border-left: none;  /* 去掉 left border (图2 narrative 风格) */
+  margin-left: 4px;
 }
 .pad-step-group__thinking {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 6px 10px;
-  background: var(--pad-muted);
-  border-radius: 6px;
+  gap: 2px;
+  padding: 0;
+  background: transparent;
+  border: none;
 }
 .pad-step-thinking :deep(.pad-md),
 .pad-step-thinking :deep(.pad-md p) {
@@ -579,7 +577,7 @@ const statusText = computed(() => {
 .pad-step-group__tools {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 /* 旧 v0.4.6 Cursor 风格 (thinking-cursor / tools-cursor / body-list) 样式已不用, 删除
@@ -709,23 +707,31 @@ const statusText = computed(() => {
   padding: 0;
   list-style: none;
 }
+/* v0.5.0-D 第11轮: tool card 从 full-width card 改成 inline pill (MiniMax Code narrative 风格)
+   - card 变 single-line pill, flex-wrap 自动换行
+   - 没边框, 只 muted background 视觉提示是个 meta 元素
+   - status 变 simple dot + text (不再是 badge 背景)
+   - result 还是 mono code block 但缩进 + subtle border, 不抢主体焦点 */
 .pad-msg__tool-card {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  transition: background var(--pad-dur-fast) ease;
-}
-.pad-msg__tool-card:hover {
-  background: var(--pad-bg-hover);
+  align-items: flex-start;
+  align-self: flex-start;
+  max-width: 100%;
 }
 .pad-msg__tool-card-row {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: var(--pad-fs-12);
+  gap: 6px;
+  padding: 3px 8px;
+  background: var(--pad-muted);
+  border-radius: 4px;
+  font-size: var(--pad-fs-11);
   color: var(--pad-fg-secondary);
+  flex-wrap: wrap;
+  max-width: 100%;
+  cursor: default;
 }
 .pad-msg__tool-card-icon {
   opacity: 0.7;
@@ -738,7 +744,6 @@ const statusText = computed(() => {
   flex-shrink: 0;
 }
 .pad-msg__tool-card-args {
-  flex: 1;
   color: var(--pad-fg-tertiary);
   font-family: var(--pad-font-mono);
   font-size: var(--pad-fs-11);
@@ -746,39 +751,56 @@ const statusText = computed(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  max-width: 360px;
+  flex-shrink: 1;
 }
 .pad-msg__tool-card-status {
-  font-size: var(--pad-fs-11);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--pad-fs-10);
   color: var(--pad-fg-tertiary);
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--pad-muted);
   flex-shrink: 0;
+  margin-left: 2px;
+  padding-left: 6px;
+  border-left: 1px solid var(--pad-border);
+}
+.pad-msg__tool-card-status::before {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
 }
 .pad-msg__tool-card.is-running .pad-msg__tool-card-status {
   color: var(--pad-accent);
-  background: var(--pad-accent-soft);
 }
 .pad-msg__tool-card.is-error .pad-msg__tool-card-status {
   color: var(--pad-danger);
-  background: var(--pad-danger-subtle);
+}
+.pad-msg__tool-card.is-success .pad-msg__tool-card-status {
+  color: var(--pad-fg-tertiary);
 }
 .pad-msg__tool-card-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   background: transparent;
   border: none;
-  border-radius: var(--pad-radius-sm);
+  border-radius: 3px;
   cursor: pointer;
   color: var(--pad-fg-tertiary);
   flex-shrink: 0;
+  padding: 0;
+  margin-left: 2px;
 }
 .pad-msg__tool-card-toggle:hover {
-  background: var(--pad-bg-hover);
-  color: var(--pad-fg-primary);
+  background: var(--pad-bg-base);
+  color: var(--pad-fg-secondary);
 }
 .pad-msg__tool-card-chev {
   transition: transform var(--pad-dur-base) var(--pad-ease-in-out);
@@ -788,16 +810,18 @@ const statusText = computed(() => {
 }
 .pad-msg__tool-card-result {
   margin: 0;
-  padding: 6px 8px;
+  padding: 8px 10px;
   background: var(--pad-muted);
   border-radius: 4px;
   font-family: var(--pad-font-mono);
   font-size: var(--pad-fs-11);
+  line-height: var(--pad-lh-base);
   color: var(--pad-fg-secondary);
   white-space: pre-wrap;
   word-wrap: break-word;
-  max-height: 200px;
+  max-height: 240px;
   overflow: auto;
+  align-self: stretch;
 }
 
 /* ===== thinking 块 (v0.3.8.16: max-height 折叠, 之前 grid-template-rows 0fr 在某些浏览器漏边) ===== */
