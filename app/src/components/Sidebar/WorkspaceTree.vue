@@ -30,6 +30,15 @@
  *   - chip 点击直接 removeTag (轻量操作, 不走 confirm)
  *   - 右键菜单 'Add tag...' 已由 SessionContextMenu 内部变 input (Phase 4 wired)
  *   - onContextMenuAction.add-tag → sessionStore.addTag
+ *
+ * v0.6.0 Phase 5: 顶层 search bar (跨 workspace + 跨 archive).
+ *   - sidebar 顶部 🔍 input, v-model searchQuery
+ *   - searchQuery 非空时: 替换整个 workspace tree + archive section 为结果列表
+ *   - 结果: 复用 session item + 加 [from X] workspace 角标 + match hint
+ *   - 点结果: selectSession + 清空 search
+ *   - Esc (input 上): 有 query 时清空, 无 query 时 blur
+ *   - × 按钮: 清空 search
+ *   - 搜索逻辑: store.searchSessions 同步本地跑, 不 debounce (1000 session <10ms)
  */
 import { ref, computed, nextTick } from 'vue';
 import { storeToRefs } from 'pinia';
@@ -40,6 +49,8 @@ import {
   Trash2,
   Archive,
   MessageCircle,
+  Search,
+  X,
 } from 'lucide-vue-next';
 import { useSessionStore } from '@/stores/session';
 import { useChatStore } from '@/stores/chat';
@@ -336,10 +347,132 @@ function requestDeletePermanently(sessionId: string) {
     },
   });
 }
+
+// ====== Phase 5: 顶层 search (跨 workspace + 跨 archive) ======
+
+const searchQuery = ref('');
+const searchInputEl = ref<HTMLInputElement | null>(null);
+
+/** store.searchSessions 包装成 computed, 仅当 query 非空时跑 */
+const searchResults = computed(() => {
+  const q = searchQuery.value.trim();
+  if (!q) return [];
+  return sessionStore.searchSessions(q);
+});
+
+function clearSearch() {
+  searchQuery.value = '';
+  // 让 input 保持焦点方便继续输入
+}
+
+function onSearchEsc(e: KeyboardEvent) {
+  if (searchQuery.value) {
+    e.preventDefault();
+    e.stopPropagation();
+    clearSearch();
+  } else {
+    // 无 query, blur 让焦点还给 sidebar
+    (e.target as HTMLInputElement).blur();
+  }
+}
+
+function onSelectFromSearch(id: string) {
+  sessionStore.selectSession(id);
+  clearSearch();
+  // 让焦点从 input 拿开, 避免继续输入触发搜索
+  searchInputEl.value?.blur();
+}
+
+function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
+  if (match === 'title') return '匹配标题';
+  if (match === 'autoTitle') return '匹配自动标题';
+  return `匹配 tag: ${match.slice(4)}`;
+}
 </script>
 
 <template>
   <div class="pad-wstree">
+    <!-- ====== Phase 5: 顶部 search bar (跨 workspace + 跨 archive, 始终可见) ====== -->
+    <div class="pad-wstree__search">
+      <Search :size="12" :stroke-width="1.75" class="pad-wstree__search-icon" />
+      <input
+        ref="searchInputEl"
+        v-model="searchQuery"
+        type="text"
+        class="pad-wstree__search-input"
+        placeholder="搜索 session (跨工作区 + 归档)..."
+        @keydown.escape="onSearchEsc"
+      />
+      <button
+        v-if="searchQuery"
+        type="button"
+        class="pad-wstree__search-clear"
+        title="清空搜索"
+        @click="clearSearch"
+      >
+        <X :size="11" :stroke-width="2" />
+      </button>
+    </div>
+
+    <!-- ====== Phase 5: 搜索结果 (searchQuery 非空时显示) ====== -->
+    <template v-if="searchQuery">
+      <div class="pad-wstree__list">
+        <div class="pad-wstree__sub-label">
+          <span class="pad-wstree__sub-label-icon">
+            <Search :size="11" :stroke-width="1.75" />
+            搜索结果
+          </span>
+          <span class="pad-wstree__count">{{ searchResults.length }}</span>
+        </div>
+        <div
+          v-for="r in searchResults"
+          :key="'search-' + r.session.id"
+          class="pad-wstree__session pad-wstree__session--search-result"
+          :class="{
+            'is-active': activeSessionId === r.session.id,
+            'is-archived': r.session.archived,
+          }"
+          @click="onSelectFromSearch(r.session.id)"
+          @mouseenter="(e) => onSessionEnter(e, r.session.id)"
+          @mousemove="onSessionMove"
+          @mouseleave="onSessionLeave"
+        >
+          <span class="pad-wstree__session-dot" v-if="activeSessionId === r.session.id" />
+          <Archive
+            v-else-if="r.session.archived"
+            :size="11"
+            :stroke-width="1.75"
+            class="pad-wstree__session-icon"
+          />
+          <MessageCircle
+            v-else
+            :size="11"
+            :stroke-width="1.75"
+            class="pad-wstree__session-icon"
+          />
+          <div class="pad-wstree__session-body">
+            <span class="pad-wstree__session-title">{{ r.session.title || '新任务' }}</span>
+            <div class="pad-wstree__session-meta">
+              <span
+                class="pad-wstree__session-from"
+                :title="`来自工作区: ${getWorkspaceName(r.session.workspaceId)}`"
+              >
+                [from {{ getWorkspaceName(r.session.workspaceId) }}]
+              </span>
+              <span class="pad-wstree__session-match">· {{ matchHint(r.match) }}</span>
+            </div>
+          </div>
+        </div>
+        <div v-if="searchResults.length === 0" class="pad-wstree__search-empty">
+          <Search :size="20" :stroke-width="1.5" />
+          <p>没有匹配 "{{ searchQuery }}"</p>
+          <p class="pad-wstree__empty-hint">试试其他关键词 (标题 / 自动标题 / tag)</p>
+        </div>
+      </div>
+    </template>
+
+    <!-- ====== 正常 view (searchQuery 空时) ====== -->
+    <template v-else>
     <!-- ====== 顶部: 任务列表 section label + 加 workspace 按钮 ====== -->
     <div class="pad-wstree__head">
       <span class="pad-wstree__section-label">
@@ -591,6 +724,8 @@ function requestDeletePermanently(sessionId: string) {
         </div>
       </template>
     </div>
+    </template>
+    <!-- /v-else 正常 view -->
 
     <!-- v0.5.0-v0.1: 删底部 "Agent 团队" group (回滚 multi-agent persona) -->
 
@@ -1040,6 +1175,97 @@ function requestDeletePermanently(sessionId: string) {
 .pad-wstree__session-tag:hover {
   background: var(--pad-danger-subtle, rgba(239, 68, 68, 0.08));
   color: var(--pad-danger-text, #ef4444);
+}
+
+/* Phase 5: 搜索结果 item meta 行 ([from X] + 匹配类型) */
+.pad-wstree__session-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--pad-fs-10, 10px);
+  color: var(--pad-fg-tertiary, #888);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  line-height: 1.3;
+}
+.pad-wstree__session-match {
+  color: var(--pad-fg-tertiary, #888);
+  opacity: 0.8;
+}
+
+/* Phase 5: search bar (顶部) */
+.pad-wstree__search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  margin: 2px 2px 4px;
+  border: 1px solid var(--pad-border, rgba(0, 0, 0, 0.08));
+  border-radius: var(--pad-radius-md, 6px);
+  background: var(--pad-bg-card, #ffffff);
+  transition: border-color var(--pad-dur-fast, 0.15s) ease, box-shadow var(--pad-dur-fast, 0.15s) ease;
+}
+.pad-wstree__search:focus-within {
+  border-color: var(--pad-accent, #3b82f6);
+  box-shadow: 0 0 0 2px var(--pad-accent-soft, rgba(59, 130, 246, 0.18));
+}
+.pad-wstree__search-icon {
+  color: var(--pad-fg-tertiary, #888);
+  flex-shrink: 0;
+}
+.pad-wstree__search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--pad-fg-primary, #1a1a1a);
+  font: inherit;
+  font-size: var(--pad-fs-12, 12px);
+  padding: 0;
+  outline: none;
+  height: 20px;
+}
+.pad-wstree__search-input::placeholder {
+  color: var(--pad-fg-tertiary, #888);
+  opacity: 0.7;
+}
+.pad-wstree__search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--pad-radius-sm, 4px);
+  color: var(--pad-fg-tertiary, #888);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--pad-dur-fast, 0.15s) ease, color var(--pad-dur-fast, 0.15s) ease;
+}
+.pad-wstree__search-clear:hover {
+  background: var(--pad-bg-hover, rgba(0, 0, 0, 0.05));
+  color: var(--pad-fg-primary, #1a1a1a);
+}
+
+/* Phase 5: 搜索空结果 */
+.pad-wstree__search-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: var(--pad-sp-6, 16px) var(--pad-sp-3, 12px);
+  color: var(--pad-fg-tertiary, #888);
+  font-size: var(--pad-fs-12, 12px);
+}
+.pad-wstree__search-empty p { margin: 0; }
+.pad-wstree__search-empty .pad-wstree__empty-hint {
+  font-size: var(--pad-fs-11, 11px);
+  opacity: 0.7;
 }
 
 /* Phase 3: archive 列表 [from A] 角标 */
