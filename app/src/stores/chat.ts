@@ -749,6 +749,31 @@ export const useChatStore = defineStore('chat', () => {
                 assistant.usage = finalUsage;
                 console.log(`[chat] message_end: usage=${finalUsage.input}+${finalUsage.cacheRead} (cache) + ${finalUsage.cacheWrite} (write) → contextTokens=${contextTokensBySession.value[sessionId]}`);
               }
+              // v0.5.0-D 第13轮 fix (D200): 探测"空 message" — model 返回空响应
+              //   触发条件: message_end 来了, message 没有任何 content/thinking/tools,
+              //   也没有 streaming 状态切换 (agent_end 还没来, 模型可能 hang)
+              //   实测场景: sensenova-6.7-flash-lite 收到带 markdown blockquote 的 prompt
+              //   时偶发返回空 message, 不 emit agent_end, stream 永远卡住
+              //   D200 mitigation: 记录 warning 给 F12 console, 提示 user 改 model
+              //   不动 streaming 状态 (避免误关 stream 打破后续 turn), 只 console.warn
+              if (idx >= 0) {
+                const hasText = (assistant.content || '').trim().length > 0;
+                const steps = assistant.steps || [];
+                const hasAnyStep = steps.some((s) =>
+                  (s.stepText || '').trim().length > 0 ||
+                  (s.thinking || []).length > 0 ||
+                  (s.toolCalls || []).length > 0
+                );
+                if (!hasText && !hasAnyStep) {
+                  console.warn(
+                    '[chat] D200: message_end with EMPTY message. ' +
+                    'model returned no text_delta. ' +
+                    'This is a model behavior issue (e.g. sensenova-6.7-flash-lite), ' +
+                    'NOT a code bug. Mitigation: switch to a more capable model ' +
+                    '(deepseek-v4-flash / claude-haiku), or click Stop to force-exit.',
+                  );
+                }
+              }
               // v0.5.0-D 第10轮 revert: 删 message_end 拆 final content 覆盖 (跟 message_start
               //   一起删, 整套 splitMessageContentIntoStep 死循环去掉). v0.5.0-PR3 行为:
               //   message_end 只处理 usage, content 由 text_delta 累积, 流式显示一直正确.

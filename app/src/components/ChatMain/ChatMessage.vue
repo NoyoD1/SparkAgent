@@ -154,46 +154,77 @@ function quoteMessage() {
   }
 }
 
-// v0.5.0-D 第12轮 v2 (D199): 选区引用 — 鼠标滑动选中 assistant message 文字后, 浮动 "引用" button
+// v0.5.0-D 第12轮 v2 (D199) + 第13轮 (D200) fix: 选区引用 — 鼠标滑动选中 assistant message 文字后, 浮动 "引用" button
 //   user 反馈 "整段引用我希望也能支持对回复内容某些字段的引用, 比如鼠标滑动选中某些字段"
-//   监听 mouseup 拿 window.getSelection(), 检查 selection 是否在 message 内, 是则显示 button
-//   button 点击 → setQuote (只引用 selected text, 不是整条 message)
-//   selection 不在 message 内 / 选中为空 → 隐藏 button
+//
+// D200 fix 说明:
+//   之前 (D199 v1) 只在 per-message mouseup 上监听, 用户反馈
+//   1) 选区在 message 之外开始 (e.g. 列表项内深层 DOM), mouseup 不冒泡到 message 根 → button 不弹
+//   2) 浮动 button 位置跑到 message 顶部 (CSS 没 position: relative, button 跑到上层容器)
+//   修法:
+//   - CSS: .pad-msg--assistant 加 position: relative
+//   - JS: 改用 document-level mouseup + selectionchange 双兜底, 不依赖 per-message mouseup
+//   - 位置: 用 viewport 坐标 (rect.top / rect.left) + messageRect offset 算
+//   - debounce 50ms: 防止 selectionchange 高频触发性能问题
+
 const assistantRootRef = ref<HTMLElement | null>(null);
 const selectionQuoteVisible = ref(false);
 const selectionQuotePos = ref({ top: 0, left: 0 });
 const selectedTextRef = ref('');
 
+/**
+ * 核心检查: 拿当前 window selection, 判断是否在这个 assistant message 内
+ * - 是: 算出 button 位置 (selection 上方居中, 相对 message root)
+ * - 否: 隐藏 button
+ * 在 per-message mouseup, document mouseup, document selectionchange 都会调
+ */
+function checkSelectionInMessage() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+    selectionQuoteVisible.value = false;
+    return;
+  }
+  const range = sel.getRangeAt(0);
+  const rootEl = assistantRootRef.value;
+  if (!rootEl || !rootEl.contains(range.commonAncestorContainer)) {
+    selectionQuoteVisible.value = false;
+    return;
+  }
+  const text = sel.toString().trim();
+  if (!text || text.length < 1) {
+    selectionQuoteVisible.value = false;
+    return;
+  }
+  const rect = range.getBoundingClientRect();
+  const messageRect = rootEl.getBoundingClientRect();
+  const buttonW = 80;  // 跟 CSS min-width 一致
+  selectionQuotePos.value = {
+    // 相对 message root, 不是 viewport (button 是 position: absolute, parent 是 relative)
+    top: rect.top - messageRect.top - 36,  // 36 = button height + 4px gap
+    left: Math.max(0, rect.left - messageRect.left + rect.width / 2 - buttonW / 2),
+  };
+  selectedTextRef.value = text;
+  selectionQuoteVisible.value = true;
+}
+
 function handleAssistantMouseUp(_e: MouseEvent) {
-  // setTimeout 让浏览器 finalize selection
-  setTimeout(() => {
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-      selectionQuoteVisible.value = false;
-      return;
-    }
-    const text = sel.toString().trim();
-    if (!text || text.length < 1) {
-      selectionQuoteVisible.value = false;
-      return;
-    }
-    const range = sel.getRangeAt(0);
-    const rootEl = assistantRootRef.value;
-    if (!rootEl || !rootEl.contains(range.commonAncestorContainer)) {
-      selectionQuoteVisible.value = false;
-      return;
-    }
-    // 算出 button 位置: selection 上方, 居中
-    const rect = range.getBoundingClientRect();
-    const messageRect = rootEl.getBoundingClientRect();
-    const buttonW = 80;  // 跟 CSS min-width 一致
-    selectionQuotePos.value = {
-      top: rect.top - messageRect.top - 36,  // 36 = button height + gap
-      left: Math.max(0, rect.left - messageRect.left + rect.width / 2 - buttonW / 2),
-    };
-    selectedTextRef.value = text;
-    selectionQuoteVisible.value = true;
-  }, 10);
+  // per-message 入口, 立即 setTimeout 让浏览器 finalize selection
+  setTimeout(checkSelectionInMessage, 10);
+}
+
+function onDocumentMouseUp(_e: MouseEvent) {
+  // D200 fix: document-level 兜底 — selection 可能在 message 之外开始,
+  //   但 mouseup 触发时已经收尾, 这时调 checkSelection 仍能识别
+  setTimeout(checkSelectionInMessage, 10);
+}
+
+let selectionChangeTimer: ReturnType<typeof setTimeout> | null = null;
+function onDocumentSelectionChange() {
+  // D200 fix: selectionchange 兜底 — keyboard 选区 (shift+arrow) / 双击选词 / 编程式 select
+  //   都不会触发 mouseup, 必须靠 selectionchange 抓
+  // debounce 50ms 防高频触发
+  if (selectionChangeTimer) clearTimeout(selectionChangeTimer);
+  selectionChangeTimer = setTimeout(checkSelectionInMessage, 50);
 }
 
 function quoteSelection() {
@@ -206,14 +237,6 @@ function quoteSelection() {
   selectionQuoteVisible.value = false;
   // 清除浏览器选区 (避免后续操作误触)
   window.getSelection()?.removeAllRanges();
-}
-
-function onDocumentSelectionChange() {
-  // selection 消失 → 隐藏 button
-  const sel = window.getSelection();
-  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-    selectionQuoteVisible.value = false;
-  }
 }
 
 /**
@@ -304,13 +327,17 @@ watch(
 );
 onUnmounted(stopRotate);
 
-// v0.5.0-D 第12轮 v2 (D199): 选区引用 — 监听 document selectionchange
+// v0.5.0-D 第12轮 v2 (D199) + 第13轮 (D200): 选区引用 — 监听 document mouseup + selectionchange
 //   selection 变化时检查, 如果 selection 消失 → 隐藏浮动 button
+//   D200 fix: 加 document-level mouseup 兜底, 处理 selection 在 message 之外开始的 case
 onMounted(() => {
+  document.addEventListener('mouseup', onDocumentMouseUp);
   document.addEventListener('selectionchange', onDocumentSelectionChange);
 });
 onUnmounted(() => {
+  document.removeEventListener('mouseup', onDocumentMouseUp);
   document.removeEventListener('selectionchange', onDocumentSelectionChange);
+  if (selectionChangeTimer) clearTimeout(selectionChangeTimer);
 });
 
 const statusText = computed(() => {
@@ -544,6 +571,10 @@ const statusText = computed(() => {
   align-items: stretch;
   gap: 2px;
   max-width: 100%;
+  /* v0.5.0-D 第13轮 fix (D200): 浮动 button 需要这个作为定位 anchor.
+   *   之前没 position: relative → button position: absolute 跑到上层 positioned
+   *   容器 (chat scroll container), 看起来在 message 顶部错位. */
+  position: relative;
 }
 
 /* ===== user bubble (右) ===== */

@@ -80,6 +80,18 @@
 >
 > v2 选区引用: 加了 mouseup 监听, 鼠标滑动选中 assistant message 文字, 浮动 "引用" button 出现在 selection 上方; 点击 → 只引用选中部分, 不是整条 message.
 
+## v0.5.0-D 第13轮 (D200 修复)
+
+> D200 user 反馈 3 个引用相关问题:
+> 1. 引用并发送消息后 AI 没返回 → sensenova-6.7-flash-lite 小模型对 markdown blockquote prompt 偶发返回空 message, 不 emit agent_end, stream 卡住
+> 2. 浮动 "引用" button 位置偏移到 message 顶部 → CSS 没 `position: relative`, button 跑到上层 positioned 容器
+> 3. 有时候选区无法触发 "引用" button → selection 可能在 message 之外开始 (e.g. 列表项内深层 DOM), per-message mouseup 不冒泡到 message 根
+>
+> 修法:
+> - 图1 (空 response): message_end handler 加 warning log, 提示 user 改 model (deepseek-v4-flash / claude-haiku). 不动 streaming 状态 (避免误关 stream 打破后续 turn)
+> - 图2 (位置偏移): `.pad-msg--assistant` 加 `position: relative`, button 定位 anchor 修到 message 自身
+> - 图3 (selection 漏): 改用 document-level mouseup + selectionchange 双兜底 (debounce 50ms), 抽出 `checkSelectionInMessage` 公共函数, 3 个入口都调
+
 ## 后续规划
 
 ### P0 (v0.6)
