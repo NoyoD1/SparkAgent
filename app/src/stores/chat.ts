@@ -24,7 +24,7 @@ import { useSessionStore } from './session';
 import { useUiStore } from './ui';
 import { useSkillsStore } from './skills';
 import { estimateTokens } from '@/lib/tokenEstimate';
-import type { ContextBreakdown } from '@/lib/tokenEstimate';
+import type { ContextBreakdown, ContextBreakdownReal } from '@/lib/tokenEstimate';
 
 export type { ChatMessage, ThinkingBlock, ToolCallBlock, Step };
 
@@ -301,10 +301,15 @@ export const useChatStore = defineStore('chat', () => {
   function getContextWindow(): number {
     // v0.4.4.6: 优先读 activeModel.contextWindow, 缺省回退到 200K.
     //   activeModel 来自 configStore.activeProvider?.activeModelId 找到的 model
+    //   v0.5.0-D 第21轮 (D208) BUG FIX: 之前用 `??` 只处理 null/undefined, 但 model
+    //   配了 contextWindow=0 (Settings 留空 / 导入 / 用户填 0) 时 ?? 不回退, 直接返 0
+    //   → contextWindow=0 → percent = tokens/0 = 0% (用户看到的"上下文 0%"现象)
+    //   修法: 用 `||` 把 0 也视为 fallback. 任何非正数都回退到 DEFAULT_CONTEXT_WINDOW
     const active = sessionStore.activeSessionId;  // sessionId 不会影响 getContextWindow, 保留为了语义
     void active;
     const activeModel = configStore.activeModel;
-    return activeModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+    const cw = activeModel?.contextWindow;
+    return cw && cw > 0 ? cw : DEFAULT_CONTEXT_WINDOW;
   }
   function isCompacting(sessionId: string): boolean {
     return compactionBySession.value[sessionId] === 'in_progress';
@@ -398,6 +403,47 @@ export const useChatStore = defineStore('chat', () => {
       skills: pct(breakdown.skills),
       memory: pct(breakdown.memory),
       other: pct(breakdown.other),
+    };
+  }
+
+  // v0.5.0-D 第21轮 (D208): Token breakdown REAL 数据 (Pi SDK lastUsage 4 分类)
+  //   跟 getContextBreakdown (6 分类 FE 估算) 互补, 都是给 user 看的:
+  //   - 6 分类 (FE 估算): "用在哪里" (消息/工具/系统提示词/技能/记忆/其他)
+  //   - 4 分类 (REAL): "用多少" (input/output/cacheRead/cacheWrite, LLM 端实测)
+  //   D208 加这个是因为 user 反馈: 当前 6 分类是 FE 估算不准, 想看 LLM 端真实数据.
+  //   数据源: lastUsageBySession[sid] (message_end 写入, 持久化到 localStorage)
+  //   缺数据时 (没发过 message): 全 0, UI 兜底显示 "暂无数据"
+  function getContextBreakdownReal(sessionId: string): ContextBreakdownReal {
+    const usage = lastUsageBySession.value[sessionId];
+    if (!usage) {
+      return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    }
+    return {
+      input: usage.input ?? 0,
+      output: usage.output ?? 0,
+      cacheRead: usage.cacheRead ?? 0,
+      cacheWrite: usage.cacheWrite ?? 0,
+    };
+  }
+  function getContextBreakdownRealPercent(real: ContextBreakdownReal): {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+  } {
+    // 分母用 total (input + output + cacheRead + cacheWrite), 不是仅 context
+    //   让 user 看到完整 token 流量分布 (input 是 context, output 是 response,
+    //   cacheRead 是命中, cacheWrite 是新写)
+    const sum = real.input + real.output + real.cacheRead + real.cacheWrite;
+    if (sum === 0) {
+      return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    }
+    const pct = (n: number) => Math.round((n / sum) * 1000) / 10;
+    return {
+      input: pct(real.input),
+      output: pct(real.output),
+      cacheRead: pct(real.cacheRead),
+      cacheWrite: pct(real.cacheWrite),
     };
   }
 
@@ -1266,6 +1312,9 @@ export const useChatStore = defineStore('chat', () => {
     // v0.5.0-D 第12轮: 6 分类 context breakdown
     getContextBreakdown,
     getContextBreakdownPercent,
+    // v0.5.0-D 第21轮 (D208): 4 分类 REAL 数据 (Pi SDK lastUsage, 不是 FE 估算)
+    getContextBreakdownReal,
+    getContextBreakdownRealPercent,
     // v0.5.0-D 第12轮: 引用回复 (quote & reply)
     setQuote,
     clearQuote,
