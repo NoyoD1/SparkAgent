@@ -421,13 +421,21 @@ export const useChatStore = defineStore('chat', () => {
     // v0.5.0-D 第12轮: 引用回复 — 如果有 quote, 把 quote 作为 markdown blockquote 前缀拼到 user message.
     //   引用格式: "> <quote content>\n\n<user text>" (跟 markdown 通用 blockquote 语法一致, LLM 能识别)
     //   引用本意: 让 LLM 知道 user 在哪条历史消息基础上回复 (跟 "fork from message N" 不同的轻量版).
+    //   D201 fix: 加 [引用上文] 标签 + [我的问题] 标签, 让 model 一眼看出 "user 引用了上文" + "user 在问什么"
+    //   之前 (D199) 只用 markdown blockquote 格式, sensenova-6.7-flash-lite 等小模型把 "> " 解读成
+    //   "我 (AI) 的回复里有没有引用", 答 "我没引用任何东西", 跟用户问的 "我引用了什么" 不同义
+    //   显式标签让 model 看到 prompt 结构, 不会误解读
     const quote = quoteBySession.value[sessionId];
     let fullUserText = text;
     if (quote && quote.content.trim()) {
       // 引用内容可能多行, 逐行加 "> " 前缀 (markdown blockquote 语法)
       const quotedLines = quote.content.split('\n').map((line) => line.trim() ? `> ${line}` : '>').join('\n');
-      fullUserText = `${quotedLines}\n\n${text}`;
-      console.log('[chat] sendPrompt: with quote (messageId=', quote.messageId, ', len=', quote.content.length, ')');
+      // 格式: "[引用上文]\n> ...\n\n[我的问题]\n<user text>"
+      //   双重标识: 标签 (人类可读, model 必识别) + markdown blockquote (LLM 训练常见格式)
+      fullUserText = `[引用上文 (messageId=${quote.messageId})]\n${quotedLines}\n\n[我的问题]\n${text}`;
+      console.log('[chat] sendPrompt: with quote (messageId=', quote.messageId, ', len=', quote.content.length, ', fullLen=', fullUserText.length, ')');
+      // D201 调试: 打印实际发送的 user message 全文, F12 console 可验证
+      console.log('[chat] sendPrompt: fullUserText =\n', fullUserText);
     }
     appendUserMessage(sessionId, fullUserText);
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: true };

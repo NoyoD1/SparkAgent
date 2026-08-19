@@ -521,6 +521,19 @@ const statusText = computed(() => {
       </span>
     </div>
 
+    <!-- v0.5.0-D 第14轮 fix (D201): streaming 期间 placeholder
+         之前 (D200 前): step group 因为没 thinking/tools 不渲染, text body 因为没
+         stepText 也不渲染, empty state 因为 isStreaming=true 不渲染 → 用户发了消息后
+         视觉上没任何反馈, 像 "loading 不见了". 修法: streaming + 无内容时显示 placeholder
+         (Loader2 + statusText 跟 phase 联动, 跟 Composer 下面 ComposerStatus 一致) -->
+    <div
+      v-if="isStreaming && !hasContent && !hasThinkingOrTools && !errorMessage"
+      class="pad-msg__streaming-placeholder"
+    >
+      <Loader2 :size="13" :stroke-width="1.75" class="pad-msg__streaming-spinner" />
+      <span>{{ statusText }}</span>
+    </div>
+
     <!-- v0.3.8.15: stream 结束但 4 类内容都为空时, 显示具体 error 信息 -->
     <div
       v-if="!isStreaming && !hasContent && !hasThinkingOrTools && !errorMessage"
@@ -1211,6 +1224,22 @@ const statusText = computed(() => {
 .pad-msg__copied { color: var(--pad-accent); }
 /* v0.5.0-D 第12轮: 引用 button active 状态 (已引用这条消息) */
 .pad-msg__action :deep(svg.is-active) { color: var(--pad-accent); }
+
+/* v0.5.0-D 第14轮 (D201): streaming 期间 placeholder
+ *   之前用户发消息后没 loading 反馈 (D200 截图), 现在显示 Loader2 + 跟 phase 联动的文字
+ *   跟整体 minimalist Copy 主题一致: 灰字 + 1.4s 旋转 spinner */
+.pad-msg__streaming-placeholder {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-tertiary);
+}
+.pad-msg__streaming-spinner {
+  animation: pad-msg-cursor-blink 1.4s linear infinite;
+  opacity: 0.7;
+}
 
 /* v0.5.0-D 第12轮 v2 (D199): 选区引用浮动 button
    鼠标滑动选中文本后, 浮动 button 出现在 selection 上方
