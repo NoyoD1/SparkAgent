@@ -39,6 +39,10 @@
  *   - Esc (input 上): 有 query 时清空, 无 query 时 blur
  *   - × 按钮: 清空 search
  *   - 搜索逻辑: store.searchSessions 同步本地跑, 不 debounce (1000 session <10ms)
+ *
+ * v0.6.0 Phase 6: 显示 s.autoTitle (LLM 自动生成) > s.title (user 手动) > '新任务'.
+ *   - 3 处 session item 标题 + hover preview 标题 + Archive/Delete confirm message
+ *   - 触发在 chat.ts sendPrompt first message 检测, 跟本组件无关
  */
 import { ref, computed, nextTick } from 'vue';
 import { storeToRefs } from 'pinia';
@@ -85,7 +89,8 @@ function getSessionPreview(sessionId: string): SessionPreview | null {
   const msgs = chatStore.getMessages(sessionId);
   const firstUser = msgs.find((m) => m.role === 'user');
   return {
-    title: s.title || '新任务',
+    // Phase 6: 优先 autoTitle (LLM 生成), fallback title (user 手动改), 再 fallback '新任务'
+    title: s.autoTitle || s.title || '新任务',
     path: ws?.path ?? '(无工作区)',
     firstUser: firstUser?.content ?? '',
     messageCount: msgs.length,
@@ -326,7 +331,7 @@ function requestArchive(sessionId: string) {
   if (!s) return;
   showConfirm({
     title: '归档这个 session?',
-    message: `「${s.title || '新任务'}」\n\n归档后会从工作区列表移除, 可在底部归档区恢复或永久删除.`,
+    message: `「${s.autoTitle || s.title || '新任务'}」\n\n归档后会从工作区列表移除, 可在底部归档区恢复或永久删除.`,
     confirmLabel: '归档',
     onConfirm: () => {
       sessionStore.archiveSession(sessionId);
@@ -339,7 +344,7 @@ function requestDeletePermanently(sessionId: string) {
   if (!s) return;
   showConfirm({
     title: '永久删除这个 session?',
-    message: `「${s.title || '新任务'}」\n\n此操作不可撤销.\n\nPi SDK 的对话历史仍保留在本地 jsonl 文件中, 但前端不再可见.`,
+    message: `「${s.autoTitle || s.title || '新任务'}」\n\n此操作不可撤销.\n\nPi SDK 的对话历史仍保留在本地 jsonl 文件中, 但前端不再可见.`,
     confirmLabel: '永久删除',
     danger: true,
     onConfirm: () => {
@@ -573,7 +578,7 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
                   />
                   <span v-else class="pad-wstree__session-title">
                     <span v-if="s.pinned" class="pad-wstree__session-pin">📌</span>
-                    {{ s.title || '新任务' }}
+                    {{ s.autoTitle || s.title || '新任务' }}
                   </span>
                   <!-- Phase 4: tag chip row (仅当有 tag 且不在 rename 才显示) -->
                   <div
@@ -638,7 +643,7 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
                   @dblclick.stop
                   @contextmenu.stop
                 />
-                <span v-else class="pad-wstree__session-title">{{ s.title || '新任务' }}</span>
+                <span v-else class="pad-wstree__session-title">{{ s.autoTitle || s.title || '新任务' }}</span>
                 <!-- Phase 4: tag chip row -->
                 <div
                   v-if="s.tags && s.tags.length > 0 && renamingSessionId !== s.id"
@@ -701,7 +706,7 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
           <Archive v-else :size="11" :stroke-width="1.75" class="pad-wstree__session-icon" />
           <div class="pad-wstree__session-body">
             <span class="pad-wstree__session-title">
-              {{ s.title || '新任务' }}
+              {{ s.autoTitle || s.title || '新任务' }}
               <span class="pad-wstree__session-from" :title="`来自工作区: ${getWorkspaceName(s.workspaceId)}`">
                 [from {{ getWorkspaceName(s.workspaceId) }}]
               </span>

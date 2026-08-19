@@ -14,6 +14,15 @@
  * v0.3.5+ sendPrompt(content) — 不再要求调用方传 sessionId.
  * - 有 active session → 直接发
  * - 没 active session → 自动确保有 workspace (没就 picker), 新建 session, 再发
+ *
+ * v0.6.0 Phase 6: autoTitle ghost prompt (first message trigger).
+ *   - sendPrompt 检测 first message (新建 session 或 0 messages + 无 autoTitle + title 默认)
+ *   - fire-and-forget 触发 triggerGhostTitlePrompt, 内部 spawn 独立 sidecar (ghostSessionId
+ *     = `__ghost_<mainId>__<ts>__`), 走同样 LLM 跑"生成 title" prompt
+ *   - ghost sidecar 创建独立 jsonl, 主 session history 不受影响 (等价"sidecar skips append")
+ *   - LLM 返的 title 经 cleanGhostTitle 清洗 → session.setAutoTitle
+ *   - ghostTriggeredForSession Set 防重 (retry / 重新 sendPrompt 不再触发)
+ *   - 失败 (网络/timeout/空 title) 不抛, 仅 log warn
  */
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
@@ -704,6 +713,7 @@ export const useChatStore = defineStore('chat', () => {
 
     // 1. 确保有 active session
     let sessionId = sessionStore.activeSessionId;
+    let wasNewlyCreated = false;
     if (!sessionId) {
       let wid = sessionStore.activeWorkspaceId;
       if (!wid || sessionStore.workspaces.length === 0) {
@@ -721,8 +731,21 @@ export const useChatStore = defineStore('chat', () => {
       }
       const sess = sessionStore.addSession(wid, text.slice(0, 30) || '新任务');
       sessionId = sess.id;
+      wasNewlyCreated = true;
       console.log('[chat] sendPrompt: created new session', sessionId);
     }
+
+    // Phase 6: 检测 first message (用于触发 ghost title prompt).
+    //   条件: 新建 session 或 (已有 session 但 0 messages) + 没 autoTitle + title 是默认.
+    //   ghostTriggeredForSession 防重 (retry / 重新 sendPrompt 不重复触发).
+    const sessMeta = sessionStore.sessions.find((s) => s.id === sessionId);
+    const isFirstMessageForGhost =
+      !opts.fromAutoRetry &&
+      (wasNewlyCreated || getMessages(sessionId).length === 0) &&
+      !sessMeta?.autoTitle &&
+      (!sessMeta?.title || sessMeta.title === '新任务') &&
+      text.length >= 4 &&  // 太短的消息 (e.g. "hi") 不值得生成 title
+      !ghostTriggeredForSession.has(sessionId);
 
     // 2. append user msg + streaming marker (assistant placeholder 等 message_start 真的来再 push)
     // v0.5.0-D 第12轮: 引用回复 — 如果有 quote, 把 quote 内容拼到 user message 前面.
@@ -1366,7 +1389,7 @@ export const useChatStore = defineStore('chat', () => {
       //   store 里 `appendUserMessage(sessionId, fullUserText)` 存了完整版本 (含 quote),
       //   但 sidecar 收到的是不含 quote 的版本 → AI 看不到引用, 报 "你没引用任何外部来源".
       //   修法: sendPrompt 传 fullUserText, 跟 store 保持一致.
-      await piTauri.sendPrompt(sessionId, fullUserText, () => ({
+      const cfgFn = () => ({
         providerId: active.id,
         provider: active.type,
         model: model.id,
@@ -1384,8 +1407,18 @@ export const useChatStore = defineStore('chat', () => {
           maxRounds: model.maxRounds,
           reasoning: model.reasoning,
         },
-      }));
+      });
+      await piTauri.sendPrompt(sessionId, fullUserText, cfgFn);
       console.log('[chat] sendPrompt: piTauri.sendPrompt resolved');
+
+      // Phase 6: fire-and-forget ghost title prompt (仅 first message, 不阻塞主流程)
+      if (isFirstMessageForGhost) {
+        ghostTriggeredForSession.add(sessionId);
+        const baseCfg = cfgFn();
+        triggerGhostTitlePrompt(sessionId, text, baseCfg).catch((e) => {
+          console.warn('[chat] ghost: trigger failed (ignored)', e);
+        });
+      }
     } catch (e) {
       console.error('[chat] sendPrompt FAILED', e);
       errorBySession.value = { ...errorBySession.value, [sessionId]: e instanceof Error ? e.message : String(e) };
@@ -1720,6 +1753,122 @@ export const useChatStore = defineStore('chat', () => {
         ...autoRetryCountBySession.value,
         [sessionId]: 0,
       };
+    }
+  }
+
+  // ===== Phase 6: autoTitle ghost prompt (first message trigger) =====
+  // 思路: 主 session sendPrompt 进来后, 如果是 first message (no messages + no autoTitle +
+  //   title 是默认 "新任务" 或空), spawn 一个 separate sidecar (用 ghostSessionId), 走
+  //   同样的 LLM, prompt 是 "generate a concise title for this user message". 拿到 LLM
+  //   返的 title → session.setAutoTitle. 完事 kill sidecar.
+  // 关键: ghost sidecar 用一个独立的 session id, sidecar 自己会创建独立的 jsonl 文件, 主
+  //   session 的 history 不受影响 (跟"sidecar skips append"效果等价, 实现走单独 sidecar).
+  const ghostTriggeredForSession = new Set<string>();
+  const GHOST_TIMEOUT_MS = 45_000;
+
+  /** 清洗 LLM 返的 title: 去 "Title:" 前缀 / 引号 / markdown, cap 60 字 */
+  function cleanGhostTitle(raw: string): string {
+    let t = raw.trim();
+    // 去 leading "Title:" / "标题:" prefix
+    t = t.replace(/^(标题|title)\s*[:：]\s*/i, '');
+    // 去外层引号 (英文/中文)
+    t = t.replace(/^["'`「《]+/, '').replace(/["'`」》]+$/, '');
+    // 去 markdown 标记 (###, **, __)
+    t = t.replace(/^[#*_~`]+/, '').replace(/[#*_~`]+$/, '');
+    // cap 60 chars
+    if (t.length > 60) t = t.slice(0, 60);
+    return t.trim();
+  }
+
+  /** 从 AgentMessage.content (string | AgentContentBlock[]) 提纯 text */
+  function extractTextFromMessage(content: string | Array<{ type: string; text?: string; thinking?: string }>): string {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+    return content
+      .filter((b) => b.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text!)
+      .join('');
+  }
+
+  /**
+   * Trigger ghost title prompt (fire-and-forget). cfg 来自 sendPrompt 内部统一构造的
+   * ClientConfig snapshot, 这里强制把 sessionId 改 null 让 sidecar 走独立 jsonl.
+   * 不抛错给 caller — 任何失败都 catch log, 不影响主 sendPrompt.
+   */
+  async function triggerGhostTitlePrompt(
+    mainSessionId: string,
+    userMessage: string,
+    baseCfg: any,
+  ): Promise<void> {
+    const ghostSessionId = `__ghost_${mainSessionId}__${Date.now().toString(36)}__`;
+    const ghostPrompt = [
+      'You are a title generator. Given the user\'s first message in a chat, output a concise title (max 8 words, 30 characters) that captures the topic.',
+      '',
+      'Strict constraints:',
+      '- Output ONLY the title, nothing else',
+      '- No quotes, no markdown, no bullet points, no leading labels',
+      '- Match the language of the user message (Chinese → Chinese title, English → English title)',
+      '- No trailing punctuation',
+      '',
+      'User message:',
+      '"""',
+      userMessage,
+      '"""',
+      '',
+      'Title:',
+    ].join('\n');
+
+    console.log('[chat] ghost: triggering for main=', mainSessionId, 'ghost=', ghostSessionId, 'userMsgLen=', userMessage.length);
+
+    // 临时 listener 收集 assistant 文本
+    let accumulatedTitle = '';
+    let agentEnded = false;
+    const off = await piTauri.on((event) => {
+      // 只关心 ghost session
+      if (!('sessionId' in event) || event.sessionId !== ghostSessionId) return;
+      if (event.type === 'message_end' && event.message?.role === 'assistant') {
+        const text = extractTextFromMessage(event.message.content);
+        if (text) accumulatedTitle = text;  // 用 message_end 的 final (比 streaming 准)
+      } else if (event.type === 'agent_end') {
+        agentEnded = true;
+        const finalTitle = cleanGhostTitle(accumulatedTitle);
+        if (finalTitle && finalTitle.length >= 1) {
+          sessionStore.setAutoTitle(mainSessionId, finalTitle);
+          console.log('[chat] ghost: setAutoTitle for', mainSessionId, '=', JSON.stringify(finalTitle));
+        } else {
+          console.warn('[chat] ghost: empty/invalid title, skip setAutoTitle. raw=', JSON.stringify(accumulatedTitle));
+        }
+        try { off(); } catch (e) { /* ignore */ }
+        piTauri.killSidecar(ghostSessionId).catch((e) => {
+          console.warn('[chat] ghost: killSidecar failed (ignored)', e);
+        });
+      } else if (event.type === 'error') {
+        console.warn('[chat] ghost: error event, aborting', event);
+        try { off(); } catch (e) { /* ignore */ }
+        piTauri.killSidecar(ghostSessionId).catch(() => { /* ignore */ });
+      }
+    });
+
+    // Timeout 兜底
+    const timeoutTimer = setTimeout(() => {
+      if (!agentEnded) {
+        console.warn('[chat] ghost: timeout after', GHOST_TIMEOUT_MS, 'ms, killing sidecar');
+        try { off(); } catch (e) { /* ignore */ }
+        piTauri.killSidecar(ghostSessionId).catch(() => { /* ignore */ });
+      }
+    }, GHOST_TIMEOUT_MS);
+
+    // Spawn ghost sidecar + 发 prompt
+    // 关键: 复用 send_prompt invoke, sessionId 传 ghostId, cfg.sessionId 改 null
+    //   (让 sidecar 创建独立的 jsonl 文件, 主 session history 不受影响)
+    try {
+      const ghostCfg = { ...baseCfg, sessionId: null };
+      await piTauri.sendPrompt(ghostSessionId, ghostPrompt, () => ghostCfg);
+      console.log('[chat] ghost: sidecar spawned + prompt sent', ghostSessionId);
+    } catch (e) {
+      clearTimeout(timeoutTimer);
+      try { off(); } catch (e2) { /* ignore */ }
+      console.warn('[chat] ghost: spawn failed (ignored)', e);
     }
   }
 
