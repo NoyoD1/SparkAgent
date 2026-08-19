@@ -95,3 +95,6 @@ sidecar/smoke-test.jsonl
 
 .tauri-*.log
 .tauri-*.log.bak
+
+# 临时 doc 备份 (重写时备份, 验证后可 git rm 彻底删)
+.doc-backup-*

@@ -6,11 +6,12 @@
 ## 什么是 ADR
 
 - 一次决策一个 md 文件，文件名 `NNNN-<短名>.md`（NNNN 4 位递增）
-- **不可变**：决策落地后不修改，只追加 `## 后续 Review` 章节
-- 包含：背景 / 备选 / 决策 / 后果 / 何时 revisit
+- **不可变**：决策落地后不修改原文章节，只追加 `## 后续 Review` 段
+- 推翻旧决策：新开 ADR，标 `Supersedes: ADR-XXXX`；旧 ADR 状态改为 `Superseded by ADR-XXXX`
+- 包含：背景 / 备选 / 决策 / 后果 / 何时 Revisit
 - 模板见 [template.md](template.md)
 
-### 什么时候需要写 ADR
+## 什么时候需要写 ADR
 
 ✅ **要写**（重新选型 / 重边界 / 跨模块影响）：
 - 选框架/库/SDK 替代方案
@@ -24,11 +25,9 @@
 - 单 tool / 单 store 内部逻辑
 - 这种记 commit message + 代码注释就够了
 
-## Workflow（2026-08-17 立）
+## Workflow
 
-> **新工作前先看 ADR，避免后面对不上**
-
-1. **新功能 / 大改之前**: `ls doc/04-adr/` + `grep` 关键词找相关 ADR
+1. **新功能 / 大改之前**: 读 [README.md](../README.md) 当前状态表, 找相关 ADR
 2. **如果有相关 ADR**: 读决策背景和"何时 Revisit" — 决策可能已经过期
 3. **如果决策过期**: 改原 ADR 加 `## 后续 Review` 章节（不删原文），同时写新 ADR 标 `Supersedes: ADR-XXXX`
 4. **如果决策被推翻**: 新 ADR 替代，旧 ADR 标 `Superseded by ADR-XXXX`
@@ -36,68 +35,61 @@
 
 ## 已记录的决策
 
-| # | 标题 | 状态 | 日期 | v0.4 相关 | 后续 Review |
-|---|---|---|---|---|---|
-| [0001](0001-tauri-vs-electron.md) | Tauri 2 vs Electron | Accepted | 2026-08-12 | 🟢 | - |
-| [0002](0002-minimalist-design.md) | Minimalist Copy 设计系统 | Accepted | 2026-08-16 | 🟢 | - |
-| [0003](0003-desktop-only-sidecar.md) | Desktop-only + Node sidecar 拆分 | Accepted | 2026-08-12 | 🟢 | - |
-| [0004](0004-byok-os-keychain.md) | BYOK + OS Keychain | Accepted | 2026-08-12 | 🟢 | - |
-| [0005](0005-provider-rust-file.md) | Provider 持久化 → Rust 文件 | Accepted | 2026-08-15 | 🟡 | - |
-| [0006](0006-marked-v18-gfm.md) | marked v18 GFM 后处理修法 | Accepted | 2026-08-15 | 🟡 | - |
-| [0007](0007-no-ui-library.md) | 不引入 UI 组件库 | Accepted | 2026-08-14 | 🟡 | - |
-| [0008](0008-tauri-invoke-listen.md) | Tauri invoke/listen 替代 WS | Accepted | 2026-08-12 | 🟢 | - |
-| [0009](0009-sidecar-spawn-per-prompt.md) | Sidecar 一次一 spawn | Accepted | 2026-08-12 | 🟢 | - |
-| [0010](0010-sidecar-direct-fetch.md) | Sidecar 直接 fetch 不引 SDK | **Superseded by 0012** | 2026-08-12 | 🟢 | - |
-| [0011](0011-decorations-false.md) | `decorations: false` 自定义 title bar | Accepted | 2026-08-16 | 🟡 | - |
-| [0012](0012-pi-sdk-integration.md) | 集成 pi-ai + pi-agent-core | Accepted | 2026-08-16 | 🟢 | [§实施细节变更 (v0.4.2 step 1)](#0012-后续-review) — new Agent → createAgentSession + Extension API 接管 tool call |
-| [0013](0013-session-manager-compact.md) | v0.4.2 上下文管理 (createAgentSession + SessionManager) | Accepted | 2026-08-17 | 🟢 | [§后续 Review](#0013-后续-review-v042-step-1-2026-08-17) — 调研发现 AgentSession 内置 auto_retry_* / compaction_* 事件 + permission 改 Extension |
-| [0014](0014-tool-permission-3-modes.md) | Tool permission 3 模式 (ask/smart/allow) | Accepted | 2026-08-17 | 🟢 | [§后续 Review](#0014-后续-review-v042-step-1-2026-08-17) — 实现从 beforeToolCall 改 Extension pi.on("tool_call") |
-| [0015](0015-llm-retry-5x-exponential-backoff.md) | LLM 失败 5 次指数退避重试 (1s/2s/4s/8s/16s) | Accepted | 2026-08-17 | 🟢 | [§后续 Review](#0015-后续-review-v042-step-1-2026-08-17) — 实现从 sidecar 自写状态机改用 AgentSession 内置 auto_retry_*, IPC 事件名 retry_* → auto_retry_* |
-| [0016](0016-stream-hang-watchdog.md) | Stream hang watchdog (30s 没新 event → abort + finishUp 兜底) | Accepted | 2026-08-17 | 🟢 | - |
+> **重写规则 (2026-08-19)**: 旧 doc 全部备份到 `.doc-backup-2026-08-19/`. 新 doc 从零写, ADR 编号重新分配. 旧 ADR 不在下面列表里的, 走 backup 路径查 `.doc-backup-2026-08-19/04-adr/<old-id>.md`.
+>
+> **ADR 分类 (2026-08-19 立)**: 9 个 Technical ADR (0001-0009, 架构决策) + 8 个 Functional ADR (0010-0017, 业务功能 spec + 核验). 推翻/历史走 0090+.
 
-> 🟢 = v0.4 实施时必参考 / 🟡 = 间接影响
-> **后续 Review 列**: 该 ADR 是否被后续实施细节调整 (只加 "## 后续 Review" 段, 不改原决策)
+### Technical ADR (架构 / 选型 / 协议)
 
-## 待补的 ADR（次要决策, 引用时再补）
+| # | 标题 | 状态 | 日期 | 关联 |
+|---|---|---|---|---|
+| [0001](0001-tauri-2-shell.md) | Tauri 2 桌面壳 | Accepted | 2026-08-12 | - |
+| [0002](0002-data-local-byok.md) | 数据本机 + BYOK | Accepted | 2026-08-12 | - |
+| [0003](0003-no-ui-library.md) | 不引入 UI 组件库 | Accepted | 2026-08-14 | - |
+| [0004](0004-tauri-invoke-listen.md) | Tauri invoke/listen IPC | Accepted | 2026-08-12 | - |
+| [0005](0005-pi-sdk-integration.md) | 集成 Pi SDK 0.84.2 | Accepted | 2026-08-16 | - |
+| [0006](0006-rpc-mode-migration.md) | v0.5.0 — sidecar 重写走 Pi SDK runRpcMode | Accepted | 2026-08-17 | 0005 |
+| [0007](0007-session-management.md) | Session 管理 (per-session + per-workspace 目录隔离) | Accepted | 2026-08-17 → 2026-08-18 翻转 | 0005, 0006 |
+| [0008](0008-tool-permission.md) | Tool permission 3 模式 + workspace 沙箱 | Accepted | 2026-08-17 → 2026-08-18 沙箱 | 0005, 0006 |
+| [0009](0009-single-agent-design.md) | Single Agent Design | Accepted | 2026-08-18 16:30 | - |
+| [0090](0090-multi-agent-persona-superseded.md) | Multi-Agent Persona | **Superseded by 0009** | 2026-08-18 | - |
 
-> 之前 README 里"待补"列表用了 0012/0013 等已被主决策占用的编号，已修复重编号到 0017+。
-> 这些都是 token 级 / 模式级决策, **改起来不破坏架构**, 等真正实施时补 ADR 即可。
+### Functional ADR (业务模块 spec + 核验)
 
-- **ADR-0017**: 5 档嵌套调色板（v0.3.8.25 拍板: page / card / popover / hover / active）
-- **ADR-0018**: 不引入 Tailwind（v0.3.8.19 拍板, 走 pure CSS `--pad-*` 变量）
-- **ADR-0019**: API key mask 函数 `sk-***XYZW`（v0.3.7 R5）
-- **ADR-0020**: Provider ID `crypto.randomUUID()` 128-bit（v0.3.7 R2）
-- **ADR-0021**: `window.__piTauri` 仅 DEV 暴露（v0.3.7 R1）
-- **ADR-0022**: Sidecar 错误信息 sanitize 401/403（v0.3.7 R4）
-- **ADR-0023**: Vite dev 跨端口 API 代理 / Tauri 内嵌加载（基础架构）
-- **ADR-0024**: Default workspace `<home>/PiAgent/` 自动创建（v0.3.5+）
-- **ADR-0025**: Pinia `acceptHMRUpdate` 防止 HMR 丢 state（v0.3.8.1+）
+> **用法**: 每个 functional ADR 含 **功能定义 / 已实现 / 核验方法 / 已知问题 / 后续规划**. 核验时按"核验方法"段走端到端, 跟"已实现"表逐项打勾, 跟"已知问题"逐项确认是否仍存在, 跟"后续规划 P0"决定要不要做.
 
-> 这些是次要决策，v0.4 实施过程中如需引用再补。
+| # | 模块 | 文档 | 关联技术 ADR |
+|---|---|---|---|
+| [0010](0010-feature-chat.md) | **Chat** (流式 / Markdown / 思考 / 工具 / Step) | [0010-feature-chat.md](0010-feature-chat.md) | - |
+| [0011](0011-feature-session.md) | **Session** (列表 / 切换 / 持久化 / 跨重启) | [0011-feature-session.md](0011-feature-session.md) | 0007 |
+| [0012](0012-feature-provider.md) | **Provider / Model / BYOK** (7 内置 + 自定义 + keychain) | [0012-feature-provider.md](0012-feature-provider.md) | 0002 |
+| [0013](0013-feature-workspace.md) | **Workspace** (多工作区 / 沙箱 / default) | [0013-feature-workspace.md](0013-feature-workspace.md) | - |
+| [0014](0014-feature-tools.md) | **Tools** (7 tool / 3 模式 permission) | [0014-feature-tools.md](0014-feature-tools.md) | 0008 |
+| [0015](0015-feature-skills.md) | **Skills / Slash Command** (Pi SDK loadSkills + @ 引用 + 自定义 slash) | [0015-feature-skills.md](0015-feature-skills.md) | 0009 |
+| [0016](0016-feature-compaction.md) | **Compaction** (auto + 手动 + 指示器) | [0016-feature-compaction.md](0016-feature-compaction.md) | 0007, 0005 |
+| [0017](0017-feature-agents-md.md) | **AGENTS.md** (项目级 system prompt 注入) | [0017-feature-agents-md.md](0017-feature-agents-md.md) | 0009 |
 
-## 模板
+**未实施 (规划中, 待开 ADR)**:
+- v0.6: Session 标题自动生成 / 删除二次确认 / 导出 / 搜索
+- v0.7+: MCP 集成 / Sub-agent / 协作分享
 
-```markdown
-# ADR-NNNN: <决策标题>
+**不在本目录的旧 ADR**: 见 `.doc-backup-2026-08-19/04-adr/` (重写前的 25 个历史 ADR, 含 v0.3 / v0.4 / v0.5 期间被取代 / 合并的决策). 验证新版 ADR 没问题后可 `git rm -r .doc-backup-2026-08-19/` 彻底删.
 
-- **状态**: Proposed / Accepted / Deprecated / Superseded by ADR-XXXX
-- **日期**: YYYY-MM-DD
-- **决策者**: <谁拍板>
+## 核验工作流 (2026-08-19 立)
 
-## 背景
-<什么问题 / 什么上下文 / 有什么约束>
+按 functional ADR 逐项核验:
 
-## 备选
-<列 2-4 个候选方案>
+1. **选模块**: 从 8 个 functional ADR 选一个
+2. **走"核验方法"段**: 端到端跑一遍, 验证"已实现"表每项
+3. **看"已知问题"段**: 确认每个问题是否仍存在 (修了的划掉, 仍存在的标 🔴)
+4. **看"后续规划 P0"段**: 决定哪些 P0 要做, 排进当前迭代
+5. **更新 ADR**: 验证完, 改"已实现"表 / "已知问题" / "后续规划" (追加 ## 后续 Review 段)
+6. **commit**: 跟代码 commit 一起, 写明"ADR-XXXX 核验通过 / 修 Y 问题"
 
-## 决策
-<选了什么 / 关键理由>
-
-## 后果
-- 正面: ...
-- 负面: ...
-- 中性: ...
-
-## 何时 Revisit
-<什么信号出现时要重新评估>
+例如核验 session 模块:
+```
+1. 跑 ADR-0011 §核验方法 3 个端到端 (基础 CRUD / per-workspace 隔离 / per-session 隔离)
+2. "标题硬编码" 仍存在 → 标 🔴, 排 P0
+3. "v0.4.2 残留字段 per_workspace_session_id" → 仍存在, 决定下个版本清
+4. 更新 ADR-0011 状态
 ```
