@@ -68,16 +68,18 @@ const isStreaming = computed(() => {
   return chatStore.isStreamingSession(sid);
 });
 
-// 取上次 assistant 消息的完整 usage, 4 字段都展示
-const lastUsage = computed(() => {
+// v0.5.0-D 第12轮: 6 分类 context breakdown (按 token 来源分)
+//   跟 Pi SDK 4 分类 (input/cacheRead/cacheWrite/output) 是不同维度, 互补关系.
+//   Pi SDK 那个是 "cache 命中维度", 这个是 "内容来源维度" (消息/工具/系统提示词/技能/记忆/其他).
+//   6 分类数字从 chat store getContextBreakdown 拿 (FE 端估算).
+const breakdown = computed(() => {
   const sid = activeSession.value?.id;
-  if (!sid) return undefined;
-  return chatStore.lastUsageBySession[sid];
+  if (!sid) {
+    return { messages: 0, tools: 0, systemPrompts: 0, skills: 0, memory: 0, other: 0 };
+  }
+  return chatStore.getContextBreakdown(sid);
 });
-const inputTokens = computed(() => lastUsage.value?.input ?? 0);
-const outputTokens = computed(() => lastUsage.value?.output ?? 0);
-const cacheReadTokens = computed(() => lastUsage.value?.cacheRead ?? 0);
-const cacheWriteTokens = computed(() => lastUsage.value?.cacheWrite ?? 0);
+const breakdownPct = computed(() => chatStore.getContextBreakdownPercent(breakdown.value));
 
 // ======== 工具 ========
 
@@ -183,44 +185,77 @@ const buttonTitle = computed(() => {
         <div class="pad-ctx-popover-bar-fill" :style="{ width: percent + '%' }"></div>
       </div>
 
-      <!-- Token 来源分 (Q2=B 按来源分, 精确) -->
+      <!-- v0.5.0-D 第12轮: 6 分类 context breakdown (按 token 来源分, 跟 Pi SDK 4 分类不同)
+           D198 user 反馈 + 图2: 消息/工具/系统提示词/技能/记忆/其他, 6 个百分比 + 估算 token 数
+           Pi SDK 0.84.2 给的 usage.input/output/cacheRead/cacheWrite 跟这个维度不同,
+           Pi SDK 那个是 "cache 命中维度", 这个是 "内容来源维度", 是补充关系不是替代.
+           数字是 FE 端用启发式估算 (CJK 1 char ≈ 1 token, 其他 4 chars ≈ 1 token),
+           跟 LLM 实际 usage.input 可能差 10-20%, 但比例趋势对. -->
       <div class="pad-ctx-popover-rows">
         <div class="pad-ctx-popover-row">
           <span class="pad-ctx-popover-row-left">
-            <span class="pad-ctx-dot dot-input"></span>
-            <span>Input (新)</span>
+            <span class="pad-ctx-dot dot-messages"></span>
+            <span>消息</span>
           </span>
           <span class="pad-ctx-popover-row-right">
-            <span class="pad-ctx-popover-val">{{ formatTokens(inputTokens) }}</span>
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.messages) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.messages }}%</span>
           </span>
         </div>
         <div class="pad-ctx-popover-row">
           <span class="pad-ctx-popover-row-left">
-            <span class="pad-ctx-dot dot-cacheread"></span>
-            <span>Cache 命中</span>
+            <span class="pad-ctx-dot dot-tools"></span>
+            <span>工具</span>
           </span>
           <span class="pad-ctx-popover-row-right">
-            <span class="pad-ctx-popover-val">{{ formatTokens(cacheReadTokens) }}</span>
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.tools) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.tools }}%</span>
           </span>
         </div>
         <div class="pad-ctx-popover-row">
           <span class="pad-ctx-popover-row-left">
-            <span class="pad-ctx-dot dot-cachewrite"></span>
-            <span>Cache 写入</span>
+            <span class="pad-ctx-dot dot-system"></span>
+            <span>系统提示词</span>
           </span>
           <span class="pad-ctx-popover-row-right">
-            <span class="pad-ctx-popover-val">{{ formatTokens(cacheWriteTokens) }}</span>
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.systemPrompts) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.systemPrompts }}%</span>
           </span>
         </div>
         <div class="pad-ctx-popover-row">
           <span class="pad-ctx-popover-row-left">
-            <span class="pad-ctx-dot dot-output"></span>
-            <span>Output (生成)</span>
+            <span class="pad-ctx-dot dot-skills"></span>
+            <span>技能</span>
           </span>
           <span class="pad-ctx-popover-row-right">
-            <span class="pad-ctx-popover-val">{{ formatTokens(outputTokens) }}</span>
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.skills) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.skills }}%</span>
           </span>
         </div>
+        <div class="pad-ctx-popover-row">
+          <span class="pad-ctx-popover-row-left">
+            <span class="pad-ctx-dot dot-memory"></span>
+            <span>记忆</span>
+          </span>
+          <span class="pad-ctx-popover-row-right">
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.memory) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.memory }}%</span>
+          </span>
+        </div>
+        <div class="pad-ctx-popover-row">
+          <span class="pad-ctx-popover-row-left">
+            <span class="pad-ctx-dot dot-other"></span>
+            <span>其他</span>
+          </span>
+          <span class="pad-ctx-popover-row-right">
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.other) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.other }}%</span>
+          </span>
+        </div>
+      </div>
+      <!-- 估算说明 (v0.5.0-D 第12轮): 跟 LLM 实际数可能有偏差, 仅供比例参考 -->
+      <div class="pad-ctx-popover-estimate-note">
+        估算值 · 实际 LLM token 数可能差 10-20%
       </div>
     </div>
   </div>
@@ -402,13 +437,35 @@ const buttonTitle = computed(() => {
   height: 8px;
   border-radius: 50%;
 }
-/* v0.4.3.2: 圆点统一灰阶 (user 反馈"用灰黑不同比例"替代多色)
- *   越深 = 信息量越大 (新输入 > 缓存命中 > 缓存写入 > 输出)
- *   跟 minimalist 整体一致, 信息在数字不在颜色 */
-.dot-input { background: var(--pad-fg-900, #0a0a0a); }      /* 最深: 新输入的 token */
-.dot-cacheread { background: var(--pad-fg-600, #525252); }  /* 中深: 缓存命中 */
-.dot-cachewrite { background: var(--pad-fg-400, #858585); } /* 中浅: 缓存写入 */
-.dot-output { background: var(--pad-fg-300, #a1a1a1); }     /* 浅: 生成输出 */
+/* v0.5.0-D 第12轮: 6 分类 breakdown 颜色 (按 token 量级从深到浅)
+ *   消息 (最大) > 工具 > 系统提示词 > 技能 > 记忆 > 其他 (最小) */
+.dot-messages { background: var(--pad-fg-900, #0a0a0a); }      /* 最深: 用户/助手消息 */
+.dot-tools { background: var(--pad-fg-700, #404040); }        /* 次深: 工具定义 */
+.dot-system { background: var(--pad-fg-500, #737373); }        /* 中: 系统提示词 */
+.dot-skills { background: var(--pad-fg-400, #a3a3a3); }       /* 中浅: 技能 */
+.dot-memory { background: var(--pad-fg-300, #d4d4d4); }       /* 浅: 记忆 */
+.dot-other { background: var(--pad-fg-200, #e5e5e5); }        /* 最浅: 其他 */
+
+/* v0.5.0-D 第12轮: 6 分类 breakdown 百分比样式 (row 右边) */
+.pad-ctx-popover-pct {
+  font-size: 11px;
+  color: var(--pad-fg-tertiary);
+  font-variant-numeric: tabular-nums;
+  min-width: 36px;
+  text-align: right;
+}
+
+/* 估算说明 (popover 底部) */
+.pad-ctx-popover-estimate-note {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  font-size: 10px;
+  font-style: italic;
+  color: var(--pad-fg-tertiary);
+  text-align: center;
+  opacity: 0.8;
+}
 
 /* BYOK 简化提示 */
 .pad-ctx-popover-byok {

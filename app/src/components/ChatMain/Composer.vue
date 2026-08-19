@@ -9,7 +9,7 @@
  */
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
-import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck } from 'lucide-vue-next';
+import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck, Quote, X } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
 import { useConfigStore, PROVIDER_OPTIONS, PERMISSION_MODE_OPTIONS, type PermissionMode } from '@/stores/config';
@@ -80,6 +80,28 @@ const selectedSkillRefs = computed<string[]>(() => {
   }
   return Array.from(names);
 });
+
+// v0.5.0-D 第12轮: 引用回复 (quote & reply) — 当前 active session 的引用
+//   从 chat store.quoteBySession 拉, 切 session 时自动切 quote
+const currentQuote = computed(() => {
+  const sid = sessionStore.activeSessionId;
+  if (!sid) return null;
+  return chatStore.quoteBySession[sid] ?? null;
+});
+// 引用预览 (截断过长内容, 避免 composer 区域被撑高)
+const QUOTE_PREVIEW_MAX = 200;
+const currentQuotePreview = computed(() => {
+  const q = currentQuote.value;
+  if (!q) return '';
+  const text = q.content;
+  if (text.length <= QUOTE_PREVIEW_MAX) return text;
+  return text.slice(0, QUOTE_PREVIEW_MAX) + '…';
+});
+function clearQuote() {
+  const sid = sessionStore.activeSessionId;
+  if (!sid) return;
+  chatStore.clearQuote(sid);
+}
 
 function removeSkillRef(name: string) {
   // 从 inputText 删所有 [[skill:<name>]] marker
@@ -459,6 +481,25 @@ onMounted(() => nextTick(autoResize));
       </span>
     </div>
 
+    <!-- v0.5.0-D 第12轮: 引用回复 (quote & reply) 预览
+         从 assistant message 点"引用"button → 整条消息正文作为 blockquote 显示在 composer 上方.
+         点 × 清空, send 时 quote 拼到 user message 前面 (markdown blockquote 格式). -->
+    <div v-if="currentQuote" class="pad-composer__quote">
+      <Quote :size="11" :stroke-width="1.75" class="pad-composer__quote-icon" />
+      <div class="pad-composer__quote-body">
+        <div class="pad-composer__quote-label">引用消息</div>
+        <div class="pad-composer__quote-text">{{ currentQuotePreview }}</div>
+      </div>
+      <button
+        class="pad-composer__quote-remove"
+        :title="'取消引用'"
+        type="button"
+        @click="clearQuote"
+      >
+        <X :size="12" :stroke-width="2" />
+      </button>
+    </div>
+
     <!-- v0.4.7a: Composer / popover 3 类 (skill / agent / mcp, 不含 builtin 22) -->
     <div v-if="showSlashPopover" ref="slashPopoverRef" class="pad-composer__slash-popover">
       <div v-if="filteredSlashItems.length === 0" class="pad-composer__slash-empty">
@@ -692,6 +733,74 @@ onMounted(() => nextTick(autoResize));
   color: var(--pad-fg-tertiary);
 }
 .pad-composer__skill-refs-label { font-size: 10px; }
+
+/* v0.5.0-D 第12轮: 引用回复 (quote & reply) 预览 — composer 上方的引用块
+   跟 markdown blockquote 视觉一致: 左边 border + 灰底, 跟消息历史引用呼应 */
+.pad-composer__quote {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 6px 0;
+  padding: 6px 8px 6px 10px;
+  background: var(--pad-bg-active);
+  border-left: 3px solid var(--pad-accent);
+  border-radius: 0 var(--pad-radius-sm) var(--pad-radius-sm) 0;
+  font-size: 11px;
+  color: var(--pad-fg-secondary);
+  max-height: 80px;
+  overflow: hidden;
+  position: relative;
+}
+.pad-composer__quote-icon {
+  color: var(--pad-accent);
+  flex-shrink: 0;
+  margin-top: 1px;
+  opacity: 0.7;
+}
+.pad-composer__quote-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pad-composer__quote-label {
+  font-size: 10px;
+  color: var(--pad-fg-tertiary);
+  font-weight: var(--pad-fw-medium);
+  letter-spacing: 0.02em;
+}
+.pad-composer__quote-text {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--pad-fg-secondary);
+  word-wrap: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.pad-composer__quote-remove {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--pad-fg-tertiary);
+  padding: 0;
+  margin-top: 2px;
+  transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
+}
+.pad-composer__quote-remove:hover {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
+}
 .pad-composer__skill-ref-chip {
   display: inline-flex;
   align-items: center;

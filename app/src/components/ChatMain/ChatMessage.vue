@@ -23,10 +23,11 @@
  *   你就用 Pi TUI 那种来试一下效果吧, 参考图3 做效果" — MiniMax Code / Pi TUI 风格.
  */
 import { computed, ref, watch, onUnmounted } from 'vue';
-import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight } from 'lucide-vue-next';
+import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight, Quote } from 'lucide-vue-next';
 import type { ChatMessage, Step, ToolCallBlock } from '@/lib/mock/types';
 import MarkdownContent from './MarkdownContent.vue';
 import { useChatStore } from '@/stores/chat';
+import { useSessionStore } from '@/stores/session';
 
 interface Props {
   message: ChatMessage;
@@ -127,6 +128,29 @@ async function copyMessage() {
     setTimeout(() => (copied.value = false), 1200);
   } catch (e) {
     console.warn('[msg] copy failed', e);
+  }
+}
+
+// v0.5.0-D 第12轮: 引用回复 (quote & reply) — 把整条 message 正文存到 chat store 的 quoteBySession
+//   Composer 显示引用预览, user send 时 quote 拼到 user message 前面 (block quote 格式)
+//   toggle 行为: 再次点同一 message 的"引用"button → 取消引用 (isQuoted 状态)
+const sessionStoreForQuote = useSessionStore();
+const isQuoted = computed(() => {
+  const sid = sessionStoreForQuote.activeSessionId;
+  if (!sid) return false;
+  return chatStore.quoteBySession[sid]?.messageId === props.message.id;
+});
+function quoteMessage() {
+  const sid = sessionStoreForQuote.activeSessionId;
+  if (!sid) return;
+  if (isQuoted.value) {
+    // 再次点击 = 取消引用
+    chatStore.clearQuote(sid);
+  } else {
+    chatStore.setQuote(sid, {
+      messageId: props.message.id,
+      content: copyableText.value,
+    });
   }
 }
 
@@ -253,115 +277,116 @@ const statusText = computed(() => {
       <span class="pad-msg__error-text">{{ errorMessage }}</span>
     </div>
 
-    <!-- v0.5.0-D 第4轮: per-step collapsible group
-         用户反馈 "用 Pi TUI / MiniMax Code 那种来试一下" — 每个 step 是一个 sub-section,
-         header 显示 summary (思考 N 次, 调用 M 个工具, 当前 step 加 "进行中..."),
-         body 包含 thinking / tools / text. 已完成 step 默认折叠, 当前 step 展开. -->
-    <div
-      v-for="(step, idx) in steps || []"
-      :key="step.id"
-      class="pad-step-group"
-      :class="{
-        'is-current': idx === (steps || []).length - 1 && isStreaming,
-        'is-last': idx === (steps || []).length - 1,
-      }"
-    >
-      <button
-        type="button"
-        class="pad-step-group__head"
-        :title="isStepCollapsed(step, idx === (steps || []).length - 1) ? '展开步骤' : '折叠步骤'"
-        @click="toggleStep(step)"
-      >
-        <ChevronRight
-          :size="12"
-          :stroke-width="1.75"
-          :class="['pad-step-group__chev', { 'is-collapsed': isStepCollapsed(step, idx === (steps || []).length - 1) }]"
-        />
-        <span class="pad-step-group__index">{{ idx + 1 }}</span>
-        <Brain v-if="step.thinking.length" :size="11" :stroke-width="1.75" class="pad-step-group__icon" />
-        <Wrench v-else-if="step.toolCalls.length" :size="11" :stroke-width="1.75" class="pad-step-group__icon" />
-        <span class="pad-step-group__summary">
-          <template v-if="step.thinking.length">
-            思考 {{ step.thinking.length }} 次
-          </template>
-          <template v-if="step.thinking.length && step.toolCalls.length">，</template>
-          <template v-if="step.toolCalls.length">
-            调用 {{ step.toolCalls.length }} 个工具
-          </template>
-          <template v-if="!step.thinking.length && !step.toolCalls.length && step.stepText">
-            文字回复
-          </template>
-          <template v-if="!step.thinking.length && !step.toolCalls.length && !step.stepText">
-            空步骤
-          </template>
-        </span>
-        <span
-          v-if="idx === (steps || []).length - 1 && isStreaming"
-          class="pad-step-group__indicator"
-        >
-          <Loader2 :size="11" :stroke-width="2" class="pad-step-group__spinner" />
-          {{ statusText }}
-        </span>
-      </button>
-
+    <!-- v0.5.0-D 第12轮: per-step 折叠结构改
+         用户 D198 反馈: "阶段性的思考能够折叠，然后阶段性的正文放在外面"
+         旧: thinking + tools + text 都在一个 step group 内 (text 一起被折叠)
+         新: thinking + tools 在 step group 内可折叠, text 移到 step group **外面**,
+             不管 fold/unfold 都直接显示 (正文是给 user 看的核心, 不能藏)
+         Step 头部仍然显示 "思考 N 次, 调用 M 个工具" summary. 如果 step 只有
+         text (没 thinking / tool), 整个 step group 不渲染 (head 也不显示). -->
+    <template v-for="(step, idx) in steps || []" :key="step.id">
+      <!-- Step group (only if has thinking or tools) -->
       <div
-        v-show="!isStepCollapsed(step, idx === (steps || []).length - 1)"
-        class="pad-step-group__body"
+        v-if="step.thinking.length || step.toolCalls.length"
+        class="pad-step-group"
+        :class="{
+          'is-current': idx === (steps || []).length - 1 && isStreaming,
+          'is-last': idx === (steps || []).length - 1,
+        }"
       >
-        <!-- thinking 块 (按 step 隔离, 灰底斜体) -->
-        <div v-if="step.thinking.length" class="pad-step-group__thinking">
-          <div
-            v-for="t in step.thinking"
-            :key="t.id"
-            class="pad-step-thinking"
-          >
-            <MarkdownContent :content="t.content" />
-          </div>
-        </div>
-
-        <!-- tool 卡片 (按 step 隔离) -->
-        <div v-if="step.toolCalls.length" class="pad-step-group__tools">
-          <div
-            v-for="t in step.toolCalls"
-            :key="t.id"
-            class="pad-msg__tool-card"
-            :class="`is-${t.status}`"
-          >
-            <div class="pad-msg__tool-card-row">
-              <Wrench :size="11" :stroke-width="1.75" class="pad-msg__tool-card-icon" />
-              <span class="pad-msg__tool-card-name">{{ t.name }}</span>
-              <span v-if="toolArgsSummary(t)" class="pad-msg__tool-card-args">
-                {{ toolArgsSummary(t) }}
-              </span>
-              <span class="pad-msg__tool-card-status">{{ toolStatusLabel(t) }}</span>
-              <button
-                v-if="t.result"
-                class="pad-msg__tool-card-toggle"
-                type="button"
-                :title="expandedTools.has(t.id) ? '收起' : '展开 result'"
-                @click.stop="toggleToolExpanded(t.id)"
-              >
-                <ChevronDown
-                  :size="11"
-                  :stroke-width="1.75"
-                  :class="['pad-msg__tool-card-chev', { 'is-collapsed': !expandedTools.has(t.id) }]"
-                />
-              </button>
-            </div>
-            <pre v-if="t.result && expandedTools.has(t.id)" class="pad-msg__tool-card-result">{{ t.result }}</pre>
-          </div>
-        </div>
-
-        <!-- 正文 markdown (per-step 独立, 不被冲掉) -->
-        <div
-          v-if="step.stepText && step.stepText.trim().length > 0"
-          class="pad-msg__body"
-          :class="{ 'pad-msg__body--current': idx === (steps || []).length - 1 && isStreaming }"
+        <button
+          type="button"
+          class="pad-step-group__head"
+          :title="isStepCollapsed(step, idx === (steps || []).length - 1) ? '展开步骤' : '折叠步骤'"
+          @click="toggleStep(step)"
         >
-          <MarkdownContent :content="step.stepText" />
+          <ChevronRight
+            :size="12"
+            :stroke-width="1.75"
+            :class="['pad-step-group__chev', { 'is-collapsed': isStepCollapsed(step, idx === (steps || []).length - 1) }]"
+          />
+          <Brain v-if="step.thinking.length" :size="11" :stroke-width="1.75" class="pad-step-group__icon" />
+          <Wrench v-else-if="step.toolCalls.length" :size="11" :stroke-width="1.75" class="pad-step-group__icon" />
+          <span class="pad-step-group__summary">
+            <template v-if="step.thinking.length">
+              思考 {{ step.thinking.length }} 次
+            </template>
+            <template v-if="step.thinking.length && step.toolCalls.length">，</template>
+            <template v-if="step.toolCalls.length">
+              调用 {{ step.toolCalls.length }} 个工具
+            </template>
+          </span>
+          <span
+            v-if="idx === (steps || []).length - 1 && isStreaming"
+            class="pad-step-group__indicator"
+          >
+            <Loader2 :size="11" :stroke-width="2" class="pad-step-group__spinner" />
+            {{ statusText }}
+          </span>
+        </button>
+
+        <div
+          v-show="!isStepCollapsed(step, idx === (steps || []).length - 1)"
+          class="pad-step-group__body"
+        >
+          <!-- thinking 块 (按 step 隔离, 灰底斜体) -->
+          <div v-if="step.thinking.length" class="pad-step-group__thinking">
+            <div
+              v-for="t in step.thinking"
+              :key="t.id"
+              class="pad-step-thinking"
+            >
+              <MarkdownContent :content="t.content" />
+            </div>
+          </div>
+
+          <!-- tool 卡片 (按 step 隔离) -->
+          <div v-if="step.toolCalls.length" class="pad-step-group__tools">
+            <div
+              v-for="t in step.toolCalls"
+              :key="t.id"
+              class="pad-msg__tool-card"
+              :class="`is-${t.status}`"
+            >
+              <div class="pad-msg__tool-card-row">
+                <Wrench :size="11" :stroke-width="1.75" class="pad-msg__tool-card-icon" />
+                <span class="pad-msg__tool-card-name">{{ t.name }}</span>
+                <span v-if="toolArgsSummary(t)" class="pad-msg__tool-card-args">
+                  {{ toolArgsSummary(t) }}
+                </span>
+                <span class="pad-msg__tool-card-status">{{ toolStatusLabel(t) }}</span>
+                <button
+                  v-if="t.result"
+                  class="pad-msg__tool-card-toggle"
+                  type="button"
+                  :title="expandedTools.has(t.id) ? '收起' : '展开 result'"
+                  @click.stop="toggleToolExpanded(t.id)"
+                >
+                  <ChevronDown
+                    :size="11"
+                    :stroke-width="1.75"
+                    :class="['pad-msg__tool-card-chev', { 'is-collapsed': !expandedTools.has(t.id) }]"
+                  />
+                </button>
+              </div>
+              <pre v-if="t.result && expandedTools.has(t.id)" class="pad-msg__tool-card-result">{{ t.result }}</pre>
+            </div>
+          </div>
         </div>
       </div>
-    </div>
+
+      <!-- 正文 markdown (per-step 独立, ALWAYS 在 step group 外面, 不被折叠)
+           D198 关键修复: 旧版 text 在 step group body 内, 跟 thinking/tools 一起被折叠
+           (user 看到的是 "▼ 1 思考 1 次" 然后一堆 text, 不直观).
+           现在 text 是 user 核心要看的内容, 跟 step group 平级, 不管 fold 都直接显示. -->
+      <div
+        v-if="step.stepText && step.stepText.trim().length > 0"
+        class="pad-msg__body"
+        :class="{ 'pad-msg__body--current': idx === (steps || []).length - 1 && isStreaming }"
+      >
+        <MarkdownContent :content="step.stepText" />
+      </div>
+    </template>
 
     <!-- v0.4.2+: 重试提示 (sidecar 在 5 次重试间 emit retry_start, UI 显示"重试中 1/5...") -->
     <div v-if="retry" class="pad-msg__retry">
@@ -391,6 +416,17 @@ const statusText = computed(() => {
       <button class="pad-msg__action" :title="copied ? '已复制' : '复制'" type="button" @click="copyMessage">
         <Copy v-if="!copied" :size="12" :stroke-width="1.75" />
         <span v-else class="pad-msg__copied">已复制</span>
+      </button>
+      <!-- v0.5.0-D 第12轮: 引用回复 (quote & reply) — 整条消息内容作为引用插入 composer
+           D198 spec: 选中文字 → 引用部分, v1 简化: 整条消息引用, 后续可选中引用 -->
+      <button
+        v-if="message.role === 'assistant' && copyableText"
+        class="pad-msg__action"
+        :title="isQuoted ? '已引用 (再点取消)' : '引用回复'"
+        type="button"
+        @click="quoteMessage"
+      >
+        <Quote :size="12" :stroke-width="1.75" :class="{ 'is-active': isQuoted }" />
       </button>
       <button class="pad-msg__action" title="赞" type="button">
         <ThumbsUp :size="12" :stroke-width="1.75" />
@@ -1051,6 +1087,8 @@ const statusText = computed(() => {
   color: var(--pad-fg-primary);
 }
 .pad-msg__copied { color: var(--pad-accent); }
+/* v0.5.0-D 第12轮: 引用 button active 状态 (已引用这条消息) */
+.pad-msg__action :deep(svg.is-active) { color: var(--pad-accent); }
 
 /* ===== streaming loading (v0.5.1 phase-based status icon) ===== */
 .pad-msg__loading {

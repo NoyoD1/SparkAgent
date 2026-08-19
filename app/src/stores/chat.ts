@@ -23,6 +23,8 @@ import { useConfigStore } from './config';
 import { useSessionStore } from './session';
 import { useUiStore } from './ui';
 import { useSkillsStore } from './skills';
+import { estimateTokens } from '@/lib/tokenEstimate';
+import type { ContextBreakdown } from '@/lib/tokenEstimate';
 
 export type { ChatMessage, ThinkingBlock, ToolCallBlock, Step };
 
@@ -156,6 +158,26 @@ export const useChatStore = defineStore('chat', () => {
   // v0.4.2+ LLM 错误重试: retryBySession 记录当前 retry 状态 (attempt 进度 + 上次错误)
   // FE UI 可以根据这个显示"重试中 1/5..."提示
   const retryBySession = ref<Record<string, { attempt: number; maxAttempts: number; errorMessage: string } | null>>({});
+  // v0.5.0-D 第12轮: 引用回复 (quote & reply)
+  //   user 在 assistant 消息点 "引用" button → quoteBySession[sid] 存一条引用.
+  //   Composer 显示引用预览, 发送时自动把引用作为 markdown blockquote 前缀拼到 user message.
+  //   spec: 🟡 引用回复 (拖选消息 → 插入到 composer). v1 实现: 整个 message body 引用 (D198)
+  //   后续可加 "选中文字 → 引用部分文字" (用 window.getSelection() 拿选中范围).
+  const quoteBySession = ref<Record<string, { messageId: string; content: string; createdAt: number } | null>>({});
+  function setQuote(sessionId: string, quote: { messageId: string; content: string } | null) {
+    if (!quote) {
+      const { [sessionId]: _, ...rest } = quoteBySession.value;
+      quoteBySession.value = { ...rest, [sessionId]: null };
+      return;
+    }
+    quoteBySession.value = {
+      ...quoteBySession.value,
+      [sessionId]: { ...quote, createdAt: Date.now() },
+    };
+  }
+  function clearQuote(sessionId: string) {
+    setQuote(sessionId, null);
+  }
   // v0.5.1: 当前 phase (thinking / text / tool / idle) — 用来在 streaming 状态
   //   显示 "思考中…" / "正在下笔…" / "调用工具…" 等不同文字, 文字轮换 (每 1.8s 换一次).
   //   用户反馈 "实际当前任务还在后台继续跑, 但是因为是一段一段回复的, 正文可能有多条,
@@ -259,6 +281,90 @@ export const useChatStore = defineStore('chat', () => {
     return tokens > getContextWindow() * 0.7;
   }
 
+  // ===== v0.5.0-D 第12轮: 6 分类 context breakdown =====
+  //  按 token 来源分, 给 ContextIndicator popover 用. 跟 Pi SDK 0.84.2 usage.input
+  //  (LLM 端实际) 不同, 这是 FE 端估算, 给用户看"token 都被哪些东西占了"的参考.
+  //  精度: rough heuristic, 真实 LLM token 数可能差 10-20%, 但比例趋势对.
+  //
+  //  6 分类定义 (D198 spec 跟图2):
+  //  - 消息: user + assistant 所有 content 累加 (FE 端有完整数据)
+  //  - 工具: 7 tool definitions (read/write/edit/bash/ls/find/grep) + Pi SDK 自动 emit
+  //    估算 ~800 tokens (7 × 115 字符 / def, 跟 openai function schema 实际字节数接近)
+  //  - 系统提示词: Pi SDK base + <context_awareness> + <response_style> (3 段)
+  //    估算 ~2500 tokens (实测 sidecar 启动 log: 3 段加起来约 8K 字符, 中文 token 率高)
+  //  - 技能: enabled skills 的 SKILL.md content 累加. 0 个 enabled = 0
+  //    FE 端从 skills store 拿 enabledByName keys, 估算 "description + body" 字符数
+  //  - 记忆: AGENTS.md content. FE 暂未读取 (CustomInstructionsTab 编辑但未入 Pi SDK prompt),
+  //    估算 0. 后续可在 chat store 维护 memory 缓存
+  //  - 其他: contextTokens - 上 5 项之和 (含 thinking / tool result 残留 / 序列化等)
+  const TOOLS_TOKEN_ESTIMATE = 800;
+  const SYSTEM_PROMPTS_TOKEN_ESTIMATE = 2500;
+  const MEMORY_TOKEN_ESTIMATE = 0;  // FE 暂未读 AGENTS.md
+  function getContextBreakdown(sessionId: string): ContextBreakdown {
+    const total = getContextTokens(sessionId);
+    const data = getSessionData(sessionId);
+    // 1. 消息: sum of user + assistant content
+    let messagesTokens = 0;
+    for (const m of data.messages) {
+      const content = m.content || '';
+      if (content) messagesTokens += estimateTokens(content);
+      // v0.5.0-D 还在 stepText 里: 算上 step text (assistant 主内容), 跟 content 同步
+      const steps = (m as any).steps;
+      if (Array.isArray(steps)) {
+        for (const s of steps) {
+          if (s.stepText) messagesTokens += estimateTokens(s.stepText);
+        }
+      }
+    }
+    // 2. 工具: 固定估算 (7 tools def)
+    const toolsTokens = TOOLS_TOKEN_ESTIMATE;
+    // 3. 系统提示词: 固定估算 (base + 2 fragments)
+    const systemPromptsTokens = SYSTEM_PROMPTS_TOKEN_ESTIMATE;
+    // 4. 技能: enabled skills 的 .md content 估算. 实际 FE 端无 skill content,
+    //    用 skills store enabledByName count × 平均 300 tokens / skill (rough).
+    //    SkillsTab 里 SKILL.md 通常 100-500 行, 平均 ~300 tokens.
+    const skillsStore = useSkillsStore();
+    const enabledCount = Object.values(skillsStore.enabledByName).filter(Boolean).length;
+    const skillsTokens = enabledCount * 300;
+    // 5. 记忆: AGENTS.md 暂估 0
+    const memoryTokens = MEMORY_TOKEN_ESTIMATE;
+    // 6. 其他: total - 上面 5 项
+    const otherTokens = Math.max(0,
+      total - messagesTokens - toolsTokens - systemPromptsTokens - skillsTokens - memoryTokens,
+    );
+    return {
+      messages: messagesTokens,
+      tools: toolsTokens,
+      systemPrompts: systemPromptsTokens,
+      skills: skillsTokens,
+      memory: memoryTokens,
+      other: otherTokens,
+    };
+  }
+  function getContextBreakdownPercent(breakdown: ContextBreakdown): {
+    messages: number;
+    tools: number;
+    systemPrompts: number;
+    skills: number;
+    memory: number;
+    other: number;
+  } {
+    const sum = breakdown.messages + breakdown.tools + breakdown.systemPrompts
+      + breakdown.skills + breakdown.memory + breakdown.other;
+    if (sum === 0) {
+      return { messages: 0, tools: 0, systemPrompts: 0, skills: 0, memory: 0, other: 0 };
+    }
+    const pct = (n: number) => Math.round((n / sum) * 1000) / 10;  // 1 位小数
+    return {
+      messages: pct(breakdown.messages),
+      tools: pct(breakdown.tools),
+      systemPrompts: pct(breakdown.systemPrompts),
+      skills: pct(breakdown.skills),
+      memory: pct(breakdown.memory),
+      other: pct(breakdown.other),
+    };
+  }
+
   // ===== Actions ====
 
   function appendUserMessage(sessionId: string, content: string) {
@@ -312,9 +418,22 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     // 2. append user msg + streaming marker (assistant placeholder 等 message_start 真的来再 push)
-    appendUserMessage(sessionId, text);
+    // v0.5.0-D 第12轮: 引用回复 — 如果有 quote, 把 quote 作为 markdown blockquote 前缀拼到 user message.
+    //   引用格式: "> <quote content>\n\n<user text>" (跟 markdown 通用 blockquote 语法一致, LLM 能识别)
+    //   引用本意: 让 LLM 知道 user 在哪条历史消息基础上回复 (跟 "fork from message N" 不同的轻量版).
+    const quote = quoteBySession.value[sessionId];
+    let fullUserText = text;
+    if (quote && quote.content.trim()) {
+      // 引用内容可能多行, 逐行加 "> " 前缀 (markdown blockquote 语法)
+      const quotedLines = quote.content.split('\n').map((line) => line.trim() ? `> ${line}` : '>').join('\n');
+      fullUserText = `${quotedLines}\n\n${text}`;
+      console.log('[chat] sendPrompt: with quote (messageId=', quote.messageId, ', len=', quote.content.length, ')');
+    }
+    appendUserMessage(sessionId, fullUserText);
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: true };
     errorBySession.value = { ...errorBySession.value, [sessionId]: null };
+    // 引用用完即清, 跟发完就消失的 UX 一致 (避免下次发还残留)
+    if (quote) clearQuote(sessionId);
     // touch session updated time
     sessionStore.touchSession(sessionId);
 
@@ -1045,6 +1164,13 @@ export const useChatStore = defineStore('chat', () => {
     isContextHigh,
     isCompacting,
     getLastCompaction,
+    // v0.5.0-D 第12轮: 6 分类 context breakdown
+    getContextBreakdown,
+    getContextBreakdownPercent,
+    // v0.5.0-D 第12轮: 引用回复 (quote & reply)
+    setQuote,
+    clearQuote,
+    quoteBySession,
     appendUserMessage,
     clearSession,
     sendPrompt,

@@ -8,17 +8,21 @@
  * - inline code 红色高亮
  * - 文件路径自动变链接 (e.g. `D:\path\file.ts`)
  * - bold/italic/list/quote/table/heading 正常 markdown 渲染
+ * - v0.5.0-D 第12轮: LaTeX 数学公式 ($...$ inline + $$...$$ block), 走 KaTeX 渲染
  *
  * 实现:
  * - marked v15 (pre-strict GFM, 跟 memory lesson 一致)
  * - highlight.js v11 代码块高亮 (通过 marked renderer 注入, 不需要 marked-highlight)
+ * - katex 0.18 数学公式渲染 (pre-extract → markdown → restore)
  * - post-processor: 文件路径 → <a class="pad-md-path">
  * - post-processor: v18+ **bold** 边界补丁 (跟 memory 教训一致, 防升级踩坑)
  */
 import { computed, ref, onMounted, onUpdated, nextTick } from 'vue';
 import { Marked } from 'marked';
 import hljs from 'highlight.js';
+import katex from 'katex';
 import 'highlight.js/styles/atom-one-light.css';
+import 'katex/dist/katex.min.css';
 
 interface Props {
   content: string;
@@ -43,7 +47,42 @@ const html = computed(() => {
   // v0.3.8.11: 把 LLM 输出里的 literal `\n` `\t` 转成真换行/制表符
   // (LLM 偶尔会输出 "\\n" 字符串而不是真换行, 之前 marked + breaks:true 不处理这两个字符)
   input = input.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
-  const raw = m.parse(input, { async: false }) as string;
+
+  // v0.5.0-D 第12轮: LaTeX 公式预提取, 走 KaTeX 渲染成 HTML
+  //  顺序很重要: 必须在 markdown parse **之前** 提取 (否则 $ 会被 marked 当成普通文本,
+  //  marked 不会破坏 LaTeX 但 KaTeX 输出会跟 markdown 嵌套冲突, 解析顺序难控).
+  //  用 ⟪LATEX_<type>_<idx>⟫ 占位 (Unicode 角括号, 不在正常 markdown 文本中),
+  //  marked 会原样保留, sanitizeHtml 也不会动 (非 HTML tag).
+  //  最后再把占位替换回 KaTeX 渲染的 HTML.
+  const latexBlocks: string[] = [];
+  const latexInlines: string[] = [];
+  let preMd = input;
+  // 1. Block math: $$...$$ (跨行)
+  preMd = preMd.replace(/\$\$([\s\S]+?)\$\$/g, (_m, tex: string) => {
+    let html = '';
+    try {
+      html = katex.renderToString(tex.trim(), { displayMode: true, throwOnError: false, output: 'html' });
+    } catch (e) {
+      html = `<span class="pad-md-latex-error">${escapeHtml(tex)}</span>`;
+    }
+    const idx = latexBlocks.length;
+    latexBlocks.push(html);
+    return `⟪LATEX_BLOCK_${idx}⟫`;
+  });
+  // 2. Inline math: $...$ (单行, 不跨 $$)
+  preMd = preMd.replace(/(?<![\\$])\$([^\$\n]+?)\$(?!\$)/g, (_m, tex: string) => {
+    let html = '';
+    try {
+      html = katex.renderToString(tex.trim(), { displayMode: false, throwOnError: false, output: 'html' });
+    } catch (e) {
+      html = `<span class="pad-md-latex-error">${escapeHtml(tex)}</span>`;
+    }
+    const idx = latexInlines.length;
+    latexInlines.push(html);
+    return `⟪LATEX_INLINE_${idx}⟫`;
+  });
+
+  const raw = m.parse(preMd, { async: false }) as string;
   let out = raw;
   // 1. v18+ GFM 严格 bold 边界补丁 (中文 markdown 常见)
   out = out.replace(/\*\*([^*\n<>]+?)\*\*/g, '<strong>$1</strong>');
@@ -53,7 +92,10 @@ const html = computed(() => {
     /(?<!["'>])\b((?:[A-Z]:\\|\/(?:home|Users|opt|tmp|var|etc|root)\/)[^\s<>"']+)/g,
     '<a class="pad-md-path" href="javascript:void(0)" data-path="$1">$1</a>',
   );
-  // 3. v0.5.0-D 第3轮: HTML 注入 sanitizer
+  // 3. v0.5.0-D 第12轮: 恢复 LaTeX 占位
+  out = out.replace(/⟪LATEX_BLOCK_(\d+)⟫/g, (_m, idx) => latexBlocks[parseInt(idx, 10)] ?? '');
+  out = out.replace(/⟪LATEX_INLINE_(\d+)⟫/g, (_m, idx) => latexInlines[parseInt(idx, 10)] ?? '');
+  // 4. v0.5.0-D 第3轮: HTML 注入 sanitizer
   //    用户反馈 "agent 写东西时整个前端页面都变了" — 根本原因: v-html 注入的 HTML
   //    包含 <style> 块, 选择器是全局生效的 (CSS 作用域跟 DOM 位置无关), 覆盖到整个 app.
   //    e.g. agent 写 AI 洞察报告, 模板里有:
@@ -61,9 +103,20 @@ const html = computed(() => {
   //    v-html 渲染时这个 <style> 仍生效, 把整个 desktop app 头部都改成深色 + 占据一整块.
   //    修复: 剥掉所有 CSS/JS 注入向量, 保留合法 markdown 元素 (h1, p, ul, table, pre, ...).
   //    inline style="..." 保留 (单个元素的局部样式, 不会泄漏到全局).
+  //    KaTeX 输出含 <span class="katex"> 等, sanitizer 不会动 (不在 block list).
   out = sanitizeHtml(out);
   return out;
 });
+
+/** HTML escape for LaTeX parse error fallback */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 /**
  * v0.5.0-D 第3轮: markdown 渲染后的 HTML sanitizer.
@@ -289,5 +342,31 @@ function onContentClick(e: MouseEvent) {
   height: auto;
   border-radius: var(--pad-radius-md);
   margin: 6px 0;
+}
+
+/* v0.5.0-D 第12轮: LaTeX 公式 (KaTeX 渲染)
+ *   inline (跟文字同行) 和 block (独占行, 居中) 两种.
+ *   KaTeX 自己有 .katex / .katex-display 样式, 这里只补跟 prose 整合的微调:
+ *   - inline 公式: 保持跟 baseline 对齐, 字号跟 prose 一致
+ *   - block 公式: 居中, 上下加 margin, 跟段落分隔
+ *   - 错误 fallback: 红色 mono 小字 (说明 LaTeX 解析失败)
+ */
+.pad-md .katex { font-size: 1em; }
+.pad-md .katex-display {
+  margin: 12px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.pad-md .katex-display > .katex {
+  display: inline-block;
+  text-align: center;
+}
+.pad-md .pad-md-latex-error {
+  color: var(--pad-danger);
+  font-family: var(--pad-font-mono);
+  font-size: 12px;
+  background: var(--pad-bg-active);
+  padding: 1px 4px;
+  border-radius: 3px;
 }
 </style>
