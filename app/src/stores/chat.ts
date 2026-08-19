@@ -193,6 +193,73 @@ export const useChatStore = defineStore('chat', () => {
   function touchStreamEvent(sessionId: string) {
     lastStreamEventAt.set(sessionId, Date.now());
   }
+  // ====== v0.5.0-D 第26轮 (D210.3) BUG FIX: compaction 事件 helper
+  //   之前 compaction_start / compaction_end 的处理逻辑全部内联在 sendPrompt 创建的
+  //   listener 闭包里. 但 compact() 不创建 listener (它直接调 piTauri.compactSession
+  //   spawn 一个独立 sidecar 跑 compact, 跟 sendPrompt 的 sidecar 没关系), 所以
+  //   compaction 事件 emit 出来没人接, UI 永远卡在"压缩中...", divider 也插不进来.
+  //   修法: 把 compaction 事件处理逻辑提到 helper 函数, sendPrompt listener + compact()
+  //   临时 listener 都调它. 临时 listener 在 compact() 开始时注册, 收到 compaction_end
+  //   后自动 unregister.
+  function handleCompactionStart(sessionId: string, event: { reason: string }) {
+    console.log(`[chat] compaction_start: reason=${event.reason} (session=${sessionId})`);
+    compactionBySession.value = { ...compactionBySession.value, [sessionId]: 'in_progress' };
+  }
+  function handleCompactionEnd(sessionId: string, event: {
+    reason: string;
+    aborted: boolean;
+    willRetry: boolean;
+    errorMessage?: string;
+  }) {
+    console.log(`[chat] compaction_end: reason=${event.reason} aborted=${event.aborted} willRetry=${event.willRetry}${event.errorMessage ? ', err=' + event.errorMessage.slice(0, 80) : ''} (session=${sessionId})`);
+    compactionBySession.value = { ...compactionBySession.value, [sessionId]: 'idle' };
+    lastCompactionBySession.value = {
+      ...lastCompactionBySession.value,
+      [sessionId]: {
+        reason: event.reason as 'manual' | 'threshold' | 'overflow',
+        aborted: event.aborted,
+        willRetry: event.willRetry,
+        errorMessage: event.errorMessage,
+        at: Date.now(),
+      },
+    };
+    // v0.5.0-D 第22轮 (D209): 压缩成功时重置累加的 token count
+    if (!event.aborted && !event.errorMessage) {
+      cumulativeUsageBySession.value = {
+        ...cumulativeUsageBySession.value,
+        [sessionId]: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+      };
+      contextTokensBySession.value = {
+        ...contextTokensBySession.value,
+        [sessionId]: 0,
+      };
+      console.log(`[chat] compaction_end: reset cumulative usage (compaction freed context)`);
+    }
+    // Bug #2 修: 手动 compact 终态 toast
+    if (event.reason === 'manual') {
+      if (event.aborted) {
+        useUiStore().showToast('压缩已中止', 'warning', 3000);
+      } else if (event.errorMessage) {
+        useUiStore().showToast(`压缩失败: ${event.errorMessage.slice(0, 80)}`, 'error', 6000);
+      } else {
+        useUiStore().showToast('压缩完成, context 已释放', 'success', 3000);
+      }
+    }
+    // v0.4.6 Bug 修: 压缩完成时插 "── 已压缩 ──" 分界线 system message
+    const d2 = getSessionData(sessionId);
+    if (d2) {
+      const beforeCount = d2.messages.length;
+      d2.messages.push({
+        id: `sys-compact-${Date.now()}`,
+        role: 'system',
+        content: '__COMPACTION_DIVIDER__',
+        createdAt: new Date().toISOString(),
+        compactionMarker: true,
+      } as ChatMessage);
+      chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+      console.log(`[chat] compaction divider pushed (msgs ${beforeCount} → ${d2.messages.length})`);
+    }
+  }
   function startStreamHangWatchdog(sessionId: string): ReturnType<typeof setTimeout> {
     stopStreamHangWatchdog(sessionId);
     const timer = setTimeout(() => {
@@ -1130,70 +1197,19 @@ export const useChatStore = defineStore('chat', () => {
           break;
         }
         // v0.4.2 step 1: AgentSession 内置 compaction (手动 / 自动 threshold / overflow)
+        // v0.5.0-D 第26轮 (D210.3) BUG FIX: 改调 helper 函数 (handleCompactionStart / End)
+        //   之前逻辑全部内联在这里, 但 compact() 不走 sendPrompt listener, compaction
+        //   事件没人接. helper 化后 compact() 注册临时 listener 也调同样的 helper, 行为一致.
         case 'compaction_start':
-          console.log(`[chat] compaction_start: reason=${event.reason}`);
-          // v0.4.3: UI 状态 — 按钮变 "压缩中..." spinner
-          compactionBySession.value = { ...compactionBySession.value, [sessionId]: 'in_progress' };
+          handleCompactionStart(sessionId, { reason: event.reason });
           break;
         case 'compaction_end':
-          // v0.5.0: Pi SDK CompactionResult + aborted + willRetry + errorMessage?
-          console.log(`[chat] compaction_end: reason=${event.reason} aborted=${event.aborted} willRetry=${event.willRetry}${event.errorMessage ? ', err=' + event.errorMessage.slice(0, 80) : ''}`);
-          // v0.4.3: UI 状态 — 按钮恢复, 记录结果 (用于 toast / 状态条)
-          compactionBySession.value = { ...compactionBySession.value, [sessionId]: 'idle' };
-          lastCompactionBySession.value = {
-            ...lastCompactionBySession.value,
-            [sessionId]: {
-              reason: event.reason,
-              aborted: event.aborted,
-              willRetry: event.willRetry,
-              errorMessage: event.errorMessage,
-              at: Date.now(),
-            },
-          };
-          // v0.5.0-D 第22轮 (D209): compaction 成功时, 重置累加的 token count
-          //   user 反馈: "只有再主动压缩之后, 上下文可能会消减"
-          //   之前: 累加 token 一直涨, 压缩后 context 应该减小但 contextTokens 还在累加
-          //   现在: 压缩成功 (非 aborted, 无 error) → 清零 cumulativeUsage + contextTokens
-          //   下次 message_end 重新开始累加
-          if (!event.aborted && !event.errorMessage) {
-            cumulativeUsageBySession.value = {
-              ...cumulativeUsageBySession.value,
-              [sessionId]: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
-            };
-            contextTokensBySession.value = {
-              ...contextTokensBySession.value,
-              [sessionId]: 0,
-            };
-            console.log(`[chat] compaction_end: reset cumulative usage (compaction freed context)`);
-          }
-          // Bug #2 修: compaction 终态 toast 反馈 (手动 compact 成功 / 失败 / 拒绝)
-          if (event.reason === 'manual') {
-            if (event.aborted) {
-              useUiStore().showToast('压缩已中止', 'warning', 3000);
-            } else if (event.errorMessage) {
-              useUiStore().showToast(`压缩失败: ${event.errorMessage.slice(0, 80)}`, 'error', 6000);
-            } else {
-              useUiStore().showToast('压缩完成, context 已释放', 'success', 3000);
-            }
-          }
-          // v0.4.6 Bug 修 (新1): 压缩完成时, 在 chat 流里插入"分界线"消息 + 同步收尾
-          //   之前只 toast 提示, 位置太靠下不直观. 现在在最后一条 assistant 消息后插一条
-          //   system 角色消息, ChatMessage.vue 渲染为 "── 已压缩 N tokens ──" 分界线.
-          //   走 d2.messages.push 不走 streamingBySession, 立刻可见.
-          //   Pi SDK 0.84.2 emit event.result 含 CompactionResult, tokens 字段不一定稳定 → 简化
-          //   显示"上下文已压缩" + "X 条消息被合并".
-          {
-            const beforeCount = d2.messages.length;
-            d2.messages.push({
-              id: `sys-compact-${Date.now()}`,
-              role: 'system',
-              content: '__COMPACTION_DIVIDER__',  // ChatMessage.vue 检测这个 marker
-              createdAt: new Date().toISOString(),
-              compactionMarker: true,  // 标记这条 system 消息是压缩分界线
-            } as ChatMessage);
-            chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
-            console.log(`[chat] compaction divider pushed (msgs ${beforeCount} → ${d2.messages.length})`);
-          }
+          handleCompactionEnd(sessionId, {
+            reason: event.reason,
+            aborted: event.aborted,
+            willRetry: event.willRetry,
+            errorMessage: event.errorMessage,
+          });
           break;
         case 'extension_ui_request': {
           // v0.5.0: Pi SDK RPC 协议的 extension UI, 替代 v0.4.x 的 permission_request
@@ -1342,6 +1358,32 @@ export const useChatStore = defineStore('chat', () => {
     const skills = useSkillsStore();
     const enabledNames = skills.getEnabledNames();
     try {
+      // v0.5.0-D 第26轮 (D210.3) BUG FIX: 注册临时 listener 收 compaction 事件
+      //   之前 compact() 只调 piTauri.compactSession 启独立 sidecar, 但 chat store 没有任何
+      //   handler 处理 emit 出来的 compaction_start / compaction_end → UI 永远卡在"压缩中",
+      //   divider 也不插. 修法: 启 sidecar 前先 piTauri.on() 注册临时 handler (调 handleCompactionStart
+      //   / handleCompactionEnd helper), 收到 compaction_end 后自动 off() 注销.
+      //   filter sessionId === sid, 避免被其他 session 事件污染.
+      let compactOff: (() => void) | null = null;
+      compactOff = await piTauri.on((event) => {
+        if (('sessionId' in event) && event.sessionId !== sid) return;
+        if (event.type === 'compaction_start') {
+          handleCompactionStart(sid, { reason: event.reason });
+        } else if (event.type === 'compaction_end') {
+          handleCompactionEnd(sid, {
+            reason: event.reason,
+            aborted: event.aborted,
+            willRetry: event.willRetry,
+            errorMessage: event.errorMessage,
+          });
+          // 收到 compaction_end 就 unregister, 不再处理后续事件
+          if (compactOff) {
+            try { compactOff(); } catch (e) { console.warn('[chat] D210.3: compact listener off() failed (ignored)', e); }
+            compactOff = null;
+          }
+        }
+        // 其他事件类型 (agent_start / message_* / etc.) 不是 compact 流程, 忽略
+      });
       await piTauri.compactSession(sid, () => ({
         providerId: active.id,
         provider: active.type,
