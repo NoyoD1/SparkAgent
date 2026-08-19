@@ -158,6 +158,14 @@ export const useChatStore = defineStore('chat', () => {
   // v0.4.2+ LLM 错误重试: retryBySession 记录当前 retry 状态 (attempt 进度 + 上次错误)
   // FE UI 可以根据这个显示"重试中 1/5..."提示
   const retryBySession = ref<Record<string, { attempt: number; maxAttempts: number; errorMessage: string } | null>>({});
+  // v0.5.0-D 第23轮 (D210): FE 端 auto-retry
+  //   之前 (D209): stream hang 30s → force stop streaming → user 看横线手动重发
+  //   user 反馈 (D210): "发送消息后 LLM 异常后, 不会主动重试发送, 会一直卡着"
+  //   修法: FE 主动检测 LLM 异常 (stream hang + 空 response), 自动重发 last user msg 1 次
+  //   Pi SDK 内部 retry 不可靠 (不 emit auto_retry_start events, user 看不到进度),
+  //   FE 端重发可控、可视化、有上限 (防 spam).
+  //   autoRetryCountBySession: 每个 session 计数, user 新发消息时清零 (允许再次 auto-retry)
+  const autoRetryCountBySession = ref<Record<string, number>>({});
   // v0.5.0-D 第17轮 (D204): stream hang detector — 30s 无事件 + 仍 isStreaming → 标 hang
   //   替代 D200/D202/D203 的 emptyResponse 主动告警 (那个有 false positive: model 合法的空 message)
   //   这个是真正兜底: 只有 stream 真的 hang 住 (没新事件, 也等不到 agent_end) 才告警
@@ -179,6 +187,10 @@ export const useChatStore = defineStore('chat', () => {
       //   修法: 30s 无事件兜底时, 强制 force stop streaming (跟 forceStopStreaming 一样
       //   清理 streaming + retry + active step), 跟 Composer.stop() 30s timeout 行为一致.
       //   UI: 触发后会显示 stream hang error line, user 可以在 composer 重发或换 model
+      //   v0.5.0-D 第23轮 (D210) 增强: force stop 后立即触发 tryAutoRetry
+      //     如果最新 assistant message 是空的 (LLM 完全没产出), FE 主动重发 last user msg 1 次
+      //     user 反馈 "LLM 异常后, 不会主动重试发送, 会一直卡着" → 让 FE 主动 resend
+      //     Pi SDK 内部 retry 不可靠 (不 emit events), FE 端重发可控 + 有上限 (max 1)
       const last = lastStreamEventAt.get(sessionId) || 0;
       const stillStreaming = !!streamingBySession.value[sessionId];
       if (stillStreaming && Date.now() - last >= STREAM_HANG_TIMEOUT_MS) {
@@ -206,6 +218,11 @@ export const useChatStore = defineStore('chat', () => {
           `Force stopped streaming (was willRetry: ${!!retryBySession.value[sessionId]} — cleared). ` +
           `UI shows inline error line. User can re-send or switch model.`,
         );
+        // D210: 同步触发 tryAutoRetry (会检查空 message, 决定是否真重发)
+        //   注意: tryAutoRetry 是 async, 但这里不 await — 立即返回, 不阻塞 watchdog timer
+        tryAutoRetry(sessionId).catch((e) => {
+          console.warn('[chat] D210: tryAutoRetry failed (ignored)', e);
+        });
       }
     }, STREAM_HANG_TIMEOUT_MS);
     streamHangTimers.set(sessionId, timer);
@@ -593,6 +610,9 @@ export const useChatStore = defineStore('chat', () => {
     appendUserMessage(sessionId, fullUserText, quoteContent);
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: true };
     errorBySession.value = { ...errorBySession.value, [sessionId]: null };
+    // v0.5.0-D 第23轮 (D210): user 新发消息 → 清零 auto-retry count
+    //   之前失败 + auto-retry 用完的 session, user 主动发新消息 → 允许下次再 auto-retry
+    clearAutoRetryCount(sessionId);
     // 引用用完即清, 跟发完就消失的 UX 一致 (避免下次发还残留)
     if (quote) clearQuote(sessionId);
     // touch session updated time
@@ -1381,6 +1401,107 @@ export const useChatStore = defineStore('chat', () => {
       await piTauri.killSidecar(sessionId);
     } catch (e) {
       console.warn('[chat] forceStopStreaming: killSidecar failed (ignored)', e);
+    }
+  }
+
+  // v0.5.0-D 第23轮 (D210): FE 端 auto-retry 核心函数
+  //   触发条件: stream hang (30s 无事件) 后, 检查最新 assistant message 是不是空
+  //     - 空 = 没 text content, 没 thinking, 没 toolCall, 没 toolResult (model 完全失败)
+  //     - 这种情况下 Pi SDK 内部 retry 不可靠 (不 emit events), FE 主动重发
+  //   上限: 每个 session 最多 1 次 auto-retry (防 spam)
+  //     - user 新发消息时清零 (允许下次再 auto-retry)
+  //     - max=1 是 D210 保守选择: 第一次重试还失败 → 让 user 决定 (不无限循环)
+  //   行为: resend last user message (用完整 sendPrompt 流程, quote 不带)
+  //     - 2s 延迟 (让 sidecar 清理 + user 看到"正在重试..."指示)
+  //   user 取消: forceStopStreaming 会清空 autoRetryCount, 下次不重试
+  const AUTO_RETRY_MAX = 1;
+  const AUTO_RETRY_DELAY_MS = 2_000;
+  function isAssistantMessageEmpty(assistantMsg: { content?: string; steps?: Step[] } | null | undefined): boolean {
+    if (!assistantMsg) return true;
+    // 1. 检查 content (顶层)
+    if ((assistantMsg.content || '').trim().length > 0) return false;
+    // 2. 检查 steps: text / thinking / toolCalls / 任何一项非空都不算空
+    const steps = assistantMsg.steps || [];
+    for (const s of steps) {
+      if ((s.stepText || '').trim().length > 0) return false;
+      if ((s.thinking || []).length > 0) return false;
+      if ((s.toolCalls || []).length > 0) return false;
+    }
+    return true;
+  }
+  function getLastUserMessageContent(sessionId: string): string | null {
+    const d = getSessionData(sessionId);
+    if (!d) return null;
+    for (let i = d.messages.length - 1; i >= 0; i--) {
+      if (d.messages[i].role === 'user') {
+        return d.messages[i].content || null;
+      }
+    }
+    return null;
+  }
+  async function tryAutoRetry(sessionId: string) {
+    const count = autoRetryCountBySession.value[sessionId] ?? 0;
+    if (count >= AUTO_RETRY_MAX) {
+      console.log(`[chat] D210: auto-retry skipped (already retried ${count}/${AUTO_RETRY_MAX} times)`);
+      return false;
+    }
+    // 1. 找最新 assistant message
+    const d = getSessionData(sessionId);
+    if (!d) return false;
+    let lastAssistant: { role: string; content?: string; steps?: Step[] } | null = null;
+    for (let i = d.messages.length - 1; i >= 0; i--) {
+      if (d.messages[i].role === 'assistant') {
+        lastAssistant = d.messages[i];
+        break;
+      }
+    }
+    if (!isAssistantMessageEmpty(lastAssistant)) {
+      console.log('[chat] D210: auto-retry skipped (assistant message has content)');
+      return false;
+    }
+    // 2. 找 user message (要重发的内容)
+    const userContent = getLastUserMessageContent(sessionId);
+    if (!userContent || !userContent.trim()) {
+      console.log('[chat] D210: auto-retry skipped (no user message to resend)');
+      return false;
+    }
+    // 3. 增加计数 + 设置 retryBySession (UI 显示 "正在重试 1/1...")
+    autoRetryCountBySession.value = {
+      ...autoRetryCountBySession.value,
+      [sessionId]: count + 1,
+    };
+    retryBySession.value = {
+      ...retryBySession.value,
+      [sessionId]: {
+        attempt: count + 1,
+        maxAttempts: AUTO_RETRY_MAX,
+        errorMessage: 'LLM 异常, FE 主动重发中...',
+      },
+    };
+    chatData.value = { ...chatData.value };
+    console.log(`[chat] D210: auto-retry triggered (${count + 1}/${AUTO_RETRY_MAX}), resend in ${AUTO_RETRY_DELAY_MS}ms`);
+    // 4. 延迟 2s 后重发 (让 sidecar 清理 + user 看到 retry 指示)
+    setTimeout(async () => {
+      // 再次检查 session 是否还有效 (user 可能在这 2s 内关闭了 session / 切了 session)
+      // 修 (D210): 之前用 activeSession.value?.id 是未定义 ref (编译过但 runtime 永远 true,
+      //   任意 session 都重发). 正确是 sessionStore.activeSessionId.
+      if (sessionStore.activeSessionId !== sessionId) {
+        console.log('[chat] D210: auto-retry aborted (active session changed during delay)');
+        return;
+      }
+      // 5. 重发 (用 sendPrompt 完整流程, quote 不带 — auto-retry 不重复 quote)
+      await sendPrompt(userContent);
+    }, AUTO_RETRY_DELAY_MS);
+    return true;
+  }
+  // v0.5.0-D 第23轮 (D210): user 新发消息时清零 auto-retry count
+  //   让 user 的"再来一段"也能享受 auto-retry 保护
+  function clearAutoRetryCount(sessionId: string) {
+    if (autoRetryCountBySession.value[sessionId]) {
+      autoRetryCountBySession.value = {
+        ...autoRetryCountBySession.value,
+        [sessionId]: 0,
+      };
     }
   }
 
