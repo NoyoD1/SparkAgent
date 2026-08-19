@@ -173,6 +173,22 @@ export const useChatStore = defineStore('chat', () => {
   const streamHangBySession = ref<Record<string, boolean>>({});
   const lastStreamEventAt = new Map<string, number>();
   const streamHangTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // v0.5.0-D 第25轮 (D210.2) BUG FIX: listener off 函数 Map
+  //   之前 sendPrompt 创建的 listener (const off = await piTauri.on(...)) 是 local 变量,
+  //   sendPrompt 返回后 off 函数就丢了. agent_end willRetry=true 分支不调 off (因为它要
+  //   继续等 Pi SDK 内部 retry 的 events), 但这样就再也没机会调 off() 了 — 下次 sendPrompt
+  //   又调 piTauri.on() 加新 listener, 老 listener 一直活着. 多次 retry 后 N 个老 listener
+  //   都活着, 每个事件被处理 N 次.
+  //   修法: Map 跟踪 off 函数, sendPrompt 进来前 + watchdog force stop 时 + agent_end
+  //   willRetry=false (正常收尾) 都调 cleanupListenerForSession 清掉.
+  const listenerOffBySession = new Map<string, () => void>();
+  function cleanupListenerForSession(sessionId: string) {
+    const off = listenerOffBySession.get(sessionId);
+    if (off) {
+      try { off(); } catch (e) { console.warn('[chat] D210.2: listener off() failed (ignored)', e); }
+      listenerOffBySession.delete(sessionId);
+    }
+  }
   const STREAM_HANG_TIMEOUT_MS = 30_000;
   function touchStreamEvent(sessionId: string) {
     lastStreamEventAt.set(sessionId, Date.now());
@@ -200,6 +216,13 @@ export const useChatStore = defineStore('chat', () => {
         streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
         retryBySession.value = { ...retryBySession.value, [sessionId]: null };
         setPhase(sessionId, 'idle');
+        // v0.5.0-D 第25轮 (D210.2) BUG FIX: 清理老 listener
+        //   agent_end willRetry=true 分支不调 off() (要继续等 Pi SDK 内部 retry events),
+        //   30s 兜底时 watchdog 调 cleanupListenerForSession 把老 listener 清掉,
+        //   然后 tryAutoRetry 的 sendPrompt 会再加新的. 不清的话老 listener 活着,
+        //   后面 sendPrompt 进来前 cleanupListenerForSession 也会清, 但中间窗口老 listener
+        //   还会接到新 events (如果 sidecar 还活着发的话) 造成重复处理.
+        cleanupListenerForSession(sessionId);
         // 关 active step (跟 forceStopStreaming 一样, 不动已累积的 thinking/text)
         const d2 = getSessionData(sessionId);
         if (d2) {
@@ -552,10 +575,10 @@ export const useChatStore = defineStore('chat', () => {
    * - 没 workspace → 用 piTauri.ensureDefaultWorkspace() (<home>/PiAgent) 建 workspace + session, 再发
    *   (用户可手动通过 sidebar / tab strip 的"本地"下拉选别的路径)
    */
-  async function sendPrompt(content: string) {
+  async function sendPrompt(content: string, opts: { fromAutoRetry?: boolean } = {}) {
     const text = content.trim();
     if (!text) return;
-    console.log('[chat] sendPrompt: contentLen=', text.length, 'activeSession=', sessionStore.activeSessionId);
+    console.log('[chat] sendPrompt: contentLen=', text.length, 'activeSession=', sessionStore.activeSessionId, 'fromAutoRetry=', !!opts.fromAutoRetry);
 
     // 1. 确保有 active session
     let sessionId = sessionStore.activeSessionId;
@@ -612,7 +635,12 @@ export const useChatStore = defineStore('chat', () => {
     errorBySession.value = { ...errorBySession.value, [sessionId]: null };
     // v0.5.0-D 第23轮 (D210): user 新发消息 → 清零 auto-retry count
     //   之前失败 + auto-retry 用完的 session, user 主动发新消息 → 允许下次再 auto-retry
-    clearAutoRetryCount(sessionId);
+    // v0.5.0-D 第25轮 (D210.2) BUG FIX: 只在 user 主动发 (非 auto-retry resend) 时清零.
+    //   之前无脑 clearAutoRetryCount, 导致 auto-retry 的 sendPrompt 调 clearAutoRetryCount
+    //   把 count 清回 0, 下次 watchdog 触发时 count 还是 0 又能 retry 一次 (无限循环).
+    if (!opts.fromAutoRetry) {
+      clearAutoRetryCount(sessionId);
+    }
     // 引用用完即清, 跟发完就消失的 UX 一致 (避免下次发还残留)
     if (quote) clearQuote(sessionId);
     // touch session updated time
@@ -638,6 +666,15 @@ export const useChatStore = defineStore('chat', () => {
     // 启动 watchdog, timer 句柄存到 streamHangTimers map 统一管理
     // (agent_end / error / forceStopStreaming 调 stopStreamHangWatchdog 清掉)
     startStreamHangWatchdog(sessionId);
+    // v0.5.0-D 第25轮 (D210.2) BUG FIX: 清理上一次的 listener
+    //   之前 sendPrompt 直接 piTauri.on() 加新 listener, 但 agent_end willRetry=true 分支
+    //   return 时不调 off(), 导致上次的 listener 一直活着. 下次 sendPrompt 又加新的, 多次
+    //   retry 后老 listener 都活着, 每个事件被处理 N 次 → content 重复 N 次 / cumulative
+    //   context 累加 N 次 / user 看到 "重发三次后, 三个同样结果".
+    //   修法: listenerOffBySession map 跟踪 off 函数, 新 sendPrompt 进来前先调旧 off()
+    //   清理掉. watchdog force stop 时也调 off() 清理老 listener (然后 tryAutoRetry 的
+    //   sendPrompt 会再加新的).
+    cleanupListenerForSession(sessionId);
     const off = await piTauri.on((event) => {
       // 每个事件到达就 reset watchdog + 清 hang 标记
       // v0.5.0-D 第24轮 (D210.1) BUG FIX: 之前只 touchStreamEvent 记录 lastStreamEventAt 时间戳,
@@ -1185,6 +1222,11 @@ export const useChatStore = defineStore('chat', () => {
       }
       chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
     });
+    // v0.5.0-D 第25轮 (D210.2) BUG FIX: 存 off 到 map, 让 cleanupListenerForSession 能清理
+    //   agent_end willRetry=true 分支 (line 786 附近) 不调 off() 因为要继续等 Pi SDK 内部 retry,
+    //   这时候老 listener 必须保留. 但下次 sendPrompt / watchdog force stop / 新 tryAutoRetry
+    //   resend 时必须能调 off() 把老 listener 清掉 (否则 N 个老 listener 活着, 每个事件处理 N 次).
+    listenerOffBySession.set(sessionId, off);
     console.log('[chat] listener ready, invoking send_prompt');
 
     // 4. 触发 prompt
@@ -1499,7 +1541,11 @@ export const useChatStore = defineStore('chat', () => {
         return;
       }
       // 5. 重发 (用 sendPrompt 完整流程, quote 不带 — auto-retry 不重复 quote)
-      await sendPrompt(userContent);
+      // v0.5.0-D 第25轮 (D210.2) BUG FIX: fromAutoRetry=true 告诉 sendPrompt 这是 resend,
+      //   不要清零 autoRetryCount. 之前 sendPrompt 入口无脑 clearAutoRetryCount, 导致
+      //   auto-retry 调 sendPrompt 又把 count 清回 0, 下次 watchdog 触发时 count 还是 0
+      //   又能 retry 一次 → 无限循环, user 看到 3 次重发.
+      await sendPrompt(userContent, { fromAutoRetry: true });
     }, AUTO_RETRY_DELAY_MS);
     return true;
   }
