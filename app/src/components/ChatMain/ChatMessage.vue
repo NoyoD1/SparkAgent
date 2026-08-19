@@ -24,6 +24,8 @@
  */
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight, Quote } from 'lucide-vue-next';
+// 注: ChevronRight 之前是 step group collapsed indicator 用的, 这里引用 blockquote
+//     折叠 indicator 也复用, 不重复 import.
 import type { ChatMessage, Step, ToolCallBlock } from '@/lib/mock/types';
 import MarkdownContent from './MarkdownContent.vue';
 import { useChatStore } from '@/stores/chat';
@@ -153,6 +155,38 @@ function extractNewQuestion(content: string, quoteContent: string): string {
   after = after.replace(/^\n+/, '');
   return after;
 }
+
+// v0.5.0-D 第20轮 (D207): user 消息气泡里引用的可折叠行为
+//   默认 collapsed, 显示首行 + "..." + chevron, 点击展开全文 / 收起
+//   短引用 (< 80 字符单行) 自动不折叠 (用 Quote icon 装饰, 没有 chevron)
+//   阈值跟"长"判断: 单行 + 总长 < 80 → 不折叠, 否则折叠
+const QUOTE_COLLAPSE_THRESHOLD = 80;
+const isQuoteLong = computed(() => {
+  const q = props.message.quoteContent;
+  if (!q) return false;
+  // 多行 或 长度超过阈值 → 长
+  if (q.includes('\n')) return true;
+  return q.length > QUOTE_COLLAPSE_THRESHOLD;
+});
+const isQuoteCollapsed = ref(true);
+function toggleQuote() {
+  isQuoteCollapsed.value = !isQuoteCollapsed.value;
+}
+// 折叠时显示的预览: 首行 + "..."
+// 展开时显示全文
+const quotePreviewText = computed(() => {
+  const q = props.message.quoteContent || '';
+  if (!isQuoteLong.value || !isQuoteCollapsed.value) {
+    return q;
+  }
+  // 折叠: 取首行 (按 \n 切)
+  const firstLine = q.split('\n')[0] || '';
+  if (firstLine.length > QUOTE_COLLAPSE_THRESHOLD) {
+    return firstLine.slice(0, QUOTE_COLLAPSE_THRESHOLD) + '…';
+  }
+  // 首行短但有更多行 → 首行 + "..."
+  return firstLine + '…';
+});
 
 // v0.5.0-D 第12轮: 引用回复 (quote & reply) — 把整条 message 正文存到 chat store 的 quoteBySession
 //   Composer 显示引用预览, user send 时 quote 拼到 user message 前面 (block quote 格式)
@@ -385,11 +419,27 @@ const statusText = computed(() => {
                 跟 Composer 里的 quote preview 风格一致
              2. 新问题用 MarkdownContent 渲染 (普通 markdown)
            quoteContent 是原引用文本 (没 > 前缀), 从 message.content 里去掉 > 前缀的部分
+           v0.5.0-D 第20轮 (D207): 引用部分可折叠 (默认 collapsed, 点击展开)
+             之前 (D206): 96px max-height + overflow-y: auto (滑动查看)
+             现在: 默认只显示第一行 + chevron icon, 点击展开全文 / 收起
+             短引用 (< 80 字符单行) 自动不折叠, 直接全显 + Quote icon (装饰)
+             比滑动更清晰: 一眼看到"有引用, 点开看", 不用猜底下还有内容
            -->
       <template v-if="message.quoteContent">
-        <div class="pad-msg__quote-block">
-          <Quote :size="12" :stroke-width="1.75" class="pad-msg__quote-icon" />
-          <div class="pad-msg__quote-text">{{ message.quoteContent }}</div>
+        <div
+          class="pad-msg__quote-block"
+          :class="{ 'is-collapsed': isQuoteCollapsed, 'is-clickable': isQuoteLong }"
+          @click="isQuoteLong && toggleQuote()"
+        >
+          <ChevronRight
+            v-if="isQuoteLong"
+            :size="12"
+            :stroke-width="1.75"
+            class="pad-msg__quote-chevron"
+            :class="{ 'is-expanded': !isQuoteCollapsed }"
+          />
+          <Quote v-else :size="12" :stroke-width="1.75" class="pad-msg__quote-icon" />
+          <div class="pad-msg__quote-text">{{ quotePreviewText }}</div>
         </div>
         <!-- 新问题部分: 从 message.content 去掉 quote 的 > 前缀行 + 空行 -->
         <div class="pad-msg__new-question">
@@ -662,7 +712,13 @@ const statusText = computed(() => {
  *   跟 Composer 的 quote preview 风格一致 (左边框 + 缩进 + 灰背景)
  *   引用部分用专门的 div 渲染, 不走 MarkdownContent (那样渲染成 markdown blockquote 视觉太朴素)
  *   新问题部分用 MarkdownContent 正常渲染
- *   布局: 引用 blockquote 在上, 新问题在下, 8px gap */
+ *   布局: 引用 blockquote 在上, 新问题在下, 8px gap
+ *   v0.5.0-D 第20轮 (D207): 改为可折叠 (默认 collapsed, 点击展开)
+ *     - 短引用 (单行 < 80 字符) 不折叠, 用 Quote icon
+ *     - 长引用 (多行 或 > 80 字符) 折叠, 用 ChevronRight icon, 展开后变 ChevronDown (旋转 90deg)
+ *     - 折叠时显示首行 + "..." (preview), 展开显示全文
+ *     - is-clickable: cursor pointer + hover 背景色
+ *     - 不再 max-height + overflow (D206 的滑动方案, 视觉不清晰) */
 .pad-msg__quote-block {
   display: flex;
   align-items: flex-start;
@@ -674,20 +730,35 @@ const statusText = computed(() => {
   border-radius: 0 6px 6px 0;
   font-size: var(--pad-fs-12);
   color: var(--pad-fg-tertiary);
+  user-select: text;
+  transition: background var(--pad-dur-fast, 0.12s) ease;
+}
+.pad-msg__quote-block.is-clickable {
+  cursor: pointer;
+}
+.pad-msg__quote-block.is-clickable:hover {
+  background: var(--pad-bg-hover, rgba(0, 0, 0, 0.04));
 }
 .pad-msg__quote-icon {
   flex-shrink: 0;
   margin-top: 2px;
   color: var(--pad-fg-tertiary);
 }
+.pad-msg__quote-chevron {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--pad-fg-tertiary);
+  transition: transform var(--pad-dur-fast, 0.12s) ease;
+}
+.pad-msg__quote-chevron.is-expanded {
+  transform: rotate(90deg);
+}
 .pad-msg__quote-text {
   flex: 1;
   white-space: pre-wrap;
   word-break: break-word;
-  /* 多行时正常换行, 不要被截断 */
+  /* 多行时正常换行, 不要被截断 (D207 删了 max-height, 让引用按需展开) */
   line-height: var(--pad-lh-base, 1.5);
-  max-height: 96px;
-  overflow-y: auto;
 }
 .pad-msg__new-question {
   /* 新问题部分: 普通 markdown 渲染, 跟原 user 气泡一致 */
