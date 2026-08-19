@@ -640,7 +640,16 @@ export const useChatStore = defineStore('chat', () => {
     startStreamHangWatchdog(sessionId);
     const off = await piTauri.on((event) => {
       // 每个事件到达就 reset watchdog + 清 hang 标记
+      // v0.5.0-D 第24轮 (D210.1) BUG FIX: 之前只 touchStreamEvent 记录 lastStreamEventAt 时间戳,
+      //   但 startStreamHangWatchdog 里 setTimeout(..., 30_000) 是固定的 30s 后触发 (从
+      //   sendPrompt 算起), 不会因为后续事件自动延后. 如果最后事件在 t=5s 到达, timer 在
+      //   t=30s 触发, 此时 Date.now() - last = 25s < 30s, 条件不满足, watchdog 直接返回不做事.
+      //   user 反馈: "等待 LLM 重试中..." banner 永远挂着, 30s 兜底永不触发.
+      //   修法: 每个事件都重新调 startStreamHangWatchdog (stop 旧的 + start 新的 30s timer),
+      //   这样 setTimeout 真正每次从最后事件算起 30s, 触发时 Date.now() - last 必 >= 30s.
+      //   touchStreamEvent 保留作为 Date.now() - last >= 30s 的 safety net 双重检查.
       touchStreamEvent(sessionId);
+      startStreamHangWatchdog(sessionId);
       if (streamHangBySession.value[sessionId]) {
         streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: false };
         chatData.value = { ...chatData.value };  // 触发 UI 更新
