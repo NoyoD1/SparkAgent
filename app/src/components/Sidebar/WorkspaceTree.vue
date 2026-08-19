@@ -24,6 +24,12 @@
  *   - 归档项显示 [from A] 源工作区角标
  *   - archive 列表右键 → Restore / Delete permanently (后者走 danger ConfirmDialog)
  *   - 旧 store.removeSession 保留 (其他 code path 可能用), UI 入口全部走 archive 流
+ *
+ * v0.6.0 Phase 4: Tag chip 显示 + add-tag 接通.
+ *   - session item 标题下加第二行 tag chip row (小字, sub-color, 仅当 tags.length > 0 才显示)
+ *   - chip 点击直接 removeTag (轻量操作, 不走 confirm)
+ *   - 右键菜单 'Add tag...' 已由 SessionContextMenu 内部变 input (Phase 4 wired)
+ *   - onContextMenuAction.add-tag → sessionStore.addTag
  */
 import { ref, computed, nextTick } from 'vue';
 import { storeToRefs } from 'pinia';
@@ -247,8 +253,9 @@ function onContextMenuAction(payload: { type: string; payload?: any }) {
       onStartRename(sessionId);
       break;
     case 'add-tag':
-      // Phase 4 才接
-      console.log('[Phase 4] add-tag not yet wired');
+      if (payload.payload?.tag) {
+        sessionStore.addTag(sessionId, payload.payload.tag);
+      }
       break;
     case 'remove-tag':
       if (payload.payload?.tag) {
@@ -417,23 +424,39 @@ function requestDeletePermanently(sessionId: string) {
               >
                 <span class="pad-wstree__session-dot" v-if="activeSessionId === s.id" />
                 <MessageCircle v-else :size="11" :stroke-width="1.75" class="pad-wstree__session-icon" />
-                <!-- inline rename input -->
-                <input
-                  v-if="renamingSessionId === s.id"
-                  ref="renameInputEl"
-                  v-model="renameValue"
-                  class="pad-wstree__session-rename-input"
-                  @keydown.enter.prevent="onConfirmRename"
-                  @keydown.escape.prevent="onCancelRename"
-                  @blur="onConfirmRename"
-                  @click.stop
-                  @dblclick.stop
-                  @contextmenu.stop
-                />
-                <span v-else class="pad-wstree__session-title">
-                  <span v-if="s.pinned" class="pad-wstree__session-pin">📌</span>
-                  {{ s.title || '新任务' }}
-                </span>
+                <div class="pad-wstree__session-body">
+                  <!-- inline rename input -->
+                  <input
+                    v-if="renamingSessionId === s.id"
+                    ref="renameInputEl"
+                    v-model="renameValue"
+                    class="pad-wstree__session-rename-input"
+                    @keydown.enter.prevent="onConfirmRename"
+                    @keydown.escape.prevent="onCancelRename"
+                    @blur="onConfirmRename"
+                    @click.stop
+                    @dblclick.stop
+                    @contextmenu.stop
+                  />
+                  <span v-else class="pad-wstree__session-title">
+                    <span v-if="s.pinned" class="pad-wstree__session-pin">📌</span>
+                    {{ s.title || '新任务' }}
+                  </span>
+                  <!-- Phase 4: tag chip row (仅当有 tag 且不在 rename 才显示) -->
+                  <div
+                    v-if="s.tags && s.tags.length > 0 && renamingSessionId !== s.id"
+                    class="pad-wstree__session-tags"
+                  >
+                    <button
+                      v-for="t in s.tags"
+                      :key="t"
+                      type="button"
+                      class="pad-wstree__session-tag"
+                      :title="`删除 tag: ${t}`"
+                      @click.stop="sessionStore.removeTag(s.id, t)"
+                    >#{{ t }}</button>
+                  </div>
+                </div>
                 <!-- Phase 3: inline 按钮: 📦Archive (替代旧 Trash2 delete) -->
                 <button
                   class="pad-wstree__session-action"
@@ -469,19 +492,35 @@ function requestDeletePermanently(sessionId: string) {
             >
               <span class="pad-wstree__session-dot" v-if="activeSessionId === s.id" />
               <MessageCircle v-else :size="11" :stroke-width="1.75" class="pad-wstree__session-icon" />
-              <input
-                v-if="renamingSessionId === s.id"
-                ref="renameInputEl"
-                v-model="renameValue"
-                class="pad-wstree__session-rename-input"
-                @keydown.enter.prevent="onConfirmRename"
-                @keydown.escape.prevent="onCancelRename"
-                @blur="onConfirmRename"
-                @click.stop
-                @dblclick.stop
-                @contextmenu.stop
-              />
-              <span v-else class="pad-wstree__session-title">{{ s.title || '新任务' }}</span>
+              <div class="pad-wstree__session-body">
+                <input
+                  v-if="renamingSessionId === s.id"
+                  ref="renameInputEl"
+                  v-model="renameValue"
+                  class="pad-wstree__session-rename-input"
+                  @keydown.enter.prevent="onConfirmRename"
+                  @keydown.escape.prevent="onCancelRename"
+                  @blur="onConfirmRename"
+                  @click.stop
+                  @dblclick.stop
+                  @contextmenu.stop
+                />
+                <span v-else class="pad-wstree__session-title">{{ s.title || '新任务' }}</span>
+                <!-- Phase 4: tag chip row -->
+                <div
+                  v-if="s.tags && s.tags.length > 0 && renamingSessionId !== s.id"
+                  class="pad-wstree__session-tags"
+                >
+                  <button
+                    v-for="t in s.tags"
+                    :key="t"
+                    type="button"
+                    class="pad-wstree__session-tag"
+                    :title="`删除 tag: ${t}`"
+                    @click.stop="sessionStore.removeTag(s.id, t)"
+                  >#{{ t }}</button>
+                </div>
+              </div>
               <button
                 class="pad-wstree__session-action"
                 title="归档 (移动到底部归档区)"
@@ -527,12 +566,28 @@ function requestDeletePermanently(sessionId: string) {
         >
           <span class="pad-wstree__session-dot" v-if="activeSessionId === s.id" />
           <Archive v-else :size="11" :stroke-width="1.75" class="pad-wstree__session-icon" />
-          <span class="pad-wstree__session-title">
-            {{ s.title || '新任务' }}
-            <span class="pad-wstree__session-from" :title="`来自工作区: ${getWorkspaceName(s.workspaceId)}`">
-              [from {{ getWorkspaceName(s.workspaceId) }}]
+          <div class="pad-wstree__session-body">
+            <span class="pad-wstree__session-title">
+              {{ s.title || '新任务' }}
+              <span class="pad-wstree__session-from" :title="`来自工作区: ${getWorkspaceName(s.workspaceId)}`">
+                [from {{ getWorkspaceName(s.workspaceId) }}]
+              </span>
             </span>
-          </span>
+            <!-- Phase 4: tag chip row (archived session 不支持 inline rename, 直接显示) -->
+            <div
+              v-if="s.tags && s.tags.length > 0"
+              class="pad-wstree__session-tags"
+            >
+              <button
+                v-for="t in s.tags"
+                :key="t"
+                type="button"
+                class="pad-wstree__session-tag"
+                :title="`删除 tag: ${t}`"
+                @click.stop="sessionStore.removeTag(s.id, t)"
+              >#{{ t }}</button>
+            </div>
+          </div>
         </div>
       </template>
     </div>
@@ -946,6 +1001,45 @@ function requestDeletePermanently(sessionId: string) {
   margin-right: 2px;
   font-size: 10px;
   vertical-align: 1px;
+}
+
+/* Phase 4: session item 内部 body (title + tag chips 垂直堆叠) */
+.pad-wstree__session-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* 跟外层 item 一样单行省略 title, 避免 tag 行干扰 */
+}
+
+/* Phase 4: tag chip 行 (小字, sub-color, 仅当有 tag 才显示) */
+.pad-wstree__session-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  /* 略缩进对齐 title 文字起始 */
+  padding-left: 0;
+}
+.pad-wstree__session-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--pad-fs-10, 10px);
+  line-height: 1.4;
+  padding: 0 5px;
+  height: 14px;
+  background: var(--pad-bg-hover, rgba(0, 0, 0, 0.04));
+  color: var(--pad-fg-tertiary, #888);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  font-family: var(--pad-font-mono, monospace);
+  transition: background var(--pad-dur-fast, 0.15s) ease, color var(--pad-dur-fast, 0.15s) ease;
+  flex-shrink: 0;
+}
+.pad-wstree__session-tag:hover {
+  background: var(--pad-danger-subtle, rgba(239, 68, 68, 0.08));
+  color: var(--pad-danger-text, #ef4444);
 }
 
 /* Phase 3: archive 列表 [from A] 角标 */

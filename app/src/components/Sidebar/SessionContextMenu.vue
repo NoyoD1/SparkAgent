@@ -2,6 +2,12 @@
 /**
  * SessionContextMenu · session 右键 kebab 菜单 (Phase 1)
  *
+ * Phase 4 改造: "Add tag..." 按钮原地变 input (Enter 提交, Esc 取消回菜单)
+ *  - onAddTagClick → addingTag = true → focus input
+ *  - onAddTagConfirm → emit('action', { type: 'add-tag', payload: { tag } }) + close
+ *  - onAddTagCancel → addingTag = false (菜单保持开)
+ *  - document keydown Esc 在 addingTag 时不再 close 菜单 (让 input 自己的 handler 处理)
+ *
  * 用法:
  *   <SessionContextMenu
  *     v-if="menuSession"
@@ -15,7 +21,7 @@
  * emit action 类型:
  *   - 'pin' | 'unpin'
  *   - 'rename'
- *   - 'add-tag' (Phase 4 UI 触发 tag 输入)
+ *   - 'add-tag' + payload: { tag: string }
  *   - 'remove-tag' + payload: { tag: string }
  *   - 'archive' (active session 才显示)
  *   - 'restore' (archived session 才显示)
@@ -78,6 +84,8 @@ function onClickOutside(e: MouseEvent) {
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
+    // Phase 4: 在 tag 输入态, Esc 优先由 input 自己的 handler 处理 (cancel 输入, 保持菜单)
+    if (addingTag.value) return;
     e.preventDefault();
     emit('close');
   }
@@ -99,6 +107,31 @@ onUnmounted(() => {
 const isArchived = computed(() => !!props.session.archived);
 const isPinned = computed(() => !!props.session.pinned);
 const tags = computed(() => props.session.tags ?? []);
+
+// Phase 4: "Add tag..." 按钮原地变输入框
+const addingTag = ref(false);
+const tagInputValue = ref('');
+const tagInputEl = ref<HTMLInputElement | null>(null);
+
+async function onAddTagClick() {
+  addingTag.value = true;
+  tagInputValue.value = '';
+  await nextTick();
+  tagInputEl.value?.focus();
+}
+
+function onAddTagConfirm() {
+  const t = tagInputValue.value.trim();
+  if (t) {
+    emit('action', { type: 'add-tag', payload: { tag: t } });
+  }
+  emit('close');
+}
+
+function onAddTagCancel() {
+  addingTag.value = false;
+  tagInputValue.value = '';
+}
 
 function emitAction(type: string, payload?: any) {
   emit('action', { type, payload });
@@ -124,7 +157,22 @@ function emitAction(type: string, payload?: any) {
       <span>Rename</span>
     </button>
 
-    <button class="pad-contextmenu-item" @click="emitAction('add-tag')">
+    <!-- Phase 4: 'Add tag...' 原地变 input (Enter 提交, Esc 取消回菜单) -->
+    <div v-if="addingTag" class="pad-contextmenu-addtag">
+      <span class="pad-contextmenu-item__icon">🏷</span>
+      <input
+        ref="tagInputEl"
+        v-model="tagInputValue"
+        type="text"
+        class="pad-contextmenu-addtag-input"
+        placeholder="输入 tag 名..."
+        maxlength="32"
+        @keydown.enter.prevent="onAddTagConfirm"
+        @keydown.escape.prevent="onAddTagCancel"
+        @click.stop
+      />
+    </div>
+    <button v-else class="pad-contextmenu-item" @click="onAddTagClick">
       <span class="pad-contextmenu-item__icon">🏷</span>
       <span>Add tag...</span>
     </button>
@@ -248,5 +296,29 @@ function emitAction(type: string, payload?: any) {
   font-size: var(--pad-fs-13, 13px);
   color: var(--pad-fg-tertiary, #888);
   margin-left: 2px;
+}
+
+/* Phase 4: in-menu add tag input (替换 'Add tag...' 按钮, 原地变输入框) */
+.pad-contextmenu-addtag {
+  display: flex;
+  align-items: center;
+  gap: var(--pad-sp-2, 8px);
+  padding: var(--pad-sp-2, 8px) var(--pad-sp-3, 12px);
+}
+.pad-contextmenu-addtag-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--pad-accent, #3b82f6);
+  border-radius: var(--pad-radius-sm, 4px);
+  background: var(--pad-bg-card, #ffffff);
+  color: var(--pad-fg-primary, #1a1a1a);
+  font: inherit;
+  font-size: var(--pad-fs-13, 13px);
+  padding: 2px 6px;
+  outline: none;
+  height: 22px;
+}
+.pad-contextmenu-addtag-input:focus {
+  box-shadow: 0 0 0 2px var(--pad-accent-soft, rgba(59, 130, 246, 0.18));
 }
 </style>
