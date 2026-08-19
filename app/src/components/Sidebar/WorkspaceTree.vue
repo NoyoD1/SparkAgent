@@ -11,19 +11,35 @@
  *   "agent 是边界定义/思维指导, 不需要切换, single agent 链路拉动"). 删 hardcoded
  *   "Code Reviewer / Refactor / + 更多即将推出" placeholder + v0.4.6.2 改造的
  *   真实数据 group + 折叠 state + 切主 button. Sidebar 回到 v0.4.6 之前形态.
+ *
+ * v0.6.0 Phase 1: session store +6 fields / +8 actions / +4 getters; 新建 ConfirmDialog
+ *   (Common) + SessionContextMenu (Sidebar) 通用组件.
+ *
+ * v0.6.0 Phase 2: rename inline (dblclick) + right-click kebab menu + Pin to top section
+ *   (📌 Pinned) 在每个 workspace 树顶部. 不破坏现有 active section 渲染逻辑.
+ *
+ * v0.6.0 Phase 3: 归档/恢复/永久删除流.
+ *   - active session 顶右 inline 按钮: ❌删 → 📦Archive (走 ConfirmDialog → archiveSession)
+ *   - sidebar 顶层 🗄 归档 section (workspace 列表外, 同滚动区底部, 不嵌套到任何 ws)
+ *   - 归档项显示 [from A] 源工作区角标
+ *   - archive 列表右键 → Restore / Delete permanently (后者走 danger ConfirmDialog)
+ *   - 旧 store.removeSession 保留 (其他 code path 可能用), UI 入口全部走 archive 流
  */
-import { ref, computed } from 'vue';
+import { ref, computed, nextTick } from 'vue';
 import { storeToRefs } from 'pinia';
 import {
   ChevronRight,
   Folder,
   Plus,
   Trash2,
+  Archive,
   MessageCircle,
 } from 'lucide-vue-next';
 import { useSessionStore } from '@/stores/session';
 import { useChatStore } from '@/stores/chat';
 import { pickFolder } from '@/lib/dialog';
+import SessionContextMenu from './SessionContextMenu.vue';
+import ConfirmDialog from '@/components/Common/ConfirmDialog.vue';
 
 const sessionStore = useSessionStore();
 const chatStore = useChatStore();
@@ -152,9 +168,166 @@ function removeWorkspace(id: string) {
   if (!confirm('删除这个工作区? 所有 session 一并删.')) return;
   sessionStore.removeWorkspace(id);
 }
-function removeSession(id: string) {
-  if (!confirm('删除这个 session? 消息一并删.')) return;
-  sessionStore.removeSession(id);
+
+// ====== Phase 2: Rename inline + 右键菜单 state ======
+
+const renamingSessionId = ref<string | null>(null);
+const renameValue = ref('');
+const renameInputEl = ref<HTMLInputElement | null>(null);
+
+const contextMenuSessionId = ref<string | null>(null);
+const contextMenuX = ref(0);
+const contextMenuY = ref(0);
+
+const contextMenuSession = computed(() => {
+  if (!contextMenuSessionId.value) return null;
+  return sessionStore.sessions.find((s) => s.id === contextMenuSessionId.value) ?? null;
+});
+
+/**
+ * 当前 workspace 下未 pinned 的 active session (active section 用)
+ * pinned section 单独渲染, 避免重复
+ */
+function activeNonPinned(wsId: string) {
+  return sessionStore.activeSessionsByWorkspace(wsId).filter((s) => !s.pinned);
+}
+
+async function onStartRename(id: string) {
+  const s = sessionStore.sessions.find((x) => x.id === id);
+  if (!s) return;
+  // 切换目标前先取消正在 rename 的
+  renamingSessionId.value = id;
+  renameValue.value = s.title;
+  await nextTick();
+  // focus + select all
+  renameInputEl.value?.focus();
+  renameInputEl.value?.select();
+}
+
+function onConfirmRename() {
+  if (!renamingSessionId.value) return;
+  const id = renamingSessionId.value;
+  const newTitle = renameValue.value.trim();
+  if (newTitle) {
+    sessionStore.renameSession(id, newTitle);
+  }
+  renamingSessionId.value = null;
+  renameValue.value = '';
+}
+
+function onCancelRename() {
+  renamingSessionId.value = null;
+  renameValue.value = '';
+}
+
+function onContextMenu(e: MouseEvent, id: string) {
+  e.preventDefault();
+  // 正在 rename 同一个 session, 不弹菜单
+  if (renamingSessionId.value === id) return;
+  contextMenuSessionId.value = id;
+  contextMenuX.value = e.clientX;
+  contextMenuY.value = e.clientY;
+}
+
+function closeContextMenu() {
+  contextMenuSessionId.value = null;
+}
+
+function onContextMenuAction(payload: { type: string; payload?: any }) {
+  const sessionId = contextMenuSessionId.value;
+  if (!sessionId) return;
+  switch (payload.type) {
+    case 'pin':
+      sessionStore.setPinned(sessionId, true);
+      break;
+    case 'unpin':
+      sessionStore.setPinned(sessionId, false);
+      break;
+    case 'rename':
+      onStartRename(sessionId);
+      break;
+    case 'add-tag':
+      // Phase 4 才接
+      console.log('[Phase 4] add-tag not yet wired');
+      break;
+    case 'remove-tag':
+      if (payload.payload?.tag) {
+        sessionStore.removeTag(sessionId, payload.payload.tag);
+      }
+      break;
+    case 'archive':
+      requestArchive(sessionId);
+      break;
+    case 'restore':
+      // restore 不需要 confirm, 单步可逆操作
+      sessionStore.restoreSession(sessionId);
+      break;
+    case 'delete-permanently':
+      requestDeletePermanently(sessionId);
+      break;
+  }
+}
+
+// ====== Phase 3: 归档 / 永久删除 ConfirmDialog 流 ======
+
+const confirmOpen = ref(false);
+const confirmTitle = ref('');
+const confirmMessage = ref('');
+const confirmLabel = ref('确定');
+const confirmDanger = ref(false);
+let confirmCallback: (() => void) | null = null;
+
+function showConfirm(opts: {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  danger?: boolean;
+  onConfirm: () => void;
+}) {
+  confirmTitle.value = opts.title;
+  confirmMessage.value = opts.message;
+  confirmLabel.value = opts.confirmLabel ?? '确定';
+  confirmDanger.value = opts.danger ?? false;
+  confirmCallback = opts.onConfirm;
+  confirmOpen.value = true;
+}
+
+function onConfirmAction() {
+  const cb = confirmCallback;
+  confirmCallback = null;
+  cb?.();
+}
+
+/** workspace 名字 lookup (archive section 角标用) */
+function getWorkspaceName(workspaceId: string): string {
+  return sessionStore.getWorkspace(workspaceId)?.name ?? '(已删工作区)';
+}
+
+function requestArchive(sessionId: string) {
+  const s = sessionStore.sessions.find((x) => x.id === sessionId);
+  if (!s) return;
+  showConfirm({
+    title: '归档这个 session?',
+    message: `「${s.title || '新任务'}」\n\n归档后会从工作区列表移除, 可在底部归档区恢复或永久删除.`,
+    confirmLabel: '归档',
+    onConfirm: () => {
+      sessionStore.archiveSession(sessionId);
+    },
+  });
+}
+
+function requestDeletePermanently(sessionId: string) {
+  const s = sessionStore.sessions.find((x) => x.id === sessionId);
+  if (!s) return;
+  showConfirm({
+    title: '永久删除这个 session?',
+    message: `「${s.title || '新任务'}」\n\n此操作不可撤销.\n\nPi SDK 的对话历史仍保留在本地 jsonl 文件中, 但前端不再可见.`,
+    confirmLabel: '永久删除',
+    danger: true,
+    onConfirm: () => {
+      sessionStore.deleteSessionPermanently(sessionId);
+    },
+  });
 }
 </script>
 
@@ -218,11 +391,69 @@ function removeSession(id: string) {
           </div>
         </div>
 
-        <!-- sessions 列表 -->
+        <!-- sessions 列表 (Phase 2: pinned section + active section + inline rename + context menu) -->
         <Transition name="pad-wsexpand">
           <div v-if="expandedWorkspaceIds.has(ws.id)" class="pad-wstree__sessions">
+            <!-- 📌 Pinned section (Phase 2) -->
+            <template v-if="sessionStore.pinnedSessionsByWorkspace(ws.id).length > 0">
+              <div class="pad-wstree__sub-label">
+                <span>📌 Pinned</span>
+                <span class="pad-wstree__count">{{ sessionStore.pinnedSessionsByWorkspace(ws.id).length }}</span>
+              </div>
+              <div
+                v-for="s in sessionStore.pinnedSessionsByWorkspace(ws.id)"
+                :key="'pinned-' + s.id"
+                class="pad-wstree__session"
+                :class="{
+                  'is-active': activeSessionId === s.id,
+                  'is-streaming': chatStore.isStreamingSession(s.id),
+                }"
+                @click="selectSession(s.id)"
+                @dblclick.stop="onStartRename(s.id)"
+                @contextmenu.prevent="onContextMenu($event, s.id)"
+                @mouseenter="(e) => onSessionEnter(e, s.id)"
+                @mousemove="onSessionMove"
+                @mouseleave="onSessionLeave"
+              >
+                <span class="pad-wstree__session-dot" v-if="activeSessionId === s.id" />
+                <MessageCircle v-else :size="11" :stroke-width="1.75" class="pad-wstree__session-icon" />
+                <!-- inline rename input -->
+                <input
+                  v-if="renamingSessionId === s.id"
+                  ref="renameInputEl"
+                  v-model="renameValue"
+                  class="pad-wstree__session-rename-input"
+                  @keydown.enter.prevent="onConfirmRename"
+                  @keydown.escape.prevent="onCancelRename"
+                  @blur="onConfirmRename"
+                  @click.stop
+                  @dblclick.stop
+                  @contextmenu.stop
+                />
+                <span v-else class="pad-wstree__session-title">
+                  <span v-if="s.pinned" class="pad-wstree__session-pin">📌</span>
+                  {{ s.title || '新任务' }}
+                </span>
+                <!-- Phase 3: inline 按钮: 📦Archive (替代旧 Trash2 delete) -->
+                <button
+                  class="pad-wstree__session-action"
+                  title="归档 (移动到底部归档区)"
+                  @click.stop="requestArchive(s.id)"
+                >
+                  <Archive :size="11" :stroke-width="1.75" />
+                </button>
+              </div>
+            </template>
+
+            <!-- Active section (Phase 2) -->
+            <template v-if="activeNonPinned(ws.id).length > 0">
+              <div class="pad-wstree__sub-label">
+                <span>Active</span>
+                <span class="pad-wstree__count">{{ activeNonPinned(ws.id).length }}</span>
+              </div>
+            </template>
             <div
-              v-for="s in sessionStore.getSessionsByWorkspace(ws.id)"
+              v-for="s in activeNonPinned(ws.id)"
               :key="s.id"
               class="pad-wstree__session"
               :class="{
@@ -230,25 +461,38 @@ function removeSession(id: string) {
                 'is-streaming': chatStore.isStreamingSession(s.id),
               }"
               @click="selectSession(s.id)"
+              @dblclick.stop="onStartRename(s.id)"
+              @contextmenu.prevent="onContextMenu($event, s.id)"
               @mouseenter="(e) => onSessionEnter(e, s.id)"
               @mousemove="onSessionMove"
               @mouseleave="onSessionLeave"
             >
               <span class="pad-wstree__session-dot" v-if="activeSessionId === s.id" />
               <MessageCircle v-else :size="11" :stroke-width="1.75" class="pad-wstree__session-icon" />
-              <span class="pad-wstree__session-title">{{ s.title || '新任务' }}</span>
-              <!-- v0.4.1.5+: 删除按钮统一在右侧, 默认半透明显眼但弱化, hover 完全不透明
-                   (之前: 只 active 或 hover 显示, 位置/可见性不统一) -->
+              <input
+                v-if="renamingSessionId === s.id"
+                ref="renameInputEl"
+                v-model="renameValue"
+                class="pad-wstree__session-rename-input"
+                @keydown.enter.prevent="onConfirmRename"
+                @keydown.escape.prevent="onCancelRename"
+                @blur="onConfirmRename"
+                @click.stop
+                @dblclick.stop
+                @contextmenu.stop
+              />
+              <span v-else class="pad-wstree__session-title">{{ s.title || '新任务' }}</span>
               <button
-                class="pad-wstree__session-del"
-                title="删 session"
-                @click.stop="removeSession(s.id)"
+                class="pad-wstree__session-action"
+                title="归档 (移动到底部归档区)"
+                @click.stop="requestArchive(s.id)"
               >
-                <Trash2 :size="11" :stroke-width="1.75" />
+                <Archive :size="11" :stroke-width="1.75" />
               </button>
             </div>
+
             <button
-              v-if="sessionStore.getSessionsByWorkspace(ws.id).length === 0"
+              v-if="sessionStore.activeSessionsByWorkspace(ws.id).length === 0"
               class="pad-wstree__session-empty"
               disabled
             >
@@ -257,9 +501,63 @@ function removeSession(id: string) {
           </div>
         </Transition>
       </div>
+
+      <!-- ====== Phase 3: 顶层 归档 section (workspace 列表外, sidebar 同一滚动区底部) ====== -->
+      <template v-if="sessionStore.archivedSessions.length > 0">
+        <div class="pad-wstree__divider" />
+        <div class="pad-wstree__sub-label">
+          <span class="pad-wstree__sub-label-icon">
+            <Archive :size="11" :stroke-width="1.75" />
+            归档
+          </span>
+          <span class="pad-wstree__count">{{ sessionStore.archivedSessions.length }}</span>
+        </div>
+        <div
+          v-for="s in sessionStore.archivedSessions"
+          :key="'archived-' + s.id"
+          class="pad-wstree__session pad-wstree__session--archived"
+          :class="{
+            'is-active': activeSessionId === s.id,
+          }"
+          @click="selectSession(s.id)"
+          @contextmenu.prevent="onContextMenu($event, s.id)"
+          @mouseenter="(e) => onSessionEnter(e, s.id)"
+          @mousemove="onSessionMove"
+          @mouseleave="onSessionLeave"
+        >
+          <span class="pad-wstree__session-dot" v-if="activeSessionId === s.id" />
+          <Archive v-else :size="11" :stroke-width="1.75" class="pad-wstree__session-icon" />
+          <span class="pad-wstree__session-title">
+            {{ s.title || '新任务' }}
+            <span class="pad-wstree__session-from" :title="`来自工作区: ${getWorkspaceName(s.workspaceId)}`">
+              [from {{ getWorkspaceName(s.workspaceId) }}]
+            </span>
+          </span>
+        </div>
+      </template>
     </div>
 
     <!-- v0.5.0-v0.1: 删底部 "Agent 团队" group (回滚 multi-agent persona) -->
+
+    <!-- ====== Phase 2: Session 右键菜单 (Teleport 到 body) ====== -->
+    <SessionContextMenu
+      v-if="contextMenuSession"
+      :x="contextMenuX"
+      :y="contextMenuY"
+      :session="contextMenuSession"
+      @action="onContextMenuAction"
+      @close="closeContextMenu"
+    />
+
+    <!-- ====== Phase 3: 通用 ConfirmDialog (Teleport 到 body) ====== -->
+    <ConfirmDialog
+      v-model:open="confirmOpen"
+      :title="confirmTitle"
+      :message="confirmMessage"
+      :confirm-label="confirmLabel"
+      :danger="confirmDanger"
+      @confirm="onConfirmAction"
+    />
 
     <!-- ====== Session hover 预览 popover (Teleport 到 body) ====== -->
     <Teleport to="body">
@@ -580,13 +878,13 @@ function removeSession(id: string) {
   /* v0.5.3 方向修正 — X 减 200% = image 向右移 = shine 也向右移 = **左→右 sweep**
    * (v0.5.2 写的 0% X=-150% → 100% X=+50% 是 X 增, image 向左移, shine 也左移 → 实际是右→左,
    *  跟用户期望相反)
-
+   *
    * CSS 数学 (image 宽 W=2×container, 50% image 处是 shine 中心):
    *   P (image 0% 标记在 container 位置) = -X
    *   shine 视觉位置 = P + W/2 = -X + 1
    *   X 增大 → P 减小 (向左) → shine 也向左 = **右→左**
    *   X 减小 → P 增大 (向右) → shine 也向右 = **左→右** ✅
-
+   *
    * v0.5.3 终值 (对称 0% 100% 都 shine 在 container 外 = 真无缝 loop):
    *   pos=150% 0 (0%): P = -150%, shine = -50% (container 左外) → 容器透明
    *   pos=-50% 0 (100%): P = +50%, shine = +150% (container 右外) → 容器透明
@@ -616,7 +914,90 @@ function removeSession(id: string) {
   display: block;
   line-height: 1.3;
 }
-.pad-wstree__session-del {
+
+/* Phase 2: Pinned / Active 子区段 label */
+.pad-wstree__sub-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px 2px;
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: var(--pad-fw-medium);
+  user-select: none;
+}
+.pad-wstree__sub-label .pad-wstree__count {
+  font-size: var(--pad-fs-10);
+  opacity: 0.7;
+  font-weight: var(--pad-fw-regular);
+}
+
+/* Phase 3: 归档 section label 带 icon */
+.pad-wstree__sub-label-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Phase 2: Pin emoji 前缀 */
+.pad-wstree__session-pin {
+  margin-right: 2px;
+  font-size: 10px;
+  vertical-align: 1px;
+}
+
+/* Phase 3: archive 列表 [from A] 角标 */
+.pad-wstree__session-from {
+  margin-left: 6px;
+  font-size: var(--pad-fs-10);
+  color: var(--pad-fg-tertiary);
+  font-weight: var(--pad-fw-regular);
+  opacity: 0.7;
+  font-family: var(--pad-font-mono);
+  flex-shrink: 0;
+}
+
+/* Phase 3: archive session item 视觉弱化 */
+.pad-wstree__session--archived {
+  color: var(--pad-fg-tertiary);
+  opacity: 0.85;
+}
+.pad-wstree__session--archived:hover {
+  color: var(--pad-fg-secondary);
+  opacity: 1;
+}
+
+/* Phase 3: workspace 列表与归档 section 之间的分隔线 */
+.pad-wstree__divider {
+  height: 1px;
+  background: var(--pad-divider);
+  margin: 8px 6px 0;
+}
+
+/* Phase 2: inline rename input */
+.pad-wstree__session-rename-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--pad-accent);
+  border-radius: var(--pad-radius-sm);
+  background: var(--pad-bg-card);
+  color: var(--pad-fg-primary);
+  font: inherit;
+  padding: 0 4px;
+  outline: none;
+  height: 20px;
+  margin: -2px 0;
+}
+.pad-wstree__session-rename-input:focus {
+  box-shadow: 0 0 0 2px var(--pad-accent-soft);
+}
+
+/* Phase 3: session 行内右侧 inline action 按钮 (📦 Archive)
+   替代旧 .pad-wstree__session-del (trash) — 视觉中性, hover 用普通 hover,
+   不再是 danger 红色. */
+.pad-wstree__session-action {
   flex-shrink: 0;
   width: 18px;
   height: 18px;
@@ -632,12 +1013,12 @@ function removeSession(id: string) {
   opacity: 0.35;
   transition: opacity var(--pad-dur-fast) ease, background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
 }
-.pad-wstree__session:hover .pad-wstree__session-del {
+.pad-wstree__session:hover .pad-wstree__session-action {
   opacity: 1;
 }
-.pad-wstree__session-del:hover {
-  background: var(--pad-danger-subtle);
-  color: var(--pad-danger-text);
+.pad-wstree__session-action:hover {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
   opacity: 1;
 }
 .pad-wstree__session-empty {

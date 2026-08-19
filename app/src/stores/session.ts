@@ -30,6 +30,19 @@ export interface Session {
    * 跟 per-workspace 固定 id 解耦: 不同 session 各自独立 context.
    */
   piSessionId?: string;
+  // ===== Phase 1 (v0.6): 扩展字段, 旧数据无这字段 → undefined → 默认 false/[] =====
+  /** LLM 生成的标题 (Phase 6 自动生成), UI 显示优先级: autoTitle > title */
+  autoTitle?: string;
+  /** 归档标记, true = 不在 workspace 树显示, 在 sidebar 顶层 🗄 归档 section 显示 */
+  archived?: boolean;
+  /** 归档时间 (ISO), 排序用 */
+  archivedAt?: string;
+  /** Pin / 收藏, true = 在 workspace 树顶部 "📌 Pinned" section 显示 */
+  pinned?: boolean;
+  /** Pin 时间 (ISO), 排序用 */
+  pinnedAt?: string;
+  /** 用户自定义标签, 走 sidebar 搜索时也匹配 */
+  tags?: string[];
 }
 
 const STORAGE_KEY = 'pi-agent:session:v1';
@@ -145,6 +158,74 @@ export const useSessionStore = defineStore('session', () => {
 
   function isWorkspaceExpanded(id: string): boolean {
     return expandedWorkspaceIds.value.has(id);
+  }
+
+  // ===== Phase 1: 新 getters (sidebar 改造用) =====
+
+  /**
+   * 当前 workspace 下未归档 session, 排序: pinned 优先, 再 updatedAt 倒序
+   * workspace 树主列表用 (过滤掉 archived)
+   */
+  function activeSessionsByWorkspace(workspaceId: string): Session[] {
+    return sessions.value
+      .filter((s) => s.workspaceId === workspaceId && !s.archived)
+      .sort((a, b) => {
+        if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+        return b.updatedAt > a.updatedAt ? 1 : -1;
+      });
+  }
+
+  /**
+   * 当前 workspace 下 pinned + active 的 session
+   * workspace 树顶部 "📌 Pinned" section 用
+   */
+  function pinnedSessionsByWorkspace(workspaceId: string): Session[] {
+    return sessions.value
+      .filter((s) => s.workspaceId === workspaceId && !s.archived && s.pinned)
+      .sort((a, b) => {
+        const ta = a.pinnedAt ?? a.updatedAt;
+        const tb = b.pinnedAt ?? b.updatedAt;
+        return tb > ta ? 1 : -1;
+      });
+  }
+
+  /**
+   * 跨所有 workspace 的归档 session, 排序: archivedAt 倒序
+   * sidebar 顶层 🗄 归档 section 用
+   */
+  const archivedSessions = computed<Session[]>(() => {
+    return sessions.value
+      .filter((s) => s.archived)
+      .sort((a, b) => (b.archivedAt ?? '') > (a.archivedAt ?? '') ? 1 : -1);
+  });
+
+  /**
+   * 跨所有 workspace 搜 session, 匹配 title / autoTitle / tags
+   * sidebar 顶层搜索框用
+   * 返回: [{ session, match: 'title' | 'autoTitle' | 'tag:xxx' }, ...]
+   */
+  function searchSessions(query: string): Array<{ session: Session; match: 'title' | 'autoTitle' | `tag:${string}` }> {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const results: Array<{ session: Session; match: 'title' | 'autoTitle' | `tag:${string}` }> = [];
+    for (const s of sessions.value) {
+      if (s.title.toLowerCase().includes(q)) {
+        results.push({ session: s, match: 'title' });
+        continue;
+      }
+      if (s.autoTitle && s.autoTitle.toLowerCase().includes(q)) {
+        results.push({ session: s, match: 'autoTitle' });
+        continue;
+      }
+      if (s.tags && s.tags.length) {
+        const hit = s.tags.find((t) => t.toLowerCase().includes(q));
+        if (hit) {
+          results.push({ session: s, match: `tag:${hit}` as `tag:${string}` });
+          continue;
+        }
+      }
+    }
+    return results;
   }
 
   function toggleWorkspaceExpanded(id: string) {
@@ -326,6 +407,97 @@ export const useSessionStore = defineStore('session', () => {
     activeWorkspaceId.value = id;
   }
 
+  // ===== Phase 1: 新 actions (sidebar 改造用) =====
+
+  /**
+   * 归档 session (软删除, 不删 Pi SDK file)
+   * UI 流程: active session → 右键 → Archive → ConfirmDialog → 调本函数
+   */
+  function archiveSession(id: string) {
+    const s = sessions.value.find((x) => x.id === id);
+    if (!s) return;
+    s.archived = true;
+    s.archivedAt = new Date().toISOString();
+    s.updatedAt = s.archivedAt;
+  }
+
+  /**
+   * 恢复归档 session
+   * UI 流程: archive 列表 → 右键 → Restore → 调本函数
+   */
+  function restoreSession(id: string) {
+    const s = sessions.value.find((x) => x.id === id);
+    if (!s) return;
+    s.archived = false;
+    s.archivedAt = undefined;
+    s.updatedAt = new Date().toISOString();
+  }
+
+  /**
+   * 永久删除 session (从 store 移除, chat store 联动)
+   * ⚠️ 仅允许对 archived session 调, UI 必须在 archive 列表才显示此入口 (Phase 3 流程约束)
+   * 实际不删 Pi SDK jsonl file, 跟现有 removeSession 行为一致
+   */
+  function deleteSessionPermanently(id: string) {
+    sessions.value = sessions.value.filter((s) => s.id !== id);
+    if (activeSessionId.value === id) {
+      activeSessionId.value = null;
+    }
+  }
+
+  /**
+   * Pin / unpin session
+   * pinned=true 时设 pinnedAt 时间, false 时清
+   */
+  function setPinned(id: string, pinned: boolean) {
+    const s = sessions.value.find((x) => x.id === id);
+    if (!s) return;
+    s.pinned = pinned;
+    s.pinnedAt = pinned ? new Date().toISOString() : undefined;
+    s.updatedAt = new Date().toISOString();
+  }
+
+  function togglePin(id: string) {
+    const s = sessions.value.find((x) => x.id === id);
+    if (!s) return;
+    setPinned(id, !s.pinned);
+  }
+
+  /**
+   * 设置 LLM 生成的标题 (Phase 6 调用)
+   * 注意: 不动 user 手动改的 title, 只填 autoTitle 字段
+   */
+  function setAutoTitle(id: string, title: string) {
+    const s = sessions.value.find((x) => x.id === id);
+    if (!s) return;
+    s.autoTitle = title;
+    s.updatedAt = new Date().toISOString();
+  }
+
+  /**
+   * 加 tag (trim + 重复跳过)
+   */
+  function addTag(id: string, tag: string) {
+    const s = sessions.value.find((x) => x.id === id);
+    if (!s) return;
+    const t = tag.trim();
+    if (!t) return;
+    if (!s.tags) s.tags = [];
+    if (s.tags.includes(t)) return;
+    s.tags = [...s.tags, t];
+    s.updatedAt = new Date().toISOString();
+  }
+
+  /**
+   * 删 tag
+   */
+  function removeTag(id: string, tag: string) {
+    const s = sessions.value.find((x) => x.id === id);
+    if (!s || !s.tags) return;
+    s.tags = s.tags.filter((t) => t !== tag);
+    s.updatedAt = new Date().toISOString();
+  }
+
   return {
     // state
     workspaces,
@@ -340,6 +512,11 @@ export const useSessionStore = defineStore('session', () => {
     getSessionsByWorkspace,
     getWorkspace,
     isWorkspaceExpanded,
+    // Phase 1: 新 getters
+    activeSessionsByWorkspace,
+    pinnedSessionsByWorkspace,
+    archivedSessions,
+    searchSessions,
     // actions
     toggleWorkspaceExpanded,
     addWorkspace,
@@ -353,5 +530,14 @@ export const useSessionStore = defineStore('session', () => {
     selectWorkspace,
     ensurePiSessionId,  // Bug #1 修 (2026-08-18): per-session 独立 piSessionId
     migrateOldSessionIds,  // Bug #1 修 (2026-08-18): 启动时迁移旧 per-workspace id
+    // Phase 1: 新 actions
+    archiveSession,
+    restoreSession,
+    deleteSessionPermanently,
+    setPinned,
+    togglePin,
+    setAutoTitle,
+    addTag,
+    removeTag,
   };
 });

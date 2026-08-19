@@ -12,8 +12,8 @@
 - ✅ 列出当前 workspace 的所有 session (按更新时间倒序)
 - ✅ 创建新 session
 - ✅ 切换 session (切换后保留各自 history)
-- ✅ 重命名 session
-- ✅ 删除 session
+- 🟡 重命名 session (UI 待暴露, 协议已就绪)
+- 🟡 删除 session (走 `confirm()` 临时, in-app 弹窗待做)
 - ✅ 自动持久化 (每次 message 更新都写盘)
 - ✅ 跨重启保留 history
 - ✅ Per-workspace 隔离 (Test1 不会污染 Test2)
@@ -34,8 +34,8 @@
 | 列表 (按时间倒序) | ✅ | `app/src/components/Sidebar/WorkspaceTree.vue` `getSessionsByWorkspace` | 看 sidebar session 列表顺序 |
 | 创建新 session | ✅ | `sessionStore.addSession` | 点 "新任务" 按钮, 看新 session 出现 |
 | 切换 session | ✅ | `sessionStore.selectSession` | 点不同 session, 看切换 + history |
-| 重命名 | ✅ (协议就绪, UI 待暴露) | `sessionStore.renameSession` | (待 UI 暴露) |
-| 删除 | ✅ (走 `confirm()` 临时) | `sessionStore.removeSession` | 点删除, 浏览器 confirm 弹窗 |
+| 重命名 | 🟡 (协议就绪, UI 待暴露) | `sessionStore.renameSession` | (待 UI 暴露) |
+| 删除 | 🟡 (走 `confirm()` 临时) | `sessionStore.removeSession` | 点删除, 浏览器 confirm 弹窗 |
 | 自动持久化 | ✅ | Pi SDK `SessionManager` append entries | 看 `~/.pi/agent/sessions/<hash>/<ts>_<id>.jsonl` |
 | 跨重启保留 | ✅ | 同上 | 关 app, 重开, 看 history 还在 |
 | Per-workspace 隔离 | ✅ | sha256(workspace).slice(0,16) 目录 hash | 切 workspace, 看不同 jsonl |
