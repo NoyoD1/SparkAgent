@@ -172,15 +172,39 @@ export const useChatStore = defineStore('chat', () => {
   function startStreamHangWatchdog(sessionId: string): ReturnType<typeof setTimeout> {
     stopStreamHangWatchdog(sessionId);
     const timer = setTimeout(() => {
-      // 30s 没事件 + 仍 isStreaming → 标 hang
+      // 30s 没事件 + 仍 isStreaming → 标 hang + force stop streaming
+      // v0.5.0-D 第22轮 (D209) BUG FIX: 之前只 set streamHang=true + 等 user × 关
+      //   但 isStreaming 仍 true, retry banner 还挂着 (willRetry=true 卡住), user 看到
+      //   "等待 LLM 重试中..." 一直不消失, 也无法发新消息
+      //   修法: 30s 无事件兜底时, 强制 force stop streaming (跟 forceStopStreaming 一样
+      //   清理 streaming + retry + active step), 跟 Composer.stop() 30s timeout 行为一致.
+      //   UI: 触发后会显示 stream hang error line, user 可以在 composer 重发或换 model
       const last = lastStreamEventAt.get(sessionId) || 0;
       const stillStreaming = !!streamingBySession.value[sessionId];
       if (stillStreaming && Date.now() - last >= STREAM_HANG_TIMEOUT_MS) {
         streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: true };
-        chatData.value = { ...chatData.value };
+        // D209: 强制 force stop, 跟 Composer.stop() 30s timeout 一样的清理路径
+        //   跟 willRetry stuck 场景特别相关 — 之前只 set 标记, retry banner 一直挂着
+        streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
+        retryBySession.value = { ...retryBySession.value, [sessionId]: null };
+        setPhase(sessionId, 'idle');
+        // 关 active step (跟 forceStopStreaming 一样, 不动已累积的 thinking/text)
+        const d2 = getSessionData(sessionId);
+        if (d2) {
+          const assistant = d2.messages[d2.messages.length - 1];
+          if (assistant && assistant.role === 'assistant' && assistant.steps) {
+            const lastStep = assistant.steps[assistant.steps.length - 1];
+            if (lastStep && lastStep.isActive) {
+              lastStep.isActive = false;
+              lastStep.collapsed = true;
+            }
+          }
+          chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
+        }
         console.warn(
-          `[chat] D204: stream hang detected for ${sessionId} (no events for ${STREAM_HANG_TIMEOUT_MS}ms). ` +
-          `This is the model/sidecar stopped sending events. UI will show inline error line.`,
+          `[chat] D209: stream hang detected for ${sessionId} (no events for ${STREAM_HANG_TIMEOUT_MS}ms). ` +
+          `Force stopped streaming (was willRetry: ${!!retryBySession.value[sessionId]} — cleared). ` +
+          `UI shows inline error line. User can re-send or switch model.`,
         );
       }
     }, STREAM_HANG_TIMEOUT_MS);
@@ -270,13 +294,46 @@ export const useChatStore = defineStore('chat', () => {
       console.warn('[chat] usage localStorage save failed', e);
     }
   }
+  // v0.5.0-D 第22轮 (D209): 累加 usage 持久化
+  //   cumulativeUsageBySession 也存 localStorage, 跨 session 也能恢复累加数字
+  function loadCumulativeFromStorage(): Record<string, import('@/lib/mock/types').MessageUsage> {
+    try {
+      const raw = localStorage.getItem('pi-agent:cumulative-usage:v1');
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      if (typeof parsed !== 'object' || parsed === null) return {};
+      return parsed as Record<string, import('@/lib/mock/types').MessageUsage>;
+    } catch {
+      return {};
+    }
+  }
+  function saveCumulativeToStorage(cumulative: Record<string, import('@/lib/mock/types').MessageUsage>) {
+    try {
+      localStorage.setItem('pi-agent:cumulative-usage:v1', JSON.stringify(cumulative));
+    } catch (e) {
+      console.warn('[chat] cumulative usage localStorage save failed', e);
+    }
+  }
   const usageInitial = loadUsageFromStorage();
   const lastUsageBySession = ref<Record<string, import('@/lib/mock/types').MessageUsage | undefined>>(usageInitial.lastUsage);
   const contextTokensBySession = ref<Record<string, number>>(usageInitial.contextTokens);
+  // v0.5.0-D 第22轮 (D209): 累加 usage 跟踪 (跨 turn 求和)
+  //   之前 (D208) lastUsageBySession 是覆盖式 (单次 turn), contextTokensBySession 也是
+  //   单次 turn 的 input + cacheRead. user 反馈 "上下文窗口的计数应该是累加的,
+  //   只有再主动压缩之后, 上下文可能会消减; 而不是每次请求都先清0"
+  //   修法: 新加 cumulativeUsageBySession 累加 input/output/cacheRead/cacheWrite 4 字段,
+  //   contextTokensBySession 也改成累加 (input + cacheRead 总和).
+  //   lastUsageBySession 保留 (per-turn, 调试/单次显示用)
+  const cumulativeUsageBySession = ref<Record<string, import('@/lib/mock/types').MessageUsage>>(loadCumulativeFromStorage());
   // watch 持久化 (deep: true 跟踪 ref 内部变化)
   watch(
     [lastUsageBySession, contextTokensBySession],
     ([u, c]) => saveUsageToStorage(u, c),
+    { deep: true },
+  );
+  watch(
+    cumulativeUsageBySession,
+    (c) => saveCumulativeToStorage(c),
     { deep: true },
   );
   const compactionBySession = ref<Record<string, 'idle' | 'in_progress'>>({});
@@ -406,15 +463,17 @@ export const useChatStore = defineStore('chat', () => {
     };
   }
 
-  // v0.5.0-D 第21轮 (D208): Token breakdown REAL 数据 (Pi SDK lastUsage 4 分类)
+  // v0.5.0-D 第21轮 (D208) + 第22轮 (D209): Token breakdown REAL 数据 (Pi SDK lastUsage 4 分类)
   //   跟 getContextBreakdown (6 分类 FE 估算) 互补, 都是给 user 看的:
   //   - 6 分类 (FE 估算): "用在哪里" (消息/工具/系统提示词/技能/记忆/其他)
   //   - 4 分类 (REAL): "用多少" (input/output/cacheRead/cacheWrite, LLM 端实测)
   //   D208 加这个是因为 user 反馈: 当前 6 分类是 FE 估算不准, 想看 LLM 端真实数据.
-  //   数据源: lastUsageBySession[sid] (message_end 写入, 持久化到 localStorage)
+  //   数据源: cumulativeUsageBySession[sid] (D209 累加, 跨 turn 求和)
+  //   之前 (D208) 用 lastUsageBySession (per-turn, 每次新 turn 覆盖 → 显示 0)
+  //   user 反馈: "上下文窗口的计数应该是累加的" → 改用 cumulativeUsageBySession 累加
   //   缺数据时 (没发过 message): 全 0, UI 兜底显示 "暂无数据"
   function getContextBreakdownReal(sessionId: string): ContextBreakdownReal {
-    const usage = lastUsageBySession.value[sessionId];
+    const usage = cumulativeUsageBySession.value[sessionId];
     if (!usage) {
       return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     }
@@ -861,16 +920,47 @@ export const useChatStore = defineStore('chat', () => {
               //   顶层**无 usage**, 用 event.message.usage (AssistantMessage 必填字段).
               //   v0.4.3.2 修对了, 不动.
               //   写到 assistant message.usage (持久化到 store), 切别的 session / 切回能读回
+              //   v0.5.0-D 第22轮 (D209): 累加 usage
+              //     之前: contextTokensBySession = finalUsage.input + finalUsage.cacheRead
+              //       (单次 turn, 每次新 turn 覆盖. user 反馈 "上下文窗口的计数应该是累加的")
+              //     现在: 累加 (input + cacheRead 总和), 跨 turn 求和
+              //     lastUsageBySession 仍 per-turn (单次 turn 调试用, 不影响显示)
+              //     cumulativeUsageBySession 累加 4 字段 (input/output/cacheRead/cacheWrite)
+              //     只有 user 主动 compaction 才会"消减" (compaction_end 成功时清零重计)
               if (event.message?.usage && idx >= 0) {
                 const finalUsage = event.message.usage;
+                // per-turn (单次, 覆盖) - 调试 / 单次显示用
                 lastUsageBySession.value = { ...lastUsageBySession.value, [sessionId]: finalUsage };
+                // 累加 (跨 turn 求和) - UI 主显示
+                const prevCum = cumulativeUsageBySession.value[sessionId];
+                const newCum: import('@/lib/mock/types').MessageUsage = {
+                  input: (prevCum?.input ?? 0) + (finalUsage.input ?? 0),
+                  output: (prevCum?.output ?? 0) + (finalUsage.output ?? 0),
+                  cacheRead: (prevCum?.cacheRead ?? 0) + (finalUsage.cacheRead ?? 0),
+                  cacheWrite: (prevCum?.cacheWrite ?? 0) + (finalUsage.cacheWrite ?? 0),
+                  cost: {
+                    input: (prevCum?.cost?.input ?? 0) + (finalUsage.cost?.input ?? 0),
+                    output: (prevCum?.cost?.output ?? 0) + (finalUsage.cost?.output ?? 0),
+                    cacheRead: (prevCum?.cost?.cacheRead ?? 0) + (finalUsage.cost?.cacheRead ?? 0),
+                    cacheWrite: (prevCum?.cost?.cacheWrite ?? 0) + (finalUsage.cost?.cacheWrite ?? 0),
+                  },
+                };
+                cumulativeUsageBySession.value = {
+                  ...cumulativeUsageBySession.value,
+                  [sessionId]: newCum,
+                };
+                // contextTokens 累加 (input + cacheRead 总和)
+                const prevCtx = contextTokensBySession.value[sessionId] ?? 0;
                 contextTokensBySession.value = {
                   ...contextTokensBySession.value,
-                  [sessionId]: finalUsage.input + finalUsage.cacheRead,
+                  [sessionId]: prevCtx + (finalUsage.input ?? 0) + (finalUsage.cacheRead ?? 0),
                 };
                 // v0.4.3: 写到 assistant message.usage, 后续从 store 读
                 assistant.usage = finalUsage;
-                console.log(`[chat] message_end: usage=${finalUsage.input}+${finalUsage.cacheRead} (cache) + ${finalUsage.cacheWrite} (write) → contextTokens=${contextTokensBySession.value[sessionId]}`);
+                console.log(
+                  `[chat] message_end: turn usage=${finalUsage.input}+${finalUsage.cacheRead} (cache) + ${finalUsage.cacheWrite} (write); ` +
+                  `cumulative context=${contextTokensBySession.value[sessionId]} (input=${newCum.input}, output=${newCum.output}, cacheRead=${newCum.cacheRead}, cacheWrite=${newCum.cacheWrite})`
+                );
               }
               // v0.5.0-D 第17轮 (D204) REVERT D200/D202/D203 emptyResponse 主动告警:
               //   之前 D200 (b379f76) 在 message_end 探测"空 message" → D202/D203 在 UI 弹 AlertTriangle.
@@ -994,6 +1084,22 @@ export const useChatStore = defineStore('chat', () => {
               at: Date.now(),
             },
           };
+          // v0.5.0-D 第22轮 (D209): compaction 成功时, 重置累加的 token count
+          //   user 反馈: "只有再主动压缩之后, 上下文可能会消减"
+          //   之前: 累加 token 一直涨, 压缩后 context 应该减小但 contextTokens 还在累加
+          //   现在: 压缩成功 (非 aborted, 无 error) → 清零 cumulativeUsage + contextTokens
+          //   下次 message_end 重新开始累加
+          if (!event.aborted && !event.errorMessage) {
+            cumulativeUsageBySession.value = {
+              ...cumulativeUsageBySession.value,
+              [sessionId]: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+            };
+            contextTokensBySession.value = {
+              ...contextTokensBySession.value,
+              [sessionId]: 0,
+            };
+            console.log(`[chat] compaction_end: reset cumulative usage (compaction freed context)`);
+          }
           // Bug #2 修: compaction 终态 toast 反馈 (手动 compact 成功 / 失败 / 拒绝)
           if (event.reason === 'manual') {
             if (event.aborted) {
@@ -1312,9 +1418,10 @@ export const useChatStore = defineStore('chat', () => {
     // v0.5.0-D 第12轮: 6 分类 context breakdown
     getContextBreakdown,
     getContextBreakdownPercent,
-    // v0.5.0-D 第21轮 (D208): 4 分类 REAL 数据 (Pi SDK lastUsage, 不是 FE 估算)
+    // v0.5.0-D 第21轮 (D208) + 第22轮 (D209): 4 分类 REAL 数据 (Pi SDK lastUsage, 累加)
     getContextBreakdownReal,
     getContextBreakdownRealPercent,
+    cumulativeUsageBySession, // D209 累加 (input/output/cacheRead/cacheWrite)
     // v0.5.0-D 第12轮: 引用回复 (quote & reply)
     setQuote,
     clearQuote,

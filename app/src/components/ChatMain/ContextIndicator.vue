@@ -68,24 +68,10 @@ const isStreaming = computed(() => {
   return chatStore.isStreamingSession(sid);
 });
 
-// v0.5.0-D 第12轮: 6 分类 context breakdown (按 token 来源分)
-//   跟 Pi SDK 4 分类 (input/cacheRead/cacheWrite/output) 是不同维度, 互补关系.
-//   Pi SDK 那个是 "cache 命中维度", 这个是 "内容来源维度" (消息/工具/系统提示词/技能/记忆/其他).
-//   6 分类数字从 chat store getContextBreakdown 拿 (FE 端估算).
-const breakdown = computed(() => {
-  const sid = activeSession.value?.id;
-  if (!sid) {
-    return { messages: 0, tools: 0, systemPrompts: 0, skills: 0, memory: 0, other: 0 };
-  }
-  return chatStore.getContextBreakdown(sid);
-});
-const breakdownPct = computed(() => chatStore.getContextBreakdownPercent(breakdown.value));
-
-// v0.5.0-D 第21轮 (D208): REAL 4 分类 (Pi SDK lastUsage 实测)
-//   跟 6 分类 (FE 估算) 是两个维度, 互补:
-//   - 6 分类 (估算): 用在哪里 (消息/工具/系统提示词/技能/记忆/其他)
-//   - 4 分类 (REAL): 用多少 (input/output/cacheRead/cacheWrite, LLM 端实测)
-//   UI 主显示 4 分类 REAL (准确), 6 分类 ESTIMATED 作为辅助 (比例参考)
+// v0.5.0-D 第22轮 (D209) 重构: 删 6 分类 FE 估算 (不准, user 不要)
+//   保留 REAL 4 分类 (Pi SDK 实测, D209 改成累加)
+//   6 分类相关 computed (breakdown / breakdownPct) 全删, ContextIndicator 只用 4 分类
+// v0.5.0-D 第21轮 (D208) + 第22轮 (D209): REAL 4 分类 (Pi SDK lastUsage 实测, D209 累加)
 const realBreakdown = computed(() => {
   const sid = activeSession.value?.id;
   if (!sid) {
@@ -199,13 +185,14 @@ const buttonTitle = computed(() => {
         <div class="pad-ctx-popover-bar-fill" :style="{ width: percent + '%' }"></div>
       </div>
 
-      <!-- v0.5.0-D 第21轮 (D208): REAL 4 分类 (Pi SDK lastUsage 实测, 不是 FE 估算)
-           数据源: chatStore.getContextBreakdownReal(sid) — 从 lastUsageBySession 读
-           4 个分类: input (新 context) / output (response) / cacheRead (命中) / cacheWrite (新写)
-           这是 LLM 端实测的 token 数, 跟 LLM 实际 usage 一致, 不估算.
-           之前 (D198) 6 分类是 FE 估算, 数字可能跟 LLM 实际差 10-20%, D208 加这个 REAL 4 分类
-           让 user 能看到准确的 token 分布. -->
-      <div class="pad-ctx-popover-section-title">实测 (Pi SDK)</div>
+      <!-- v0.5.0-D 第22轮 (D209) 重构: 单一区块, Pi SDK REAL 4 分类 (累加)
+           之前 (D208) 拆成 "实测 (Pi SDK)" + "估算 (FE)" 两个区块. user 反馈:
+           "我要的不是你单独新建一个'实测 (Pi SDK)'计量, 而是数值正确显示在FE里面"
+           现在: 只保留 4 分类 REAL (input/output/cacheRead/cacheWrite), 累加跨 turn 求和
+           (cumulativeUsageBySession, 不是单次 turn 覆盖). 6 分类 FE 估算整段删掉 (不准)
+           数据源: chatStore.cumulativeUsageBySession[sid] (D209 累加, message_end 写)
+           百分比: 各分类占 4 分类总和的比例
+           合计行: 4 分类总和 + context 部分 (input+cacheRead) — 跟 Composer 底部 % 同源 -->
       <div class="pad-ctx-popover-rows">
         <div class="pad-ctx-popover-row">
           <span class="pad-ctx-popover-row-left">
@@ -248,85 +235,17 @@ const buttonTitle = computed(() => {
           </span>
         </div>
       </div>
-      <!-- 总和 (REAL, LLM 端实测): user 看到的就是这个数, 不估算 -->
+      <!-- 合计行 (D209 累加): 4 分类总和 + context 部分
+           跟 Composer 底部 "上下文 X%" 用同一个 contextTokens 数值, 跟 percent 一致 -->
       <div class="pad-ctx-popover-total">
         合计 {{ formatTokens(realBreakdown.input + realBreakdown.output + realBreakdown.cacheRead + realBreakdown.cacheWrite) }} tokens
         <span class="pad-ctx-popover-total-context">
           ({{ formatTokens(realBreakdown.input + realBreakdown.cacheRead) }} context)
         </span>
       </div>
-
-      <!-- v0.5.0-D 第12轮: 6 分类 (FE 估算, 按 token 来源分) — 辅助视图
-           D198 设计的"用在哪里"分类, 跟 D208 新加的"用多少"是不同维度
-           6 分类是 FE 启发式估算 (CJK 1 char ≈ 1 token, 其他 4 chars ≈ 1 token),
-           跟 LLM 实际数可能差 10-20%, 仅供比例参考.
-           D208 把它降为辅助, 主视图是上面 4 分类 REAL 数据. -->
-      <div class="pad-ctx-popover-section-title">估算 (FE)</div>
-      <div class="pad-ctx-popover-rows">
-        <div class="pad-ctx-popover-row">
-          <span class="pad-ctx-popover-row-left">
-            <span class="pad-ctx-dot dot-messages"></span>
-            <span>消息</span>
-          </span>
-          <span class="pad-ctx-popover-row-right">
-            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.messages) }}</span>
-            <span class="pad-ctx-popover-pct">{{ breakdownPct.messages }}%</span>
-          </span>
-        </div>
-        <div class="pad-ctx-popover-row">
-          <span class="pad-ctx-popover-row-left">
-            <span class="pad-ctx-dot dot-tools"></span>
-            <span>工具</span>
-          </span>
-          <span class="pad-ctx-popover-row-right">
-            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.tools) }}</span>
-            <span class="pad-ctx-popover-pct">{{ breakdownPct.tools }}%</span>
-          </span>
-        </div>
-        <div class="pad-ctx-popover-row">
-          <span class="pad-ctx-popover-row-left">
-            <span class="pad-ctx-dot dot-system"></span>
-            <span>系统提示词</span>
-          </span>
-          <span class="pad-ctx-popover-row-right">
-            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.systemPrompts) }}</span>
-            <span class="pad-ctx-popover-pct">{{ breakdownPct.systemPrompts }}%</span>
-          </span>
-        </div>
-        <div class="pad-ctx-popover-row">
-          <span class="pad-ctx-popover-row-left">
-            <span class="pad-ctx-dot dot-skills"></span>
-            <span>技能</span>
-          </span>
-          <span class="pad-ctx-popover-row-right">
-            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.skills) }}</span>
-            <span class="pad-ctx-popover-pct">{{ breakdownPct.skills }}%</span>
-          </span>
-        </div>
-        <div class="pad-ctx-popover-row">
-          <span class="pad-ctx-popover-row-left">
-            <span class="pad-ctx-dot dot-memory"></span>
-            <span>记忆</span>
-          </span>
-          <span class="pad-ctx-popover-row-right">
-            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.memory) }}</span>
-            <span class="pad-ctx-popover-pct">{{ breakdownPct.memory }}%</span>
-          </span>
-        </div>
-        <div class="pad-ctx-popover-row">
-          <span class="pad-ctx-popover-row-left">
-            <span class="pad-ctx-dot dot-other"></span>
-            <span>其他</span>
-          </span>
-          <span class="pad-ctx-popover-row-right">
-            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.other) }}</span>
-            <span class="pad-ctx-popover-pct">{{ breakdownPct.other }}%</span>
-          </span>
-        </div>
-      </div>
-      <!-- 估算说明 (D208 降为辅助): FE 估算跟 LLM 实际可能有偏差, 仅供比例参考 -->
+      <!-- 累加说明: 跨 turn 求和, compaction 成功后清零重计 -->
       <div class="pad-ctx-popover-estimate-note">
-        估算值 · 实际 LLM token 数可能差 10-20%
+        累加跨 turn · 主动压缩后清零重计
       </div>
     </div>
   </div>
@@ -509,38 +428,28 @@ const buttonTitle = computed(() => {
   border-radius: 50%;
 }
 /* v0.5.0-D 第12轮: 6 分类 breakdown 颜色 (按 token 量级从深到浅)
- *   消息 (最大) > 工具 > 系统提示词 > 技能 > 记忆 > 其他 (最小) */
-.dot-messages { background: var(--pad-fg-900, #0a0a0a); }      /* 最深: 用户/助手消息 */
-.dot-tools { background: var(--pad-fg-700, #404040); }        /* 次深: 工具定义 */
-.dot-system { background: var(--pad-fg-500, #737373); }        /* 中: 系统提示词 */
-.dot-skills { background: var(--pad-fg-400, #a3a3a3); }       /* 中浅: 技能 */
-.dot-memory { background: var(--pad-fg-300, #d4d4d4); }       /* 浅: 记忆 */
-.dot-other { background: var(--pad-fg-200, #e5e5e5); }        /* 最浅: 其他 */
+ *   消息 (最大) > 工具 > 系统提示词 > 技能 > 记忆 > 其他 (最小)
+ *   v0.5.0-D 第22轮 (D209) REVERT: 6 分类全删, dot-messages/tools/system/skills/memory/other 全删 */
+.dot-messages { background: var(--pad-fg-900, #0a0a0a); }
+.dot-tools { background: var(--pad-fg-700, #404040); }
+.dot-system { background: var(--pad-fg-500, #737373); }
+.dot-skills { background: var(--pad-fg-400, #a3a3a3); }
+.dot-memory { background: var(--pad-fg-300, #d4d4d4); }
+.dot-other { background: var(--pad-fg-200, #e5e5e5); }
 
-/* v0.5.0-D 第21轮 (D208): 4 分类 REAL 颜色 (Pi SDK lastUsage 实测, 不估算)
- *   input (新 context) / output (response) / cacheRead (命中) / cacheWrite (新写)
- *   用半饱和色跟 6 分类 (灰阶) 区分, 强调"实测"vs"估算" */
+/* v0.5.0-D 第21轮 (D208) + 第22轮 (D209): 4 分类 REAL 颜色 (Pi SDK lastUsage 实测, 累加)
+ *   input (新 context) / output (response) / cacheRead (命中) / cacheWrite (新写) */
 .dot-input { background: #4f46e5; }     /* 蓝紫: input 新 context */
 .dot-output { background: #0891b2; }    /* 青: output response */
 .dot-cache-read { background: #16a34a; } /* 绿: cache 命中 (节省) */
 .dot-cache-write { background: #f59e0b; } /* 橙: cache 新写 */
 
-/* v0.5.0-D 第21轮 (D208): 区块小标题 (实测 / 估算 区分) */
-.pad-ctx-popover-section-title {
-  font-size: 10px;
-  font-weight: var(--pad-fw-medium, 500);
-  color: var(--pad-fg-tertiary, #71717a);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin: 12px 0 4px 0;
-}
-.pad-ctx-popover-section-title:first-of-type {
-  margin-top: 0;
-}
-
-/* v0.5.0-D 第21轮 (D208): 合计行 (REAL 总和 + context 部分) */
+/* v0.5.0-D 第22轮 (D209): 合计行 (REAL 4 分类总和 + context 部分)
+ *   跟 Composer 底部 "上下文 X%" 用同一个 contextTokens 数值, 跟 percent 一致 */
 .pad-ctx-popover-total {
   margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
   font-size: 11px;
   color: var(--pad-fg-secondary, #52525b);
   font-variant-numeric: tabular-nums;
