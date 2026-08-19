@@ -22,6 +22,7 @@ import {
   BookOpen,
   Gamepad2,
   Wrench,
+  Loader2,
 } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
@@ -47,6 +48,8 @@ const activeModelName = computed(() => configStore.activeModel?.id ?? '');
 const isSessionStreaming = computed(() =>
   activeSession.value ? chatStore.isStreamingSession(activeSession.value.id) : false,
 );
+// v0.5.0-D 第15轮 (D202): 给模板用简化别名, 跟 message placeholder 里的 isStreaming 概念一致
+const isStreaming = isSessionStreaming;
 function isMessageStreaming(idx: number): boolean {
   // v0.5.0-D 改: 不再检查 `!m.content`. 之前第一条 text_delta 来了就 false
   //   → ChatMessage 的 "生成中..." pill 立刻消失, 用户看不到 "正在下笔" 的过渡.
@@ -56,6 +59,33 @@ function isMessageStreaming(idx: number): boolean {
   const m = messages.value[idx];
   return !!m && m.role === 'assistant';
 }
+
+// v0.5.0-D 第15轮 (D202): streaming status bar 文字轮换
+//   跟 message placeholder 风格一致, 给底部一个持续可视化指示
+//   3 个文字轮换 (每 2.4s 切一次), 跟 phase 无关 (phase 已经在 message placeholder 里)
+//   简单一些: 只用通用 "AI 正在生成..." 文字, 强调 streaming 状态
+const STREAMING_TEXTS = ['AI 正在生成...', '生成中...', '正在响应...'];
+const streamingTextIndex = ref(0);
+let streamingTextTimer: ReturnType<typeof setInterval> | null = null;
+const streamingStatusText = computed(() => STREAMING_TEXTS[streamingTextIndex.value] ?? STREAMING_TEXTS[0]);
+watch(isStreaming, (streaming) => {
+  if (streaming) {
+    if (!streamingTextTimer) {
+      streamingTextIndex.value = 0;
+      streamingTextTimer = setInterval(() => {
+        streamingTextIndex.value = (streamingTextIndex.value + 1) % STREAMING_TEXTS.length;
+      }, 2400);
+    }
+  } else {
+    if (streamingTextTimer) {
+      clearInterval(streamingTextTimer);
+      streamingTextTimer = null;
+    }
+  }
+}, { immediate: true });
+onUnmounted(() => {
+  if (streamingTextTimer) clearInterval(streamingTextTimer);
+});
 
 // v0.4.1 step 累加: steps 现在直接挂在 message.steps 上, 不需要 messageId 索引
 // 保留 thinking/toolCalls 索引代码以防未来 step 拆分到顶层 (legacy fallback)
@@ -274,6 +304,14 @@ function jumpToMessage(messageId: string) {
              inline flow 性质保证弹窗底边始终贴 Composer 顶边, Composer 高度变化时弹窗自然跟随.
              不需要 ResizeObserver 也不用 ResizeEvent, 浏览器自动处理. -->
         <PermissionDialog />
+        <!-- v0.5.0-D 第15轮 (D202): streaming 状态可视化
+             之前 (D201 截图): streaming 期间底部没持续 loading 指示, user 以为卡住
+             修法: 在 Composer 上方加一个 thin status bar, isStreaming=true 时显示
+             (Loader2 + "AI 正在生成..." + 文字轮换), 跟 message placeholder 风格一致 -->
+        <div v-if="isStreaming" class="pad-chatmain__streaming-status">
+          <Loader2 :size="13" :stroke-width="1.75" class="pad-chatmain__streaming-spinner" />
+          <span class="pad-chatmain__streaming-text">{{ streamingStatusText }}</span>
+        </div>
         <Composer />
       </div>
     </template>
@@ -287,6 +325,10 @@ function jumpToMessage(messageId: string) {
         </h1>
 
         <div class="pad-hero__composer">
+          <div v-if="isStreaming" class="pad-chatmain__streaming-status pad-chatmain__streaming-status--hero">
+            <Loader2 :size="13" :stroke-width="1.75" class="pad-chatmain__streaming-spinner" />
+            <span class="pad-chatmain__streaming-text">{{ streamingStatusText }}</span>
+          </div>
           <Composer ref="heroInputRef" />
         </div>
 
@@ -684,5 +726,39 @@ function jumpToMessage(messageId: string) {
 }
 .pad-hero__chip:active {
   transform: translateY(0);
+}
+
+/* v0.5.0-D 第15轮 (D202): streaming 状态可视化 — Composer 上方 thin status bar
+ *   之前 (D201 截图): streaming 期间底部没持续 loading 指示, user 以为卡住
+ *   修法: isStreaming=true 时显示 Loader2 + 文字轮换, 跟整体 minimalist Copy 主题一致 */
+.pad-chatmain__streaming-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  margin: 0 0 4px 0;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-tertiary);
+  background: var(--pad-bg-active);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-pill);
+  align-self: center;
+  animation: pad-streaming-fadein 0.2s ease;
+}
+@keyframes pad-streaming-fadein {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.pad-chatmain__streaming-spinner {
+  animation: pad-step-spin 1.4s linear infinite;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.pad-chatmain__streaming-text {
+  font-variant-numeric: tabular-nums;
+}
+/* Hero 模式 (initial state) 的 status bar 样式微调, 跟 hero composer 协调 */
+.pad-chatmain__streaming-status--hero {
+  margin: 0 0 8px 0;
 }
 </style>

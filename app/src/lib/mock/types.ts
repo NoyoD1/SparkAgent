@@ -64,6 +64,13 @@ export interface ChatMessage {
    * 当前只用于 compaction 完成时分界线 ("── 已压缩 ──").
    */
   compactionMarker?: boolean;
+  /**
+   * v0.5.0-D 第15轮 (D202): assistant message 标志 — model 返回了空 message
+   *   (message_end 来了但 0 text_delta, 跟图2 卡住现象一致).
+   *   触发后 ChatMessage 渲染警告 + 操作建议, 替代单纯的"生成中..." placeholder,
+   *   让 user 知道发生了什么, 不用盲猜是 streaming 还是卡死.
+   */
+  emptyResponse?: boolean;
 }
 
 export interface ThinkingBlock {

@@ -23,7 +23,7 @@
  *   你就用 Pi TUI 那种来试一下效果吧, 参考图3 做效果" — MiniMax Code / Pi TUI 风格.
  */
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
-import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight, Quote } from 'lucide-vue-next';
+import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight, Quote, AlertTriangle } from 'lucide-vue-next';
 import type { ChatMessage, Step, ToolCallBlock } from '@/lib/mock/types';
 import MarkdownContent from './MarkdownContent.vue';
 import { useChatStore } from '@/stores/chat';
@@ -525,13 +525,27 @@ const statusText = computed(() => {
          之前 (D200 前): step group 因为没 thinking/tools 不渲染, text body 因为没
          stepText 也不渲染, empty state 因为 isStreaming=true 不渲染 → 用户发了消息后
          视觉上没任何反馈, 像 "loading 不见了". 修法: streaming + 无内容时显示 placeholder
-         (Loader2 + statusText 跟 phase 联动, 跟 Composer 下面 ComposerStatus 一致) -->
+         (Loader2 + statusText 跟 phase 联动, 跟 Composer 下面 ComposerStatus 一致)
+         v0.5.0-D 第15轮 (D202) 增强: emptyResponse 状态 (D200) 时换成警告
+         (AlertTriangle + "模型返回空 (建议换 model 或点 Stop)"), 让 user 知道发生了什么 -->
     <div
       v-if="isStreaming && !hasContent && !hasThinkingOrTools && !errorMessage"
-      class="pad-msg__streaming-placeholder"
+      :class="['pad-msg__streaming-placeholder', message.emptyResponse && 'is-warning']"
     >
-      <Loader2 :size="13" :stroke-width="1.75" class="pad-msg__streaming-spinner" />
-      <span>{{ statusText }}</span>
+      <AlertTriangle
+        v-if="message.emptyResponse"
+        :size="13"
+        :stroke-width="1.75"
+        class="pad-msg__streaming-warning-icon"
+      />
+      <Loader2
+        v-else
+        :size="13"
+        :stroke-width="1.75"
+        class="pad-msg__streaming-spinner"
+      />
+      <span v-if="message.emptyResponse">模型返回空 · 建议换 model (deepseek-v4-flash / claude-haiku) 或点 Composer Stop 强制退出</span>
+      <span v-else>{{ statusText }}</span>
     </div>
 
     <!-- v0.3.8.15: stream 结束但 4 类内容都为空时, 显示具体 error 信息 -->
@@ -1237,8 +1251,19 @@ const statusText = computed(() => {
   color: var(--pad-fg-tertiary);
 }
 .pad-msg__streaming-spinner {
-  animation: pad-msg-cursor-blink 1.4s linear infinite;
+  /* v0.5.0-D 第15轮 fix (D202): 之前用错 animation — pad-msg-cursor-blink 是 opacity
+   *   闪烁 (0/1), 不是 rotation. Loader2 圆环在 show/hide 反复, 看起来不转 (D201 截图).
+   *   改用 rotation animation (跟 step group spinner 同一个 1.4s 旋转). */
+  animation: pad-step-spin 1.4s linear infinite;
   opacity: 0.7;
+}
+/* v0.5.0-D 第15轮 (D202): D200 空响应 warning 状态 */
+.pad-msg__streaming-placeholder.is-warning {
+  color: var(--pad-fg-warning, #d97706);
+}
+.pad-msg__streaming-warning-icon {
+  color: var(--pad-fg-warning, #d97706);
+  flex-shrink: 0;
 }
 
 /* v0.5.0-D 第12轮 v2 (D199): 选区引用浮动 button

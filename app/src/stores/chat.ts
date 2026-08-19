@@ -764,6 +764,8 @@ export const useChatStore = defineStore('chat', () => {
               //   时偶发返回空 message, 不 emit agent_end, stream 永远卡住
               //   D200 mitigation: 记录 warning 给 F12 console, 提示 user 改 model
               //   不动 streaming 状态 (避免误关 stream 打破后续 turn), 只 console.warn
+              //   v0.5.0-D 第15轮 (D202) 增强: 同时设 assistant.emptyResponse = true,
+              //   UI placeholder 看到后从 "生成中..." 切换为 "模型返回空 (建议换 model / 点 Stop)" 警告
               if (idx >= 0) {
                 const hasText = (assistant.content || '').trim().length > 0;
                 const steps = assistant.steps || [];
@@ -780,6 +782,8 @@ export const useChatStore = defineStore('chat', () => {
                     'NOT a code bug. Mitigation: switch to a more capable model ' +
                     '(deepseek-v4-flash / claude-haiku), or click Stop to force-exit.',
                   );
+                  // D202: 标 assistant message 为空响应, 触发 UI placeholder 警告
+                  assistant.emptyResponse = true;
                 }
               }
               // v0.5.0-D 第10轮 revert: 删 message_end 拆 final content 覆盖 (跟 message_start
