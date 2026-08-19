@@ -425,14 +425,29 @@ export const useChatStore = defineStore('chat', () => {
     //   之前 (D199) 只用 markdown blockquote 格式, sensenova-6.7-flash-lite 等小模型把 "> " 解读成
     //   "我 (AI) 的回复里有没有引用", 答 "我没引用任何东西", 跟用户问的 "我引用了什么" 不同义
     //   显式标签让 model 看到 prompt 结构, 不会误解读
+    //   v0.5.0-D 第16轮 (D203) 增强: 1) 剥离 <think>...</think> 块, 引用时不带 AI 的 thinking
+    //   (小模型看到 thinking 内容会被误导成"我自己的思考"); 2) 用更显式 + 角色化的标签 (user/Pi 双方标记),
+    //   即便小模型不认识 markdown blockquote, 也能从标签里看出 "Pi 之前的回答" + "用户当前问题" 两段
     const quote = quoteBySession.value[sessionId];
     let fullUserText = text;
     if (quote && quote.content.trim()) {
-      // 引用内容可能多行, 逐行加 "> " 前缀 (markdown blockquote 语法)
-      const quotedLines = quote.content.split('\n').map((line) => line.trim() ? `> ${line}` : '>').join('\n');
-      // 格式: "[引用上文]\n> ...\n\n[我的问题]\n<user text>"
-      //   双重标识: 标签 (人类可读, model 必识别) + markdown blockquote (LLM 训练常见格式)
-      fullUserText = `[引用上文 (messageId=${quote.messageId})]\n${quotedLines}\n\n[我的问题]\n${text}`;
+      // 1. 剥离 <think>...</think> 块 (多行, dotall)
+      //    保留其他文本 (AI 真正回答的内容, 代码块等)
+      const strippedContent = quote.content
+        .replace(/<think>[\s\S]*?<\/think>/g, '')
+        .replace(/\n{3,}/g, '\n\n')  // 多个空行合并
+        .trim();
+      // 2. 引用内容多行, 逐行加 "> " 前缀 (markdown blockquote 语法)
+      const quotedLines = strippedContent.split('\n').map((line) => line.trim() ? `> ${line}` : '>').join('\n');
+      // 3. 显式 role-aware 格式 — 三段清晰分开:
+      //    (1) 引用上文: 标注是 "Pi 之前的回答", 让 model 不会解读成 user 问题
+      //    (2) 用户问题: 标注是 "用户的新问题", 跟引用明确分开
+      //    标签使用 [Pi 先前的回答] / [用户当前问题] (避免 "上文" 这种模糊词)
+      fullUserText =
+        `[Pi 先前的回答 (messageId=${quote.messageId})]\n` +
+        `${quotedLines}\n\n` +
+        `[用户当前问题]\n` +
+        `${text}`;
       console.log('[chat] sendPrompt: with quote (messageId=', quote.messageId, ', len=', quote.content.length, ', fullLen=', fullUserText.length, ')');
       // D201 调试: 打印实际发送的 user message 全文, F12 console 可验证
       console.log('[chat] sendPrompt: fullUserText =\n', fullUserText);

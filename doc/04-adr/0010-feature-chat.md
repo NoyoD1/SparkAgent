@@ -2,7 +2,7 @@
 
 - **状态**: Accepted
 - **日期**: 2026-08-19
-- **最后同步**: v0.5.0-D 第12轮 (D198 user 反馈 + 4 项功能补完)
+- **最后同步**: v0.5.0-D 第16轮 (D203 UX 修复: spinner 根因 + emptyResponse UI + quote 鲁棒)
 - **Type**: Functional
 - **Module**: Chat
 - **决策者**: user
@@ -91,6 +91,50 @@
 > - 图1 (空 response): message_end handler 加 warning log, 提示 user 改 model (deepseek-v4-flash / claude-haiku). 不动 streaming 状态 (避免误关 stream 打破后续 turn)
 > - 图2 (位置偏移): `.pad-msg--assistant` 加 `position: relative`, button 定位 anchor 修到 message 自身
 > - 图3 (selection 漏): 改用 document-level mouseup + selectionchange 双兜底 (debounce 50ms), 抽出 `checkSelectionInMessage` 公共函数, 3 个入口都调
+
+## v0.5.0-D 第14轮 (D201 修复)
+
+> D201 user 反馈 2 个问题:
+> 1. streaming 期间左侧回复区没 loading 反馈 → 之前 (D200) step group 没 thinking/tools 不渲染, text body 没 stepText 也不渲染, empty state 因 isStreaming=true 不渲染 → user 看到"空白"以为 loading 不见了
+> 2. 引用还是被 sensenova-6.7-flash-lite 误解读 → 之前 (D200) 加了 `[引用上文 (messageId=...)]` / `[我的问题]` 但模型还是混淆
+>
+> 修法:
+> - 图1 (loading 反馈): `ChatMessage.vue` 加 streaming placeholder (`v-if="isStreaming && !hasContent && !hasThinkingOrTools && !errorMessage"`) → Loader2 + statusText (跟 Composer 状态文字一致)
+> - 图2 (引用更明确): quote 格式升级到 `[引用上文 (messageId=msg-XXX)]\n> text\n\n[我的问题]\n<user text>`, 加 messageId 锚点让 model 知道引用的是哪条历史消息, `[我的问题]` 段独立成段让 model 一眼看出 user 当前的问题
+
+## v0.5.0-D 第15轮 (D202 修复)
+
+> D202 user 反馈 3 个 UX 问题:
+> 1. 回复 loading 没动画效果, 只看到环形显示/隐藏 → 之前用 `pad-msg-cursor-blink` (opacity 0/1) 给 Loader2, 圆环在 show/hide 反复, 看起来不转
+> 2. 模型返回空时 (D200 探测) 没 UI 提示 → 只 console.warn, user 看不到
+> 3. streaming 期间底部没持续 loading 指示, user 以为卡住
+>
+> 修法:
+> - 图1 (loading 动画): `.pad-msg__streaming-spinner` 的 animation 改用 `pad-step-spin` (rotation 0-360deg), 不是 cursor-blink (opacity blink)
+> - 图2 (空响应 UI): `ChatMessage.emptyResponse?: boolean` flag, placeholder 切到 `.is-warning` variant (AlertTriangle + "模型返回空 · 建议换 model 或点 Stop")
+> - 图3 (底部 status bar): `ChatMain.vue` 在 Composer 上方加 thin status bar, isStreaming=true 时显示 (Loader2 + 文字轮换 "AI 正在生成..." / "生成中..." / "正在响应..."); 文字 2.4s 切换, Loader2 1.4s 旋转; hero 模式同样有 (变体 `--hero`)
+
+## v0.5.0-D 第16轮 (D203 修复) ⏵ 当前轮
+
+> D203 user 反馈 3 个问题:
+> 1. **D202 修复没生效** — 底部 status bar 的 spinner 仍然不转圈, 只看到环形闪烁
+> 2. **卡住没 error 提示** — 即使 D202 加了 `emptyResponse` UI 警告, 仍只在 message placeholder 里, 底部 status bar 始终 "生成中..."; user 看底部 status bar 不知道模型挂了
+> 3. **sensenova-6.7-flash-lite 仍然误解引用** — 即便 D201 加了 `[引用上文]` / `[我的问题]`, 引用内容含 `` (AI thinking) 时, 小模型把 `` 当作 "我自己的思考" → 答 "我引用了什么"
+>
+> 根因:
+> - **图1 spinner 不转**: Vue scoped CSS 给 `@keyframes pad-step-spin` 自动加 scope suffix `pad-step-spin-a65d064a` (在 `ChatMessage.vue` 里定义), 但 `ChatMain.vue` 的 `.pad-chatmain__streaming-spinner` 用 `animation: pad-step-spin` (没 suffix) → 跨文件引用 keyframe 失败 → 动画不跑
+> - **图2 status bar 没反映 emptyResponse**: D202 的 emptyResponse UI 只挂在 `ChatMessage.vue` 的 placeholder (`v-if="isStreaming && !hasContent && ..."`), 但 user 主要看的是底部 status bar; 多轮 message_start/empty 交替时, message placeholder 频繁出现/消失, user 看到的还是 status bar
+> - **图3 quote 误解**: 引用内容包含 `` 块 (AI 可见的 thinking, D197 narrative 风格), 小模型把 `我引用了什么` 误读成 "AI 引用了什么" / "AI 自己的思考"
+>
+> 修法:
+> - **图1 spinner**: 把 `@keyframes pad-step-spin` (和 `pad-msg-cursor-blink`) 提到全局 `app/src/assets/styles/main.css`, 任何 .vue 文件的 scoped animation 都能匹配 (Vite 不会给全局 keyframe 加 scope suffix). 跟 `pad-streaming-fadein` 一起.
+> - **图2 status bar 警告**: `ChatMain.vue` 加 `latestAssistantEmpty` computed, 实时检查最新 assistant message 的 `emptyResponse` flag; true 时 status bar 切到 `.is-warning` variant (AlertTriangle 替代 Loader2, 红字 "模型返回空 · 建议换 model 或点 Stop", 边框变红); 同时加 "重新生成" button, 点击调 `chatStore.sendPrompt(lastUserContent)` 重发上轮 prompt
+> - **图3 quote 鲁棒**: 1) `chat.ts` 发送前剥离 `` 块 (regex `replace(/<think>[\s\S]*?<\/think>/g, '')`), 引用时不带 AI 的 thinking; 2) 标签升级到 `[Pi 先前的回答 (messageId=...)]` / `[用户当前问题]`, 用角色名 (Pi/user) 替代模糊词 (上文/我的问题), 即便小模型不认识 markdown blockquote, 也能从标签里识别两段 role; 3) `console.log` 增加 fullUserText 调试打印 (D201 已加)
+>
+> 验证 (待 user 验证):
+> 1. 底部 status bar 的 spinner 真正转圈 (1.4s linear rotation)
+> 2. 切换到 sensenova-6.7-flash-lite, 发"我引用了什么" + 引用上一条 AI 消息 (含 ``), AI 正确回答"你引用了 (具体内容)" 而不是"我引用了什么" / 返回空
+> 3. 触发空响应场景, 底部 status bar 立即切到 AlertTriangle + 警告, 点"重新生成" 重发成功
 
 ## 后续规划
 

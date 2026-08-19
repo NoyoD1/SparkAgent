@@ -5,6 +5,22 @@
 
 @import './tokens.css';
 
+/* ===== Global keyframes =====
+ * 必须放在全局 (非 scoped), 否则 .vue 文件里 scoped 的 @keyframes 会被 Vite
+ * 自动加 data-v scope suffix (e.g. pad-step-spin-a65d064a), 跨文件引用同一个名字时
+ * 会找不到 keyframe — 这是 D202 的 bug: ChatMessage.vue 定义了 pad-step-spin
+ * (变成 pad-step-spin-a65d064a), ChatMain.vue 的 spinner 写
+ * `animation: pad-step-spin` (无 suffix), 引用不到 → 动画不转.
+ * 解法: 把通用 keyframe 放这里, 任何 .vue 文件的 scoped animation 都能匹配. */
+@keyframes pad-step-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@keyframes pad-msg-cursor-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
 *,
 *::before,
 *::after {
