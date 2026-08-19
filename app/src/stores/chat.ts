@@ -454,38 +454,28 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     // 2. append user msg + streaming marker (assistant placeholder 等 message_start 真的来再 push)
-    // v0.5.0-D 第12轮: 引用回复 — 如果有 quote, 把 quote 作为 markdown blockquote 前缀拼到 user message.
-    //   引用格式: "> <quote content>\n\n<user text>" (跟 markdown 通用 blockquote 语法一致, LLM 能识别)
-    //   引用本意: 让 LLM 知道 user 在哪条历史消息基础上回复 (跟 "fork from message N" 不同的轻量版).
-    //   D201 fix: 加 [引用上文] 标签 + [我的问题] 标签, 让 model 一眼看出 "user 引用了上文" + "user 在问什么"
-    //   之前 (D199) 只用 markdown blockquote 格式, sensenova-6.7-flash-lite 等小模型把 "> " 解读成
-    //   "我 (AI) 的回复里有没有引用", 答 "我没引用任何东西", 跟用户问的 "我引用了什么" 不同义
-    //   显式标签让 model 看到 prompt 结构, 不会误解读
-    //   v0.5.0-D 第16轮 (D203) 增强: 1) 剥离 <think>...</think> 块, 引用时不带 AI 的 thinking
-    //   (小模型看到 thinking 内容会被误导成"我自己的思考"); 2) 用更显式 + 角色化的标签 (user/Pi 双方标记),
-    //   即便小模型不认识 markdown blockquote, 也能从标签里看出 "Pi 之前的回答" + "用户当前问题" 两段
+    // v0.5.0-D 第12轮: 引用回复 — 如果有 quote, 把 quote 内容拼到 user message 前面.
+    //   v0.5.0-D 第18轮 (D205) SIMPLIFY 引用格式:
+    //   之前 (D199 → D201 → D203) 几轮迭代加了 [引用上文] / [我的问题] / [Pi 先前回答] / [用户当前问题]
+    //   标签 + markdown > blockquote 语法 + <<think>> 剥离. 越来越复杂, 实际效果:
+    //     - sensenova-6.7-flash-lite 等小模型还是会被 "> " 误导, 回答 "我引用了什么"
+    //     - DeepSeek 看到标签后能识别, 但对大模型来说这些标签是冗余信息
+    //   user 反馈 (D205): "这个引用应该是很简单的东西吧? 发送后接到用户的输入里面, 只是在前端
+    //   可视化上面呈现了'引用'的特有效果; 再思考一下, 小心一点修改, 不要突发奇想的补丁"
+    //   D205 修法: 回到最简单 — 引用就是 plain text 拼到 user 输入前面, 不加任何结构化标签.
+    //   AI 端: <quoted content>\n\n<user text>  (用 \n\n 隔开两段, AI 用对话历史理解)
+    //   前端: Composer 的 quote preview 继续用 blockquote 样式呈现 (这是 UX 视觉, 不发给 AI)
+    //   这种方案对所有 model 都是同样的语义: "user 在引用上文 (在 history 里) + 现在问新问题"
     const quote = quoteBySession.value[sessionId];
     let fullUserText = text;
     if (quote && quote.content.trim()) {
-      // 1. 剥离 <think>...</think> 块 (多行, dotall)
-      //    保留其他文本 (AI 真正回答的内容, 代码块等)
-      const strippedContent = quote.content
-        .replace(/<think>[\s\S]*?<\/think>/g, '')
-        .replace(/\n{3,}/g, '\n\n')  // 多个空行合并
-        .trim();
-      // 2. 引用内容多行, 逐行加 "> " 前缀 (markdown blockquote 语法)
-      const quotedLines = strippedContent.split('\n').map((line) => line.trim() ? `> ${line}` : '>').join('\n');
-      // 3. 显式 role-aware 格式 — 三段清晰分开:
-      //    (1) 引用上文: 标注是 "Pi 之前的回答", 让 model 不会解读成 user 问题
-      //    (2) 用户问题: 标注是 "用户的新问题", 跟引用明确分开
-      //    标签使用 [Pi 先前的回答] / [用户当前问题] (避免 "上文" 这种模糊词)
-      fullUserText =
-        `[Pi 先前的回答 (messageId=${quote.messageId})]\n` +
-        `${quotedLines}\n\n` +
-        `[用户当前问题]\n` +
-        `${text}`;
+      // 简单拼接: <quoted content>\n\n<user's text>
+      // 不加 "> " (markdown blockquote), 不加 [标签], 不剥离 think
+      // AI 用对话历史 (quote 的源 message 就在 history 里) + 当前 user message 上下文理解
+      // 这条 message 同样存到 chat history (appendUserMessage 用 fullUserText, 跟 store 一致)
+      fullUserText = `${quote.content.trim()}\n\n${text}`;
       console.log('[chat] sendPrompt: with quote (messageId=', quote.messageId, ', len=', quote.content.length, ', fullLen=', fullUserText.length, ')');
-      // D201 调试: 打印实际发送的 user message 全文, F12 console 可验证
+      // 调试: 打印实际发送的 user message 全文, F12 console 可验证
       console.log('[chat] sendPrompt: fullUserText =\n', fullUserText);
     }
     appendUserMessage(sessionId, fullUserText);

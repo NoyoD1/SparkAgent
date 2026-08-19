@@ -22,7 +22,6 @@ import {
   BookOpen,
   Gamepad2,
   Wrench,
-  Loader2,
   AlertTriangle,
 } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
@@ -49,8 +48,9 @@ const activeModelName = computed(() => configStore.activeModel?.id ?? '');
 const isSessionStreaming = computed(() =>
   activeSession.value ? chatStore.isStreamingSession(activeSession.value.id) : false,
 );
-// v0.5.0-D 第15轮 (D202): 给模板用简化别名, 跟 message placeholder 里的 isStreaming 概念一致
-const isStreaming = isSessionStreaming;
+// v0.5.0-D 第18轮 (D205): 删 isStreaming 别名, 模板直接用 isSessionStreaming
+//   (D205 删了底部 status bar, isStreaming 别名在 ChatMessage 里 isMessageStreaming 还用,
+//    但 ChatMain 自己模板不再用)
 function isMessageStreaming(idx: number): boolean {
   // v0.5.0-D 改: 不再检查 `!m.content`. 之前第一条 text_delta 来了就 false
   //   → ChatMessage 的 "生成中..." pill 立刻消失, 用户看不到 "正在下笔" 的过渡.
@@ -61,32 +61,10 @@ function isMessageStreaming(idx: number): boolean {
   return !!m && m.role === 'assistant';
 }
 
-// v0.5.0-D 第15轮 (D202): streaming status bar 文字轮换
-//   跟 message placeholder 风格一致, 给底部一个持续可视化指示
-//   3 个文字轮换 (每 2.4s 切一次), 跟 phase 无关 (phase 已经在 message placeholder 里)
-//   简单一些: 只用通用 "AI 正在生成..." 文字, 强调 streaming 状态
-const STREAMING_TEXTS = ['AI 正在生成...', '生成中...', '正在响应...'];
-const streamingTextIndex = ref(0);
-let streamingTextTimer: ReturnType<typeof setInterval> | null = null;
-const streamingStatusText = computed(() => STREAMING_TEXTS[streamingTextIndex.value] ?? STREAMING_TEXTS[0]);
-watch(isStreaming, (streaming) => {
-  if (streaming) {
-    if (!streamingTextTimer) {
-      streamingTextIndex.value = 0;
-      streamingTextTimer = setInterval(() => {
-        streamingTextIndex.value = (streamingTextIndex.value + 1) % STREAMING_TEXTS.length;
-      }, 2400);
-    }
-  } else {
-    if (streamingTextTimer) {
-      clearInterval(streamingTextTimer);
-      streamingTextTimer = null;
-    }
-  }
-}, { immediate: true });
-onUnmounted(() => {
-  if (streamingTextTimer) clearInterval(streamingTextTimer);
-});
+// v0.5.0-D 第18轮 (D205) REVERT D202: 删底部 streaming status bar
+//   底部 status bar 的动态文字 ("思考中.../生成中.../下笔中...") 移到 ChatMessage placeholder
+//   这里不再维护 streamingTextTimer / STREAMING_TEXTS 等, 跟 user 反馈的"不要左下角提示"一致
+//   (user: "左下角不要有这种提示, 我们上面已经有回复的loading提示了")
 
 // v0.5.0-D 第17轮 (D204) REVERT D203: 删 latestAssistantEmpty + retryLastPrompt
 //   D203 在 status bar 加 emptyResponse 警告变体 + 重新生成 button — user 反馈太激进
@@ -348,18 +326,10 @@ function jumpToMessage(messageId: string) {
              inline flow 性质保证弹窗底边始终贴 Composer 顶边, Composer 高度变化时弹窗自然跟随.
              不需要 ResizeObserver 也不用 ResizeEvent, 浏览器自动处理. -->
         <PermissionDialog />
-        <!-- v0.5.0-D 第15轮 (D202): streaming 状态可视化
-             之前 (D201 截图): streaming 期间底部没持续 loading 指示, user 以为卡住
-             修法: 在 Composer 上方加一个 thin status bar, isStreaming=true 时显示
-             (Loader2 + "AI 正在生成..." + 文字轮换), 跟 message placeholder 风格一致
-             v0.5.0-D 第17轮 (D204) REVERT D203: 删 latestAssistantEmpty 警告变体 + 重新生成 button
-             (D203 在 bottom bar 加 .is-warning 变体是基于 D200 emptyResponse 检测 — false positive
-             太多: model 合法的空 message 误判成 error, user 困惑 "为什么每次都报错".
-             真正的兜底走 D204 stream hang detector, 在 chat 区域显示横线, 不在 popup-style bar) -->
-        <div v-if="isStreaming" class="pad-chatmain__streaming-status">
-          <Loader2 :size="13" :stroke-width="1.75" class="pad-chatmain__streaming-spinner" />
-          <span class="pad-chatmain__streaming-text">{{ streamingStatusText }}</span>
-        </div>
+        <!-- v0.5.0-D 第18轮 (D205) REVERT D202: 删底部 status bar
+             user 反馈: "左下角不要有这种提示, 我们上面已经有回复的loading提示了"
+             动态文字 ("思考中.../生成中.../下笔中...") 移到 ChatMessage placeholder 里轮换
+             这里只放 PermissionDialog + Composer, 不再重复显示 streaming 状态 -->
         <Composer />
       </div>
     </template>
@@ -373,13 +343,8 @@ function jumpToMessage(messageId: string) {
         </h1>
 
         <div class="pad-hero__composer">
-          <div
-            v-if="isStreaming"
-            class="pad-chatmain__streaming-status pad-chatmain__streaming-status--hero"
-          >
-            <Loader2 :size="13" :stroke-width="1.75" class="pad-chatmain__streaming-spinner" />
-            <span class="pad-chatmain__streaming-text">{{ streamingStatusText }}</span>
-          </div>
+          <!-- v0.5.0-D 第18轮 (D205) REVERT D202: hero 模式也不再重复 status bar
+               (ChatMessage placeholder 里就有动态文字, 跟非 hero 一致) -->
           <Composer ref="heroInputRef" />
         </div>
 
@@ -779,42 +744,9 @@ function jumpToMessage(messageId: string) {
   transform: translateY(0);
 }
 
-/* v0.5.0-D 第15轮 (D202): streaming 状态可视化 — Composer 上方 thin status bar
- *   之前 (D201 截图): streaming 期间底部没持续 loading 指示, user 以为卡住
- *   修法: isStreaming=true 时显示 Loader2 + 文字轮换, 跟整体 minimalist Copy 主题一致
- *   v0.5.0-D 第17轮 (D204) REVERT D203: 删 .is-warning 变体 + 重新生成 button 样式
- *   (D203 的 emptyResponse 主动告警已被 D204 stream hang detector 替代, 后者走
- *   chat 区域中间横线, 不在 bottom bar 里) */
-.pad-chatmain__streaming-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  margin: 0 0 4px 0;
-  font-size: var(--pad-fs-12);
-  color: var(--pad-fg-tertiary);
-  background: var(--pad-bg-active);
-  border: 1px solid var(--pad-border);
-  border-radius: var(--pad-radius-pill);
-  align-self: center;
-  animation: pad-streaming-fadein 0.2s ease;
-}
-@keyframes pad-streaming-fadein {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.pad-chatmain__streaming-spinner {
-  animation: pad-step-spin 1.4s linear infinite;
-  flex-shrink: 0;
-  opacity: 0.7;
-}
-.pad-chatmain__streaming-text {
-  font-variant-numeric: tabular-nums;
-}
-/* Hero 模式 (initial state) 的 status bar 样式微调, 跟 hero composer 协调 */
-.pad-chatmain__streaming-status--hero {
-  margin: 0 0 8px 0;
-}
+/* v0.5.0-D 第18轮 (D205) REVERT D202: 删 .pad-chatmain__streaming-status 相关样式
+ *   底部 status bar 整块移除, 不再需要 spinner / text / fadein 等 class
+ *   (动态文字移到 ChatMessage placeholder 里, 见 ChatMessage.vue) */
 
 /* v0.5.0-D 第17轮 (D204): stream hang 错误横线
  *   在 chat 区域中间, user 反馈要的格式: "------error具体详情-------"

@@ -290,7 +290,11 @@ const PHASE_LABELS: Record<string, string[]> = {
   thinking: ['思考中…', '整理思路…', '推演中…'],
   text: ['正在下笔…', '创造中…', '书写中…'],
   tool: ['调用工具…', '执行中…'],
-  idle: ['生成中…'],
+  // v0.5.0-D 第18轮 (D205) 增强: idle phase 也加轮换 label
+  //   user 反馈 "目前caht回复是固定的'生成中...'" — 之前 idle 只有 1 个 label
+  //   不轮换看起来是静态的. 加上 "思考中…/生成中…/下笔中…" 让 placeholder 始终有动效
+  //   (D205 替代 D202 删掉的底部 status bar, 动态文字搬到这里)
+  idle: ['思考中…', '生成中…', '下笔中…'],
 };
 const currentPhase = computed(() => chatStore.getPhase(props.sessionId));
 const textIndex = ref(0);
