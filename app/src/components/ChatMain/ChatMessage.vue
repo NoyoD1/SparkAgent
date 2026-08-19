@@ -23,7 +23,7 @@
  *   你就用 Pi TUI 那种来试一下效果吧, 参考图3 做效果" — MiniMax Code / Pi TUI 风格.
  */
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
-import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight, Quote } from 'lucide-vue-next';
+import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight, Quote, Check, AlertTriangle } from 'lucide-vue-next';
 // 注: ChevronRight 之前是 step group collapsed indicator 用的, 这里引用 blockquote
 //     折叠 indicator 也复用, 不重复 import.
 import type { ChatMessage, Step, ToolCallBlock } from '@/lib/mock/types';
@@ -452,16 +452,35 @@ const statusText = computed(() => {
     </div>
   </div>
 
-  <!-- ============== SYSTEM MESSAGE: v0.4.6 压缩分界线 ============== -->
-  <!-- compaction 完成时 chat.ts push 一条 role:'system', compactionMarker:true 的消息,
-       这里渲染为居中灰色横线 "── 上下文已压缩 ──", 不走 markdown. -->
+  <!-- ============== SYSTEM MESSAGE: v0.4.6 压缩分界线 ==============
+       v0.5.0-D 第27轮 (D210.4) 升级: 之前是 boolean 只标"完成", 现在是 object 表达
+       3 种状态 (in_progress / success / failure), 全部走分隔线 UX, 不用 toast.
+       user 反馈: "压缩失败要在上面提示, 包括压缩进行中都不要通过弹窗形式提示,
+       而是统一使用分隔线的形式, 做的整体一些"
+       - in_progress: ⏳ 正在压缩... (旋转 spinner)
+       - success:    ✓ 上下文已压缩
+       - failure:    ⚠ 压缩失败: <errorMessage> -->
   <div
     v-else-if="message.role === 'system' && message.compactionMarker"
-    class="pad-msg__compaction-divider"
+    :class="['pad-msg__compaction-divider', `is-${message.compactionMarker.state}`]"
     :data-message-id="message.id"
   >
     <span class="pad-msg__compaction-line" />
-    <span class="pad-msg__compaction-label">上下文已压缩</span>
+    <span class="pad-msg__compaction-label">
+      <!-- v0.5.0-D 第27轮 (D210.4): 按 state 显示不同 icon + text -->
+      <template v-if="message.compactionMarker.state === 'in_progress'">
+        <Loader2 :size="12" :stroke-width="1.75" class="pad-msg__compaction-spinner" />
+        <span>正在压缩…</span>
+      </template>
+      <template v-else-if="message.compactionMarker.state === 'success'">
+        <Check :size="12" :stroke-width="1.75" />
+        <span>上下文已压缩</span>
+      </template>
+      <template v-else-if="message.compactionMarker.state === 'failure'">
+        <AlertTriangle :size="12" :stroke-width="1.75" />
+        <span>压缩失败: {{ message.compactionMarker.errorMessage || '未知错误' }}</span>
+      </template>
+    </span>
     <span class="pad-msg__compaction-line" />
   </div>
 
@@ -933,11 +952,40 @@ const statusText = computed(() => {
   opacity: 0.6;
 }
 .pad-msg__compaction-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: var(--pad-fs-11);
   font-weight: var(--pad-fw-medium);
   color: var(--pad-fg-tertiary);
   white-space: nowrap;
   letter-spacing: 0.04em;
+  /* v0.5.0-D 第27轮 (D210.4): failure state 允许换行, 避免错误信息太长撑爆 */
+}
+.pad-msg__compaction-label > span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 480px;
+}
+.pad-msg__compaction-spinner {
+  animation: pad-msg-compaction-spin 1s linear infinite;
+}
+@keyframes pad-msg-compaction-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* v0.5.0-D 第27轮 (D210.4): 三种状态微调 line 颜色, 让用户视觉区分 */
+.pad-msg__compaction-divider.is-in_progress .pad-msg__compaction-line {
+  background: var(--pad-fg-tertiary);
+  opacity: 0.4;
+}
+.pad-msg__compaction-divider.is-failure .pad-msg__compaction-line {
+  background: var(--pad-fg-warning, #d97706);
+  opacity: 0.5;
+}
+.pad-msg__compaction-divider.is-failure .pad-msg__compaction-label {
+  color: var(--pad-fg-warning, #d97706);
 }
 
 /* ===== v0.4.6 Cursor 风格: thinking 累积区 (顶部) ===== */

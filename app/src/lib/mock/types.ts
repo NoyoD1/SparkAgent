@@ -61,9 +61,19 @@ export interface ChatMessage {
   usage?: MessageUsage;
   /**
    * v0.4.6: system 角色消息标记. 配合 ChatMessage.vue 渲染为分界线.
-   * 当前只用于 compaction 完成时分界线 ("── 已压缩 ──").
+   * v0.5.0-D 第27轮 (D210.4) 升级: 之前是 boolean 只表示"完成", 现在是 object 表达
+   *   3 种状态 (in_progress / success / failure), 跟 user 反馈一致:
+   *   "压缩失败要在上面提示, 包括压缩进行中都不要通过弹窗形式提示, 而是统一使用分隔线"
+   *   - in_progress: 压缩中 (compact() 立即 push, handleCompactionEnd 替换)
+   *   - success: 压缩成功 (handleCompactionEnd 替换 in_progress)
+   *   - failure: 压缩失败 (handleCompactionEnd 替换 in_progress, 附 errorMessage)
+   * 不再用 toast 弹窗, 全部走分隔线统一 UX.
    */
-  compactionMarker?: boolean;
+  compactionMarker?: {
+    state: 'in_progress' | 'success' | 'failure';
+    /** 仅 failure 状态有, 压缩失败的错误信息 */
+    errorMessage?: string;
+  };
   /**
    * v0.5.0-D 第15轮 (D202): assistant message 标志 — model 返回了空 message
    *   (message_end 来了但 0 text_delta, 跟图2 卡住现象一致).

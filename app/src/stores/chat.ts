@@ -235,29 +235,45 @@ export const useChatStore = defineStore('chat', () => {
       };
       console.log(`[chat] compaction_end: reset cumulative usage (compaction freed context)`);
     }
-    // Bug #2 修: 手动 compact 终态 toast
-    if (event.reason === 'manual') {
-      if (event.aborted) {
-        useUiStore().showToast('压缩已中止', 'warning', 3000);
-      } else if (event.errorMessage) {
-        useUiStore().showToast(`压缩失败: ${event.errorMessage.slice(0, 80)}`, 'error', 6000);
-      } else {
-        useUiStore().showToast('压缩完成, context 已释放', 'success', 3000);
-      }
-    }
-    // v0.4.6 Bug 修: 压缩完成时插 "── 已压缩 ──" 分界线 system message
+    // v0.5.0-D 第27轮 (D210.4) 改 UX: 不再用 toast 弹窗, 全部走分隔线
+    //   user 反馈: "压缩失败要在上面提示, 包括压缩进行中都不要通过弹窗形式提示,
+    //   而是统一使用分隔线的形式, 做的整体一些"
+    //   修法: 找到最近一条 in_progress 的 compactionMarker system message,
+    //   更新成 success / failure (在原地更新, 不 push 新消息, 避免累积多个 divider)
     const d2 = getSessionData(sessionId);
     if (d2) {
-      const beforeCount = d2.messages.length;
-      d2.messages.push({
-        id: `sys-compact-${Date.now()}`,
-        role: 'system',
-        content: '__COMPACTION_DIVIDER__',
-        createdAt: new Date().toISOString(),
-        compactionMarker: true,
-      } as ChatMessage);
+      // 找最近一条 in_progress 的 marker (从尾部向前找, 通常就是最后一条 system)
+      let updateIdx = -1;
+      for (let i = d2.messages.length - 1; i >= 0; i--) {
+        const m = d2.messages[i];
+        if (m.role === 'system' && m.compactionMarker && m.compactionMarker.state === 'in_progress') {
+          updateIdx = i;
+          break;
+        }
+      }
+      // 状态判断: aborted 或 errorMessage → failure, 否则 success
+      const finalState: 'success' | 'failure' = (event.aborted || event.errorMessage) ? 'failure' : 'success';
+      const errorMessage = event.errorMessage || (event.aborted ? '压缩已中止' : undefined);
+      if (updateIdx >= 0) {
+        // 原地更新 marker (不要 push 新消息)
+        d2.messages[updateIdx] = {
+          ...d2.messages[updateIdx],
+          compactionMarker: { state: finalState, errorMessage },
+        };
+        console.log(`[chat] compaction divider updated: in_progress → ${finalState}${errorMessage ? ' (' + errorMessage.slice(0, 60) + ')' : ''}`);
+      } else {
+        // 兜底: 找不到 in_progress marker (Pi SDK 内部自动 compaction, 没经过 compact()
+        // 推过 in_progress), 直接 push 一条 success / failure
+        d2.messages.push({
+          id: `sys-compact-${Date.now()}`,
+          role: 'system',
+          content: '__COMPACTION_DIVIDER__',
+          createdAt: new Date().toISOString(),
+          compactionMarker: { state: finalState, errorMessage },
+        } as ChatMessage);
+        console.log(`[chat] compaction divider pushed (no in_progress found, push ${finalState})`);
+      }
       chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
-      console.log(`[chat] compaction divider pushed (msgs ${beforeCount} → ${d2.messages.length})`);
     }
   }
   function startStreamHangWatchdog(sessionId: string): ReturnType<typeof setTimeout> {
@@ -1403,12 +1419,41 @@ export const useChatStore = defineStore('chat', () => {
           reasoning: model.reasoning,
         },
       }));
-      useUiStore().showToast('开始压缩 context…', 'info', 2000);
+      // v0.5.0-D 第27轮 (D210.4) 改 UX: 不用 toast, 走分隔线
+      //   推一条 in_progress system message, handleCompactionEnd 时原地更新成 success / failure.
+      //   user 反馈: "压缩进行中不要通过弹窗形式提示, 而是统一使用分隔线的形式, 做的整体一些"
+      const dInProg = getSessionData(sid);
+      if (dInProg) {
+        dInProg.messages.push({
+          id: `sys-compact-${Date.now()}`,
+          role: 'system',
+          content: '__COMPACTION_DIVIDER__',
+          createdAt: new Date().toISOString(),
+          compactionMarker: { state: 'in_progress' },
+        } as ChatMessage);
+        chatData.value = { ...chatData.value, [sid]: { ...dInProg } };
+        console.log(`[chat] compaction divider pushed: in_progress (manual, session=${sid})`);
+      }
     } catch (e) {
       console.error('[chat] compactSession invoke failed', e);
       // 失败时清掉 in_progress 状态, 避免 UI 卡住
       compactionBySession.value = { ...compactionBySession.value, [sid]: 'idle' };
-      useUiStore().showToast(`压缩失败: ${e instanceof Error ? e.message : String(e)}`, 'error', 6000);
+      // v0.5.0-D 第27轮 (D210.4) 改 UX: 不用 toast, 走分隔线
+      //   找到刚才推的 in_progress divider, 原地更新成 failure
+      const dFail = getSessionData(sid);
+      if (dFail) {
+        for (let i = dFail.messages.length - 1; i >= 0; i--) {
+          const m = dFail.messages[i];
+          if (m.role === 'system' && m.compactionMarker && m.compactionMarker.state === 'in_progress') {
+            dFail.messages[i] = {
+              ...m,
+              compactionMarker: { state: 'failure', errorMessage: e instanceof Error ? e.message : String(e) },
+            };
+            break;
+          }
+        }
+        chatData.value = { ...chatData.value, [sid]: { ...dFail } };
+      }
     }
   }
 
