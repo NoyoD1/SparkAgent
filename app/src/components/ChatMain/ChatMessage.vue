@@ -23,7 +23,7 @@
  *   你就用 Pi TUI 那种来试一下效果吧, 参考图3 做效果" — MiniMax Code / Pi TUI 风格.
  */
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
-import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight, Quote, AlertTriangle } from 'lucide-vue-next';
+import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight, Quote } from 'lucide-vue-next';
 import type { ChatMessage, Step, ToolCallBlock } from '@/lib/mock/types';
 import MarkdownContent from './MarkdownContent.vue';
 import { useChatStore } from '@/stores/chat';
@@ -526,26 +526,21 @@ const statusText = computed(() => {
          stepText 也不渲染, empty state 因为 isStreaming=true 不渲染 → 用户发了消息后
          视觉上没任何反馈, 像 "loading 不见了". 修法: streaming + 无内容时显示 placeholder
          (Loader2 + statusText 跟 phase 联动, 跟 Composer 下面 ComposerStatus 一致)
-         v0.5.0-D 第15轮 (D202) 增强: emptyResponse 状态 (D200) 时换成警告
-         (AlertTriangle + "模型返回空 (建议换 model 或点 Stop)"), 让 user 知道发生了什么 -->
+         v0.5.0-D 第17轮 (D204) REVERT D202: 删 AlertTriangle 警告变体
+         (D202 在 emptyResponse=true 时换 AlertTriangle + warning text, 但 D204 已删
+         emptyResponse 自动检测 — model 合法的空 message 不能告警, 之前是 false positive
+         把 D202 截图的 sensenova-6.7-flash-lite 第一次空 message 误判成 error)
+         现在 placeholder 永远只是 Loader2 + statusText, 跟 D201 一致 -->
     <div
       v-if="isStreaming && !hasContent && !hasThinkingOrTools && !errorMessage"
-      :class="['pad-msg__streaming-placeholder', message.emptyResponse && 'is-warning']"
+      class="pad-msg__streaming-placeholder"
     >
-      <AlertTriangle
-        v-if="message.emptyResponse"
-        :size="13"
-        :stroke-width="1.75"
-        class="pad-msg__streaming-warning-icon"
-      />
       <Loader2
-        v-else
         :size="13"
         :stroke-width="1.75"
         class="pad-msg__streaming-spinner"
       />
-      <span v-if="message.emptyResponse">模型返回空 · 建议换 model (deepseek-v4-flash / claude-haiku) 或点 Composer Stop 强制退出</span>
-      <span v-else>{{ statusText }}</span>
+      <span>{{ statusText }}</span>
     </div>
 
     <!-- v0.3.8.15: stream 结束但 4 类内容都为空时, 显示具体 error 信息 -->
@@ -1257,14 +1252,8 @@ const statusText = computed(() => {
   animation: pad-step-spin 1.4s linear infinite;
   opacity: 0.7;
 }
-/* v0.5.0-D 第15轮 (D202): D200 空响应 warning 状态 */
-.pad-msg__streaming-placeholder.is-warning {
-  color: var(--pad-fg-warning, #d97706);
-}
-.pad-msg__streaming-warning-icon {
-  color: var(--pad-fg-warning, #d97706);
-  flex-shrink: 0;
-}
+/* v0.5.0-D 第17轮 (D204) REVERT: 删 D202 的 .is-warning 变体 + warning-icon class
+   (emptyResponse 自动检测 + UI 警告变体已全删, 不再需要这些样式) */
 
 /* v0.5.0-D 第12轮 v2 (D199): 选区引用浮动 button
    鼠标滑动选中文本后, 浮动 button 出现在 selection 上方

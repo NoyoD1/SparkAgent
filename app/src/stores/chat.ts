@@ -158,6 +158,42 @@ export const useChatStore = defineStore('chat', () => {
   // v0.4.2+ LLM 错误重试: retryBySession 记录当前 retry 状态 (attempt 进度 + 上次错误)
   // FE UI 可以根据这个显示"重试中 1/5..."提示
   const retryBySession = ref<Record<string, { attempt: number; maxAttempts: number; errorMessage: string } | null>>({});
+  // v0.5.0-D 第17轮 (D204): stream hang detector — 30s 无事件 + 仍 isStreaming → 标 hang
+  //   替代 D200/D202/D203 的 emptyResponse 主动告警 (那个有 false positive: model 合法的空 message)
+  //   这个是真正兜底: 只有 stream 真的 hang 住 (没新事件, 也等不到 agent_end) 才告警
+  //   UI 在 chat 区域显示横线 (不是 popup), user 自行决定重发
+  const streamHangBySession = ref<Record<string, boolean>>({});
+  const lastStreamEventAt = new Map<string, number>();
+  const streamHangTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const STREAM_HANG_TIMEOUT_MS = 30_000;
+  function touchStreamEvent(sessionId: string) {
+    lastStreamEventAt.set(sessionId, Date.now());
+  }
+  function startStreamHangWatchdog(sessionId: string): ReturnType<typeof setTimeout> {
+    stopStreamHangWatchdog(sessionId);
+    const timer = setTimeout(() => {
+      // 30s 没事件 + 仍 isStreaming → 标 hang
+      const last = lastStreamEventAt.get(sessionId) || 0;
+      const stillStreaming = !!streamingBySession.value[sessionId];
+      if (stillStreaming && Date.now() - last >= STREAM_HANG_TIMEOUT_MS) {
+        streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: true };
+        chatData.value = { ...chatData.value };
+        console.warn(
+          `[chat] D204: stream hang detected for ${sessionId} (no events for ${STREAM_HANG_TIMEOUT_MS}ms). ` +
+          `This is the model/sidecar stopped sending events. UI will show inline error line.`,
+        );
+      }
+    }, STREAM_HANG_TIMEOUT_MS);
+    streamHangTimers.set(sessionId, timer);
+    return timer;
+  }
+  function stopStreamHangWatchdog(sessionId: string) {
+    const t = streamHangTimers.get(sessionId);
+    if (t) {
+      clearTimeout(t);
+      streamHangTimers.delete(sessionId);
+    }
+  }
   // v0.5.0-D 第12轮: 引用回复 (quote & reply)
   //   user 在 assistant 消息点 "引用" button → quoteBySession[sid] 存一条引用.
   //   Composer 显示引用预览, 发送时自动把引用作为 markdown blockquote 前缀拼到 user message.
@@ -471,7 +507,22 @@ export const useChatStore = defineStore('chat', () => {
     const assistantId = genMessageId('a');
 
     // 3. 临时 listener (await 确保 listener 起来, 避免 sidecar 早早 emit 丢事件)
+    // v0.5.0-D 第17轮 (D204): stream hang detector
+    //   track 每 session 最近一次事件时间, 30s 内没事件 + 仍 isStreaming → 标 streamHang=true
+    //   UI 在 chat 区域显示横线错误 (不是 popup). 真正的兜底, 替代之前 D200 在 message_end
+    //   提前告警的误判.
+    streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: false };
+    touchStreamEvent(sessionId);
+    // 启动 watchdog, timer 句柄存到 streamHangTimers map 统一管理
+    // (agent_end / error / forceStopStreaming 调 stopStreamHangWatchdog 清掉)
+    startStreamHangWatchdog(sessionId);
     const off = await piTauri.on((event) => {
+      // 每个事件到达就 reset watchdog + 清 hang 标记
+      touchStreamEvent(sessionId);
+      if (streamHangBySession.value[sessionId]) {
+        streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: false };
+        chatData.value = { ...chatData.value };  // 触发 UI 更新
+      }
       console.log(
         '[chat] event:',
         event.type,
@@ -510,6 +561,9 @@ export const useChatStore = defineStore('chat', () => {
           //   placeholder 已经在前面 push 过了 (如果 idx < 0).
           errorBySession.value = { ...errorBySession.value, [sessionId]: event.message };
           streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
+          // v0.5.0-D 第17轮 (D204): 清 stream hang 标记 + 停 watchdog
+          stopStreamHangWatchdog(sessionId);
+          streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: false };
           // v0.4.2+ 清 retry 状态 (5 次重试都失败, 终态错误)
           retryBySession.value = { ...retryBySession.value, [sessionId]: null };
           // v0.4.2.x fix: 跟 agent_end 一样, 关闭还在 active 的 step
@@ -571,6 +625,9 @@ export const useChatStore = defineStore('chat', () => {
           // 正常 agent_end (willRetry=false): 翻 streaming, 走完成路径
           streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
           retryBySession.value = { ...retryBySession.value, [sessionId]: null };
+          // v0.5.0-D 第17轮 (D204): 清 stream hang 标记 + 停 watchdog
+          stopStreamHangWatchdog(sessionId);
+          streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: false };
           // v0.5.1: phase 切回 idle
           setPhase(sessionId, 'idle');
           // v0.4.7: assistantId 是 const (整个 sendPrompt 共用 1 个), 不再 reset
@@ -772,35 +829,14 @@ export const useChatStore = defineStore('chat', () => {
                 assistant.usage = finalUsage;
                 console.log(`[chat] message_end: usage=${finalUsage.input}+${finalUsage.cacheRead} (cache) + ${finalUsage.cacheWrite} (write) → contextTokens=${contextTokensBySession.value[sessionId]}`);
               }
-              // v0.5.0-D 第13轮 fix (D200): 探测"空 message" — model 返回空响应
-              //   触发条件: message_end 来了, message 没有任何 content/thinking/tools,
-              //   也没有 streaming 状态切换 (agent_end 还没来, 模型可能 hang)
-              //   实测场景: sensenova-6.7-flash-lite 收到带 markdown blockquote 的 prompt
-              //   时偶发返回空 message, 不 emit agent_end, stream 永远卡住
-              //   D200 mitigation: 记录 warning 给 F12 console, 提示 user 改 model
-              //   不动 streaming 状态 (避免误关 stream 打破后续 turn), 只 console.warn
-              //   v0.5.0-D 第15轮 (D202) 增强: 同时设 assistant.emptyResponse = true,
-              //   UI placeholder 看到后从 "生成中..." 切换为 "模型返回空 (建议换 model / 点 Stop)" 警告
-              if (idx >= 0) {
-                const hasText = (assistant.content || '').trim().length > 0;
-                const steps = assistant.steps || [];
-                const hasAnyStep = steps.some((s) =>
-                  (s.stepText || '').trim().length > 0 ||
-                  (s.thinking || []).length > 0 ||
-                  (s.toolCalls || []).length > 0
-                );
-                if (!hasText && !hasAnyStep) {
-                  console.warn(
-                    '[chat] D200: message_end with EMPTY message. ' +
-                    'model returned no text_delta. ' +
-                    'This is a model behavior issue (e.g. sensenova-6.7-flash-lite), ' +
-                    'NOT a code bug. Mitigation: switch to a more capable model ' +
-                    '(deepseek-v4-flash / claude-haiku), or click Stop to force-exit.',
-                  );
-                  // D202: 标 assistant message 为空响应, 触发 UI placeholder 警告
-                  assistant.emptyResponse = true;
-                }
-              }
+              // v0.5.0-D 第17轮 (D204) REVERT D200/D202/D203 emptyResponse 主动告警:
+              //   之前 D200 (b379f76) 在 message_end 探测"空 message" → D202/D203 在 UI 弹 AlertTriangle.
+              //   实测 D202 截图暴露的问题: sensenova-6.7-flash-lite 合法地先发空 message (warmup / control),
+              //   再发 thinking + toolCall, D200 提前告警 → 底部 status bar 弹错误 → user 困惑.
+              //   D204 修法: 不在 message_end 主动检测 (model 自己控制, 可能后续 message 还有内容).
+              //   改成真正的兜底: stream hang detector 在 30s 无事件 + 仍 isStreaming 时, 才标
+              //   streamHang=true, UI 在 chat 区域中间显示一条横线 (不是 popup).
+              //
               // v0.5.0-D 第10轮 revert: 删 message_end 拆 final content 覆盖 (跟 message_start
               //   一起删, 整套 splitMessageContentIntoStep 死循环去掉). v0.5.0-PR3 行为:
               //   message_end 只处理 usage, content 由 text_delta 累积, 流式显示一直正确.
@@ -1174,6 +1210,9 @@ export const useChatStore = defineStore('chat', () => {
   async function forceStopStreaming(sessionId: string) {
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
     retryBySession.value = { ...retryBySession.value, [sessionId]: null };
+    // v0.5.0-D 第17轮 (D204): 用户点 Stop 强制终止 → 也清 stream hang 标记 + 停 watchdog
+    stopStreamHangWatchdog(sessionId);
+    streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: false };
     const d2 = getSessionData(sessionId);
     if (d2) {
       const assistant = d2.messages[d2.messages.length - 1];
@@ -1201,6 +1240,13 @@ export const useChatStore = defineStore('chat', () => {
     streamingBySession,
     errorBySession,
     retryBySession, // v0.4.2+ LLM 重试状态 (UI 显示"重试中 1/5...")
+    // v0.5.0-D 第17轮 (D204): stream hang detector
+    streamHangBySession,
+    clearStreamHang(sessionId: string) {
+      streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: false };
+      touchStreamEvent(sessionId);
+      startStreamHangWatchdog(sessionId);
+    },
     phaseBySession, // v0.5.1: 当前 phase (thinking/text/tool/idle) — UI status icon 轮换用
     // v0.4.3: context window 占用跟踪 + compaction 状态
     lastUsageBySession,

@@ -24,7 +24,6 @@ import {
   Wrench,
   Loader2,
   AlertTriangle,
-  RotateCw,
 } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
@@ -89,40 +88,11 @@ onUnmounted(() => {
   if (streamingTextTimer) clearInterval(streamingTextTimer);
 });
 
-// v0.5.0-D 第16轮 (D203): D202 的 emptyResponse 检测只 console.warn, UI 看不到.
-//   user 反馈: "卡住的情况, 没有 error 提示" (sensenova-6.7-flash-lite 经常返回空 message)
-//   修法: 底部 streaming status bar 实时检查最新 assistant message, 如果 emptyResponse=true
-//   → 切到警告变体 (AlertTriangle + "模型返回空 · 建议换 model 或点 Stop") + 重新生成 button.
-//   这样 user 不用打开 F12 也能感知到模型挂了, 也能直接点重新生成.
-const latestAssistantEmpty = computed(() => {
-  if (!isStreaming.value) return false;
-  const msgs = messages.value;
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].role === 'assistant') {
-      return !!(msgs[i] as { emptyResponse?: boolean }).emptyResponse;
-    }
-  }
-  return false;
-});
-// 重新生成: 把最后一条 user message 重新发给模型 (用同一个 session)
-//   实现: chatStore.sendPrompt(content) 自动用 active session
-//   简单版, 不带重试, 不带改 model
-async function retryLastPrompt() {
-  if (!activeSession.value) return;
-  const msgs = messages.value;
-  // 找最后一条 user message
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].role === 'user') {
-      const text = msgs[i].content;
-      if (text && text.trim().length > 0) {
-        // v0.5.0-D 改: sendPrompt(content) 只接受 content 参数, 自动用 active session
-        //   quote 已经在上一轮发过了, 重新生成不需要再加 quote
-        await chatStore.sendPrompt(text);
-        return;
-      }
-    }
-  }
-}
+// v0.5.0-D 第17轮 (D204) REVERT D203: 删 latestAssistantEmpty + retryLastPrompt
+//   D203 在 status bar 加 emptyResponse 警告变体 + 重新生成 button — user 反馈太激进
+//   (model 合法的空 message 误判). 真正的兜底在 D204 stream hang detector, 走 chat
+//   区域中间横线, 不在 popup-style bottom bar 里. 重新生成让 user 自己在 composer
+//   重发即可, 不需要专门 button.
 
 // v0.4.1 step 累加: steps 现在直接挂在 message.steps 上, 不需要 messageId 索引
 // 保留 thinking/toolCalls 索引代码以防未来 step 拆分到顶层 (legacy fallback)
@@ -152,6 +122,21 @@ const turns = computed<ChatTurn[]>(() => {
 });
 
 const userMessagesCount = computed(() => turns.value.length);
+
+// v0.5.0-D 第17轮 (D204): stream hang indicator
+//   chat store 的 streamHangBySession 控制: 30s 无事件 + 仍 isStreaming → true
+//   UI 在 chat 区域显示横线 (不是 popup). user 可点 × 关闭 (清标记, 不会触发新请求,
+//   user 自行在 composer 重发即可)
+const isStreamHang = computed(() => {
+  const sid = activeSession.value?.id;
+  if (!sid) return false;
+  return !!chatStore.streamHangBySession[sid];
+});
+function dismissStreamHang() {
+  const sid = activeSession.value?.id;
+  if (!sid) return;
+  chatStore.clearStreamHang(sid);
+}
 
 // v0.3.8.1.3: 不再 prop 传 userMessageEls (Vue 组件 ref 拿到的是实例不是 DOM 元素,
 // IntersectionObserver.observe(instance) 抛错). nav 内部用 scrollRoot.querySelectorAll 自己拿.
@@ -317,6 +302,28 @@ function jumpToMessage(messageId: string) {
                 isMessageStreaming(idx) ? (chatStore.retryBySession?.[activeSession?.id || ''] ?? null) : null
               "
             />
+            <!-- v0.5.0-D 第17轮 (D204): stream hang error line
+                 真正兜底: 30s 无事件 + 仍 isStreaming → 显示横线在 chat 区域中间
+                 user 反馈: "我不要弹窗, 我要的是在chat区域中间一个'------error具体详情-------'这样的横线"
+                 横线显示具体错误信息 + × 关闭 (关闭只清标记, 不会触发新请求,
+                 user 自行在 composer 重发即可, 不强行 retry)
+                 替代 D200/D202/D203 的 popup-style emptyResponse 警告 (false positive 太多) -->
+            <div v-if="isStreamHang" class="pad-chatmain__stream-hang">
+              <div class="pad-chatmain__stream-hang-line" />
+              <span class="pad-chatmain__stream-hang-text">
+                <AlertTriangle :size="13" :stroke-width="1.75" class="pad-chatmain__stream-hang-icon" />
+                30s 无新事件 · 模型 / sidecar 已停止响应 · 可在 composer 重发或换 model
+              </span>
+              <div class="pad-chatmain__stream-hang-line" />
+              <button
+                type="button"
+                class="pad-chatmain__stream-hang-close"
+                title="关闭提示 (不会重发)"
+                @click="dismissStreamHang"
+              >
+                ×
+              </button>
+            </div>
           </div>
         </div>
 
@@ -345,38 +352,13 @@ function jumpToMessage(messageId: string) {
              之前 (D201 截图): streaming 期间底部没持续 loading 指示, user 以为卡住
              修法: 在 Composer 上方加一个 thin status bar, isStreaming=true 时显示
              (Loader2 + "AI 正在生成..." + 文字轮换), 跟 message placeholder 风格一致
-             v0.5.0-D 第16轮 (D203) 增强: latestAssistantEmpty 时切到警告变体
-             (AlertTriangle + "模型返回空") + 重新生成 button -->
-        <div
-          v-if="isStreaming"
-          :class="['pad-chatmain__streaming-status', latestAssistantEmpty && 'is-warning']"
-        >
-          <AlertTriangle
-            v-if="latestAssistantEmpty"
-            :size="13"
-            :stroke-width="1.75"
-            class="pad-chatmain__streaming-warning-icon"
-          />
-          <Loader2
-            v-else
-            :size="13"
-            :stroke-width="1.75"
-            class="pad-chatmain__streaming-spinner"
-          />
-          <span class="pad-chatmain__streaming-text">
-            <template v-if="latestAssistantEmpty">模型返回空 · 建议换 model 或点 Stop</template>
-            <template v-else>{{ streamingStatusText }}</template>
-          </span>
-          <button
-            v-if="latestAssistantEmpty"
-            type="button"
-            class="pad-chatmain__streaming-retry"
-            title="重新生成 (用相同 prompt 重发给当前 model)"
-            @click="retryLastPrompt"
-          >
-            <RotateCw :size="12" :stroke-width="1.75" />
-            <span>重新生成</span>
-          </button>
+             v0.5.0-D 第17轮 (D204) REVERT D203: 删 latestAssistantEmpty 警告变体 + 重新生成 button
+             (D203 在 bottom bar 加 .is-warning 变体是基于 D200 emptyResponse 检测 — false positive
+             太多: model 合法的空 message 误判成 error, user 困惑 "为什么每次都报错".
+             真正的兜底走 D204 stream hang detector, 在 chat 区域显示横线, 不在 popup-style bar) -->
+        <div v-if="isStreaming" class="pad-chatmain__streaming-status">
+          <Loader2 :size="13" :stroke-width="1.75" class="pad-chatmain__streaming-spinner" />
+          <span class="pad-chatmain__streaming-text">{{ streamingStatusText }}</span>
         </div>
         <Composer />
       </div>
@@ -393,34 +375,10 @@ function jumpToMessage(messageId: string) {
         <div class="pad-hero__composer">
           <div
             v-if="isStreaming"
-            :class="['pad-chatmain__streaming-status', 'pad-chatmain__streaming-status--hero', latestAssistantEmpty && 'is-warning']"
+            class="pad-chatmain__streaming-status pad-chatmain__streaming-status--hero"
           >
-            <AlertTriangle
-              v-if="latestAssistantEmpty"
-              :size="13"
-              :stroke-width="1.75"
-              class="pad-chatmain__streaming-warning-icon"
-            />
-            <Loader2
-              v-else
-              :size="13"
-              :stroke-width="1.75"
-              class="pad-chatmain__streaming-spinner"
-            />
-            <span class="pad-chatmain__streaming-text">
-              <template v-if="latestAssistantEmpty">模型返回空 · 建议换 model 或点 Stop</template>
-              <template v-else>{{ streamingStatusText }}</template>
-            </span>
-            <button
-              v-if="latestAssistantEmpty"
-              type="button"
-              class="pad-chatmain__streaming-retry"
-              title="重新生成"
-              @click="retryLastPrompt"
-            >
-              <RotateCw :size="12" :stroke-width="1.75" />
-              <span>重新生成</span>
-            </button>
+            <Loader2 :size="13" :stroke-width="1.75" class="pad-chatmain__streaming-spinner" />
+            <span class="pad-chatmain__streaming-text">{{ streamingStatusText }}</span>
           </div>
           <Composer ref="heroInputRef" />
         </div>
@@ -824,7 +782,9 @@ function jumpToMessage(messageId: string) {
 /* v0.5.0-D 第15轮 (D202): streaming 状态可视化 — Composer 上方 thin status bar
  *   之前 (D201 截图): streaming 期间底部没持续 loading 指示, user 以为卡住
  *   修法: isStreaming=true 时显示 Loader2 + 文字轮换, 跟整体 minimalist Copy 主题一致
- *   v0.5.0-D 第16轮 (D203) 增强: latestAssistantEmpty 时切到 .is-warning 变体 */
+ *   v0.5.0-D 第17轮 (D204) REVERT D203: 删 .is-warning 变体 + 重新生成 button 样式
+ *   (D203 的 emptyResponse 主动告警已被 D204 stream hang detector 替代, 后者走
+ *   chat 区域中间横线, 不在 bottom bar 里) */
 .pad-chatmain__streaming-status {
   display: inline-flex;
   align-items: center;
@@ -851,39 +811,56 @@ function jumpToMessage(messageId: string) {
 .pad-chatmain__streaming-text {
   font-variant-numeric: tabular-nums;
 }
-/* v0.5.0-D 第16轮 (D203): emptyResponse 警告变体
- *   Loader2 → AlertTriangle, 文字变红色, 边框变红
- *   跟 ChatMessage placeholder 的 .is-warning 风格保持一致 */
-.pad-chatmain__streaming-status.is-warning {
-  color: var(--pad-fg-warning, #d97706);
-  border-color: var(--pad-fg-warning, #d97706);
-  background: var(--pad-warning-subtle, #fffbeb);
+/* Hero 模式 (initial state) 的 status bar 样式微调, 跟 hero composer 协调 */
+.pad-chatmain__streaming-status--hero {
+  margin: 0 0 8px 0;
 }
-.pad-chatmain__streaming-warning-icon {
+
+/* v0.5.0-D 第17轮 (D204): stream hang 错误横线
+ *   在 chat 区域中间, user 反馈要的格式: "------error具体详情-------"
+ *   不走 popup / bottom bar, inline 容易看, 点 × 关闭
+ *   替代 D202 AlertTriangle placeholder + D203 底部 status bar 警告变体 */
+.pad-chatmain__stream-hang {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 16px 12px;
+  font-size: var(--pad-fs-12);
   color: var(--pad-fg-warning, #d97706);
-  flex-shrink: 0;
 }
-.pad-chatmain__streaming-retry {
+.pad-chatmain__stream-hang-line {
+  flex: 1;
+  height: 1px;
+  background: var(--pad-fg-warning, #d97706);
+  opacity: 0.3;
+}
+.pad-chatmain__stream-hang-text {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  margin-left: 4px;
-  padding: 2px 8px;
-  font-size: var(--pad-fs-11);
+  gap: 6px;
+  white-space: nowrap;
   font-weight: var(--pad-fw-medium);
+}
+.pad-chatmain__stream-hang-icon {
+  flex-shrink: 0;
+}
+.pad-chatmain__stream-hang-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  font-size: 16px;
+  line-height: 1;
   color: var(--pad-fg-warning, #d97706);
   background: transparent;
   border: 1px solid var(--pad-fg-warning, #d97706);
   border-radius: var(--pad-radius-sm, 6px);
   cursor: pointer;
-  transition: background var(--pad-dur-fast) ease;
+  transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
 }
-.pad-chatmain__streaming-retry:hover {
+.pad-chatmain__stream-hang-close:hover {
   background: var(--pad-fg-warning, #d97706);
   color: #fff;
-}
-/* Hero 模式 (initial state) 的 status bar 样式微调, 跟 hero composer 协调 */
-.pad-chatmain__streaming-status--hero {
-  margin: 0 0 8px 0;
 }
 </style>
