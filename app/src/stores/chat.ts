@@ -403,12 +403,16 @@ export const useChatStore = defineStore('chat', () => {
 
   // ===== Actions ====
 
-  function appendUserMessage(sessionId: string, content: string) {
+  // v0.5.0-D 第19轮 (D206): appendUserMessage 加 quoteContent 参数
+  //   当 user 用 quote 功能发消息时, quoteContent 存原始引用文本 (没 `> ` 前缀)
+  //   给 ChatMessage 渲染 user 气泡时用 (引用部分 blockquote 样式可视化)
+  function appendUserMessage(sessionId: string, content: string, quoteContent: string | null = null) {
     const d = getSessionData(sessionId);
     d.messages.push({
       id: genMessageId('u'),
       role: 'user',
       content,
+      quoteContent: quoteContent ?? undefined,
       createdAt: new Date().toISOString(),
     });
     // 触发响应式更新
@@ -455,30 +459,33 @@ export const useChatStore = defineStore('chat', () => {
 
     // 2. append user msg + streaming marker (assistant placeholder 等 message_start 真的来再 push)
     // v0.5.0-D 第12轮: 引用回复 — 如果有 quote, 把 quote 内容拼到 user message 前面.
-    //   v0.5.0-D 第18轮 (D205) SIMPLIFY 引用格式:
-    //   之前 (D199 → D201 → D203) 几轮迭代加了 [引用上文] / [我的问题] / [Pi 先前回答] / [用户当前问题]
-    //   标签 + markdown > blockquote 语法 + <<think>> 剥离. 越来越复杂, 实际效果:
-    //     - sensenova-6.7-flash-lite 等小模型还是会被 "> " 误导, 回答 "我引用了什么"
-    //     - DeepSeek 看到标签后能识别, 但对大模型来说这些标签是冗余信息
-    //   user 反馈 (D205): "这个引用应该是很简单的东西吧? 发送后接到用户的输入里面, 只是在前端
-    //   可视化上面呈现了'引用'的特有效果; 再思考一下, 小心一点修改, 不要突发奇想的补丁"
-    //   D205 修法: 回到最简单 — 引用就是 plain text 拼到 user 输入前面, 不加任何结构化标签.
-    //   AI 端: <quoted content>\n\n<user text>  (用 \n\n 隔开两段, AI 用对话历史理解)
-    //   前端: Composer 的 quote preview 继续用 blockquote 样式呈现 (这是 UX 视觉, 不发给 AI)
-    //   这种方案对所有 model 都是同样的语义: "user 在引用上文 (在 history 里) + 现在问新问题"
+    //   v0.5.0-D 第18轮 (D205) SIMPLIFY: 完全去掉结构化标记 (plain text 拼接)
+    //   v0.5.0-D 第19轮 (D206) 调整: D205 走过头, 小模型识别不出"哪段是引用"
+    //     D206 方案 — 用 markdown blockquote `> ` 标记 (LLM 训练集里大量 markdown, 通用识别):
+    //     1. AI 端 fullUserText = "> <quoted content>\n\n<user text>"
+    //        (markdown blockquote 语法, 最简结构化标记)
+    //     2. store 存的 user message.content = fullUserText (跟 AI 看到的一致)
+    //     3. user message.quoteContent = <原始引用文本> (没 `> ` 前缀), 给前端渲染做可视化
+    //        (ChatMessage 看到 quoteContent 就把 user 气泡里的引用部分用 blockquote 样式呈现)
+    //   不加 [标签] (D201/D203 那种角色标签 — 大模型冗余小模型更乱)
+    //   不剥离 <think> (D203 那种 — 副作用多, 改回让 model 看到原文)
     const quote = quoteBySession.value[sessionId];
     let fullUserText = text;
+    let quoteContent: string | null = null;
     if (quote && quote.content.trim()) {
-      // 简单拼接: <quoted content>\n\n<user's text>
-      // 不加 "> " (markdown blockquote), 不加 [标签], 不剥离 think
-      // AI 用对话历史 (quote 的源 message 就在 history 里) + 当前 user message 上下文理解
-      // 这条 message 同样存到 chat history (appendUserMessage 用 fullUserText, 跟 store 一致)
-      fullUserText = `${quote.content.trim()}\n\n${text}`;
+      // markdown blockquote 标记: 每行加 "> " 前缀
+      //   保留原文 (不剥离 think), model 自己处理
+      const quotedLines = quote.content
+        .split('\n')
+        .map((line) => line.trim() ? `> ${line}` : '>')
+        .join('\n');
+      fullUserText = `${quotedLines}\n\n${text}`;
+      quoteContent = quote.content;
       console.log('[chat] sendPrompt: with quote (messageId=', quote.messageId, ', len=', quote.content.length, ', fullLen=', fullUserText.length, ')');
       // 调试: 打印实际发送的 user message 全文, F12 console 可验证
       console.log('[chat] sendPrompt: fullUserText =\n', fullUserText);
     }
-    appendUserMessage(sessionId, fullUserText);
+    appendUserMessage(sessionId, fullUserText, quoteContent);
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: true };
     errorBySession.value = { ...errorBySession.value, [sessionId]: null };
     // 引用用完即清, 跟发完就消失的 UX 一致 (避免下次发还残留)

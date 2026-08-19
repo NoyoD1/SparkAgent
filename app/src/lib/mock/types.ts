@@ -69,8 +69,23 @@ export interface ChatMessage {
    *   (message_end 来了但 0 text_delta, 跟图2 卡住现象一致).
    *   触发后 ChatMessage 渲染警告 + 操作建议, 替代单纯的"生成中..." placeholder,
    *   让 user 知道发生了什么, 不用盲猜是 streaming 还是卡死.
+   *   v0.5.0-D 第19轮 (D206) REVERT: 删 emptyResponse 自动检测 (false positive 太多,
+   *   model 合法的空 message 误判, 详情见 chat.ts D204)
    */
-  emptyResponse?: boolean;
+  // emptyResponse?: boolean;
+  /**
+   * v0.5.0-D 第19轮 (D206): user message 标志 — 这条消息是用 quote 功能发的
+   *   (引用上一条 AI 消息的某段文字 + 写新问题).
+   *   - `quoteContent` 存原始引用文本 (没有 `> ` 前缀), 给 ChatMessage 渲染用
+   *     (引用部分用 blockquote 样式 + 左边框 + 缩进, 跟 Composer 的 quote preview 一致)
+   *   - `message.content` 存 full text (带 `> ` markdown blockquote 语法),
+   *     这就是发给 AI 的完整 prompt
+   *   - AI 端的 markdown `> ` 语法是最小结构化提示, LLM 训练集里大量 markdown,
+   *     能识别"这是引用" + "后面是新问题" 两个段落
+   *   - D205 尝试完全去掉结构化标记 (plain text 拼接), 小模型无法识别"哪段是引用",
+   *     answer 走偏; D206 回到 markdown blockquote 简单方案
+   */
+  quoteContent?: string;
 }
 
 export interface ThinkingBlock {

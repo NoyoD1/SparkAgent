@@ -131,6 +131,29 @@ async function copyMessage() {
   }
 }
 
+// v0.5.0-D 第19轮 (D206): 从 user message.content 提取新问题部分
+//   message.content 格式: "> <quoted line 1>\n> <quoted line 2>\n\n<user question>"
+//   quoteContent 是原引用 (没 > 前缀), 用来对比
+//   返回: <user question>  (去掉 > 前缀的引用行 + 空行)
+//   如果匹配不上, 返回原 content (兜底)
+function extractNewQuestion(content: string, quoteContent: string): string {
+  // 1. quoteContent 拆成行, 每行加 "> " 前缀 (跟 content 里的格式一致)
+  const quotedLines = quoteContent
+    .split('\n')
+    .map((line) => line.trim() ? `> ${line}` : '>')
+    .join('\n');
+  // 2. content 找到 quotedLines 的位置, 跳过 + 跳过后面的空行
+  const idx = content.indexOf(quotedLines);
+  if (idx < 0) {
+    // 兜底: 匹配不上就返回原 content
+    return content;
+  }
+  let after = content.slice(idx + quotedLines.length);
+  // 跳过开头的空行 (\n+)
+  after = after.replace(/^\n+/, '');
+  return after;
+}
+
 // v0.5.0-D 第12轮: 引用回复 (quote & reply) — 把整条 message 正文存到 chat store 的 quoteBySession
 //   Composer 显示引用预览, user send 时 quote 拼到 user message 前面 (block quote 格式)
 //   toggle 行为: 再次点同一 message 的"引用"button → 取消引用 (isQuoted 状态)
@@ -354,7 +377,28 @@ const statusText = computed(() => {
   <!-- ============== USER MESSAGE: 右侧气泡 ============== -->
   <div v-if="isUser" class="pad-msg pad-msg--user" :data-message-id="message.id">
     <div class="pad-msg__bubble pad-msg__bubble--user">
-      <MarkdownContent :content="message.content" />
+      <!-- v0.5.0-D 第19轮 (D206): user 消息里有引用时, 引用部分用 blockquote 可视化
+           之前 (D199-D205) 都是用 MarkdownContent 渲染完整 content (带 > 语法, 渲染成 markdown blockquote)
+           但 markdown blockquote 在 user 气泡里视觉太朴素 (跟普通文字没区别)
+           D206 改法: 如果有 quoteContent, 拆开渲染 —
+             1. quoteContent 用专门的 blockquote 样式 (左边框 + 缩进 + 灰背景)
+                跟 Composer 里的 quote preview 风格一致
+             2. 新问题用 MarkdownContent 渲染 (普通 markdown)
+           quoteContent 是原引用文本 (没 > 前缀), 从 message.content 里去掉 > 前缀的部分
+           -->
+      <template v-if="message.quoteContent">
+        <div class="pad-msg__quote-block">
+          <Quote :size="12" :stroke-width="1.75" class="pad-msg__quote-icon" />
+          <div class="pad-msg__quote-text">{{ message.quoteContent }}</div>
+        </div>
+        <!-- 新问题部分: 从 message.content 去掉 quote 的 > 前缀行 + 空行 -->
+        <div class="pad-msg__new-question">
+          <MarkdownContent :content="extractNewQuestion(message.content, message.quoteContent)" />
+        </div>
+      </template>
+      <template v-else>
+        <MarkdownContent :content="message.content" />
+      </template>
     </div>
   </div>
 
@@ -612,6 +656,43 @@ const statusText = computed(() => {
   color: var(--pad-fg-primary);
   border-radius: 12px;
   border-top-right-radius: 4px;
+}
+
+/* v0.5.0-D 第19轮 (D206): user 消息气泡里引用的 blockquote 样式
+ *   跟 Composer 的 quote preview 风格一致 (左边框 + 缩进 + 灰背景)
+ *   引用部分用专门的 div 渲染, 不走 MarkdownContent (那样渲染成 markdown blockquote 视觉太朴素)
+ *   新问题部分用 MarkdownContent 正常渲染
+ *   布局: 引用 blockquote 在上, 新问题在下, 8px gap */
+.pad-msg__quote-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 0 8px 0;
+  padding: 6px 8px;
+  background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.02));
+  border-left: 2px solid var(--pad-border-strong, #d4d4d8);
+  border-radius: 0 6px 6px 0;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-tertiary);
+}
+.pad-msg__quote-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--pad-fg-tertiary);
+}
+.pad-msg__quote-text {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* 多行时正常换行, 不要被截断 */
+  line-height: var(--pad-lh-base, 1.5);
+  max-height: 96px;
+  overflow-y: auto;
+}
+.pad-msg__new-question {
+  /* 新问题部分: 普通 markdown 渲染, 跟原 user 气泡一致 */
+  font-size: var(--pad-fs-14);
+  line-height: var(--pad-lh-base, 1.5);
 }
 
 /* ===== assistant 流 (左, 连续, 无背景) ===== */
