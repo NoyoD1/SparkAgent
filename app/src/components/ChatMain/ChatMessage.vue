@@ -22,7 +22,7 @@
  * 用户反馈驱动: "图2 自行理解当前这个流式返回, 能看到 tools, think 完全看不到效果;
  *   你就用 Pi TUI 那种来试一下效果吧, 参考图3 做效果" — MiniMax Code / Pi TUI 风格.
  */
-import { computed, ref, watch, onUnmounted } from 'vue';
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight, Quote } from 'lucide-vue-next';
 import type { ChatMessage, Step, ToolCallBlock } from '@/lib/mock/types';
 import MarkdownContent from './MarkdownContent.vue';
@@ -154,6 +154,68 @@ function quoteMessage() {
   }
 }
 
+// v0.5.0-D 第12轮 v2 (D199): 选区引用 — 鼠标滑动选中 assistant message 文字后, 浮动 "引用" button
+//   user 反馈 "整段引用我希望也能支持对回复内容某些字段的引用, 比如鼠标滑动选中某些字段"
+//   监听 mouseup 拿 window.getSelection(), 检查 selection 是否在 message 内, 是则显示 button
+//   button 点击 → setQuote (只引用 selected text, 不是整条 message)
+//   selection 不在 message 内 / 选中为空 → 隐藏 button
+const assistantRootRef = ref<HTMLElement | null>(null);
+const selectionQuoteVisible = ref(false);
+const selectionQuotePos = ref({ top: 0, left: 0 });
+const selectedTextRef = ref('');
+
+function handleAssistantMouseUp(_e: MouseEvent) {
+  // setTimeout 让浏览器 finalize selection
+  setTimeout(() => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      selectionQuoteVisible.value = false;
+      return;
+    }
+    const text = sel.toString().trim();
+    if (!text || text.length < 1) {
+      selectionQuoteVisible.value = false;
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    const rootEl = assistantRootRef.value;
+    if (!rootEl || !rootEl.contains(range.commonAncestorContainer)) {
+      selectionQuoteVisible.value = false;
+      return;
+    }
+    // 算出 button 位置: selection 上方, 居中
+    const rect = range.getBoundingClientRect();
+    const messageRect = rootEl.getBoundingClientRect();
+    const buttonW = 80;  // 跟 CSS min-width 一致
+    selectionQuotePos.value = {
+      top: rect.top - messageRect.top - 36,  // 36 = button height + gap
+      left: Math.max(0, rect.left - messageRect.left + rect.width / 2 - buttonW / 2),
+    };
+    selectedTextRef.value = text;
+    selectionQuoteVisible.value = true;
+  }, 10);
+}
+
+function quoteSelection() {
+  const sid = sessionStoreForQuote.activeSessionId;
+  if (!sid) return;
+  chatStore.setQuote(sid, {
+    messageId: props.message.id,
+    content: selectedTextRef.value,
+  });
+  selectionQuoteVisible.value = false;
+  // 清除浏览器选区 (避免后续操作误触)
+  window.getSelection()?.removeAllRanges();
+}
+
+function onDocumentSelectionChange() {
+  // selection 消失 → 隐藏 button
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+    selectionQuoteVisible.value = false;
+  }
+}
+
 /**
  * v0.4.6 Cursor 风格: tool 卡片每行 result 默认折叠, 用户点 [+] 才展开.
  * 用 Set<toolCallId> 记录展开状态. (v0.5.0-D 第4轮 per-step group 改造后保留, 仍有用)
@@ -242,6 +304,15 @@ watch(
 );
 onUnmounted(stopRotate);
 
+// v0.5.0-D 第12轮 v2 (D199): 选区引用 — 监听 document selectionchange
+//   selection 变化时检查, 如果 selection 消失 → 隐藏浮动 button
+onMounted(() => {
+  document.addEventListener('selectionchange', onDocumentSelectionChange);
+});
+onUnmounted(() => {
+  document.removeEventListener('selectionchange', onDocumentSelectionChange);
+});
+
 const statusText = computed(() => {
   const labels = PHASE_LABELS[currentPhase.value] || PHASE_LABELS.idle;
   return labels[textIndex.value] || labels[0] || '生成中…';
@@ -270,7 +341,27 @@ const statusText = computed(() => {
   </div>
 
   <!-- ============== ASSISTANT MESSAGE: v0.5.0-D 第4轮 per-step group 风格 ============== -->
-  <div v-else class="pad-msg pad-msg--assistant" :data-message-id="message.id">
+  <div
+    v-else
+    ref="assistantRootRef"
+    class="pad-msg pad-msg--assistant"
+    :data-message-id="message.id"
+    @mouseup="handleAssistantMouseUp"
+  >
+    <!-- v0.5.0-D 第12轮 v2 (D199): 选区引用浮动 button
+         鼠标滑动选中 assistant message 文字 → 浮动 "引用" button 出现在 selection 上方
+         点击 → 把 selected text 作为 quote (不是整条 message) 存到 store -->
+    <div
+      v-if="selectionQuoteVisible"
+      class="pad-msg__quote-floating"
+      :style="{ top: `${selectionQuotePos.top}px`, left: `${selectionQuotePos.left}px` }"
+      @mousedown.prevent
+    >
+      <button type="button" class="pad-msg__quote-floating-btn" @click="quoteSelection">
+        <Quote :size="12" :stroke-width="1.75" />
+        引用
+      </button>
+    </div>
     <!-- v0.4.2+: 错误 banner (think 阶段出错也显示, 不只是空 message 状态) -->
     <div v-if="!isStreaming && errorMessage && !retry" class="pad-msg__error">
       <span class="pad-msg__error-icon" aria-hidden="true">⚠</span>
@@ -1089,6 +1180,38 @@ const statusText = computed(() => {
 .pad-msg__copied { color: var(--pad-accent); }
 /* v0.5.0-D 第12轮: 引用 button active 状态 (已引用这条消息) */
 .pad-msg__action :deep(svg.is-active) { color: var(--pad-accent); }
+
+/* v0.5.0-D 第12轮 v2 (D199): 选区引用浮动 button
+   鼠标滑动选中文本后, 浮动 button 出现在 selection 上方
+   跟 minimalist Copy 主题一致: 1px border + 圆角 + 微 shadow
+   @mousedown.prevent 避免 button 点击导致 selection 立即消失 */
+.pad-msg__quote-floating {
+  position: absolute;
+  z-index: 100;
+  min-width: 80px;
+  /* 不用 transform 避免覆盖 selection 边界
+   * top/left 由 inline style 算好 (相对 message root) */
+}
+.pad-msg__quote-floating-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: var(--pad-card);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm, 6px);
+  font-size: var(--pad-fs-11, 11px);
+  font-weight: var(--pad-fw-medium, 500);
+  color: var(--pad-fg-primary);
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  transition: background var(--pad-dur-fast, 0.15s) ease, color var(--pad-dur-fast, 0.15s) ease, border-color var(--pad-dur-fast, 0.15s) ease;
+}
+.pad-msg__quote-floating-btn:hover {
+  background: var(--pad-accent-soft, rgba(99, 102, 241, 0.08));
+  border-color: var(--pad-accent, #6366f1);
+  color: var(--pad-accent, #6366f1);
+}
 
 /* ===== streaming loading (v0.5.1 phase-based status icon) ===== */
 .pad-msg__loading {

@@ -946,7 +946,11 @@ export const useChatStore = defineStore('chat', () => {
       //   不可动态改), SkillsButton toggle 触发 Tauri sidecar kill+spawn.
       const skills = useSkillsStore();
       const enabledNames = skills.getEnabledNames();
-      await piTauri.sendPrompt(sessionId, text, () => ({
+      // v0.5.0-D 第12轮 fix (D199): 之前传的是 `text` (原始 user 输入), 漏了 quote 块.
+      //   store 里 `appendUserMessage(sessionId, fullUserText)` 存了完整版本 (含 quote),
+      //   但 sidecar 收到的是不含 quote 的版本 → AI 看不到引用, 报 "你没引用任何外部来源".
+      //   修法: sendPrompt 传 fullUserText, 跟 store 保持一致.
+      await piTauri.sendPrompt(sessionId, fullUserText, () => ({
         providerId: active.id,
         provider: active.type,
         model: model.id,
