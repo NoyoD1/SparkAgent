@@ -75,6 +75,25 @@ export interface ChatMessage {
     errorMessage?: string;
   };
   /**
+   * v0.5.0-D 第29轮 (D212): LLM 异常错误分界线.
+   *   之前 (D204 前): 模型异常 (e.g. 429 quota exceeded) 走顶层 error 事件 + showToast,
+   *   user 看到 toast 但 chat 流里没明显标记, 不直观.
+   *   D212 改: message_end 检测 event.message.errorMessage + stopReason='error' → 推
+   *   一条 system 角色消息, ChatMessage.vue 渲染为 "── ⚠ 生成失败: <errorMessage> ───"
+   *   居中橙色横线 (跟压缩 failure 同款风格). 跟 compaction UX 保持一致:
+   *   不用 toast, 全部走分隔线统一 UX.
+   *   - reason: 错误来源, message_end (LLM 返回 stopReason=error) 是主路径
+   *   - errorMessage: 错误详情 (e.g. "429: Allocated quota exceeded")
+   *   - hasPartialContent: 失败时是否已有部分内容 (有 thinking/toolCall 但没最终答案)
+   *     用于 UI 提示 user "本次回复有部分内容但未完成"
+   */
+  errorMarker?: {
+    errorMessage: string;
+    reason: 'message_end_stop_reason_error' | 'agent_end_no_retry';
+    at: number;
+    hasPartialContent: boolean;
+  };
+  /**
    * v0.5.0-D 第15轮 (D202): assistant message 标志 — model 返回了空 message
    *   (message_end 来了但 0 text_delta, 跟图2 卡住现象一致).
    *   触发后 ChatMessage 渲染警告 + 操作建议, 替代单纯的"生成中..." placeholder,

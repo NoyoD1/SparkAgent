@@ -41,6 +41,22 @@ export interface AgentMessageLite {
   isError?: boolean;
   /** token usage (assistant 消息时) */
   usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { input: number; output: number; cacheRead: number; cacheWrite: number } };
+  /**
+   * v0.5.0-D 第29轮 (D212): LLM 错误信息 (assistant 消息时, stopReason='error' 时设)
+   *   之前 (D204 前) 只在顶层 error 事件里有 errorMessage, 没在 AssistantMessage 上;
+   *   现在从 message_end 直接读, 用于推 error divider.
+   *   e.g. "429: Allocated quota exceeded" (rate limit), "network: timeout" 等
+   */
+  errorMessage?: string;
+  /**
+   * v0.5.0-D 第29轮 (D212): LLM 终止原因.
+   *   - 'end_turn': 正常结束
+   *   - 'toolUse': 调 tool 后停
+   *   - 'max_tokens': 超出 max tokens
+   *   - 'error': 异常 (e.g. 429 quota, network error)
+   *   - 'abort': user 主动停止
+   */
+  stopReason?: 'end_turn' | 'toolUse' | 'max_tokens' | 'error' | 'abort' | string;
 }
 
 export type AgentContentBlock =

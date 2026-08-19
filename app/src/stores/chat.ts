@@ -276,6 +276,45 @@ export const useChatStore = defineStore('chat', () => {
       chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
     }
   }
+  // v0.5.0-D 第29轮 (D212): LLM 异常错误分界线 helper
+  //   抽取出来让 message_end (LLM error) + 顶层 error 事件 (Rust 端 error) 都调,
+  //   行为一致: 防重复 push + 同步更新 errorBySession.
+  //   跟 handleCompactionStart/End 一样的 helper 模式, 避免 sendPrompt listener 闭包
+  //   里重复逻辑.
+  function pushErrorDivider(
+    sessionId: string,
+    errorMessage: string,
+    reason: 'message_end_stop_reason_error' | 'agent_end_no_retry' | 'rust_error',
+    hasPartialContent: boolean,
+  ) {
+    const d = getSessionData(sessionId);
+    if (!d) return;
+    // 防重复: 检查最后一条 system message 是否已经是 errorMarker
+    //   场景: message_end 推了 error divider, 后续顶层 error 事件又来, 不再 push
+    const lastMsg = d.messages[d.messages.length - 1];
+    if (lastMsg && lastMsg.role === 'system' && lastMsg.errorMarker) {
+      console.log(`[chat] D212: skip error divider (already pushed: ${lastMsg.errorMarker.errorMessage.slice(0, 60)})`);
+      return;
+    }
+    d.messages.push({
+      id: `sys-error-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      role: 'system',
+      content: '__LLM_ERROR_DIVIDER__',
+      createdAt: new Date().toISOString(),
+      errorMarker: {
+        errorMessage,
+        reason,
+        at: Date.now(),
+        hasPartialContent,
+      },
+    } as ChatMessage);
+    chatData.value = { ...chatData.value, [sessionId]: { ...d } };
+    errorBySession.value = { ...errorBySession.value, [sessionId]: errorMessage };
+    console.log(
+      `[chat] D212: error divider pushed (reason=${reason}, hasPartialContent=${hasPartialContent}, ` +
+      `errorMessage=${errorMessage.slice(0, 80)})`
+    );
+  }
   function startStreamHangWatchdog(sessionId: string): ReturnType<typeof setTimeout> {
     stopStreamHangWatchdog(sessionId);
     const timer = setTimeout(() => {
@@ -830,8 +869,19 @@ export const useChatStore = defineStore('chat', () => {
           }
           console.error('[chat] error event:', event.message);
           chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
-          // Bug #5 修 (2026-08-18): error event 加 UI toast (之前用户视觉无反馈)
-          useUiStore().showToast(`生成失败: ${event.message.slice(0, 120)}`, 'error', 6000);
+          // v0.5.0-D 第29轮 (D212): 走分隔线 UX, 不用 toast (跟压缩 D210.4 一致)
+          //   推 error divider 替代之前的 showToast, user 一眼看到 chat 流里
+          //   哪里失败 + 原因, 不用回忆 toast
+          //   pushErrorDivider 内部有防重复 (如果 message_end 已经推过 error divider,
+          //   这里 skip 不会重复 push)
+          //   Rust 端 error 通常对应 LLM 没真正开始 / spawn 失败 / keychain 错误等
+          //   hasPartialContent=false (没 assistant content / thinking / tools)
+          pushErrorDivider(
+            sessionId,
+            event.message,
+            'rust_error',
+            false,
+          );
           off();
           return;
         case 'agent_end':
@@ -1110,7 +1160,33 @@ export const useChatStore = defineStore('chat', () => {
                   `[chat] message_end: turn usage=${finalUsage.input}+${finalUsage.cacheRead} (cache) + ${finalUsage.cacheWrite} (write); ` +
                   `cumulative context=${contextTokensBySession.value[sessionId]} (input=${newCum.input}, output=${newCum.output}, cacheRead=${newCum.cacheRead}, cacheWrite=${newCum.cacheWrite})`
                 );
-              }
+                // v0.5.0-D 第29轮 (D212): LLM 异常错误分界线
+                //   之前 (D204 前): message_end 带 errorMessage + stopReason='error' 时
+                //   只 console.error, 走顶层 error 事件 + showToast, user 视觉"突然终止"
+                //   没明显标记. 实测 TPM 限流 (429 quota) / network error 时 Pi SDK 会:
+                //     1. 成功 emit 前面的 message (有 thinking / toolCall)
+                //     2. 后续 message_end 时 errorMessage 报错 + stopReason='error'
+                //     3. turn_end + agent_end (willRetry=false, 配额错误 Pi SDK 不重试)
+                //   修法: 检测到 errorMessage, 调 pushErrorDivider 推一条 system 角色消息
+                //   (跟 compaction 同款风格), ChatMessage.vue 渲染为居中橙色横线
+                //   "── ⚠ 生成失败: ... ───". user 一眼能看到失败位置 + 错误原因,
+                //   跟压缩 UX 保持一致.
+                if (event.message.errorMessage && event.message.stopReason === 'error') {
+                  // 检查是否已有部分内容 (thinking / toolCall 累积过)
+                  const hasPartialContent = !!(
+                    assistant.content?.trim() ||
+                    assistant.steps?.some(s =>
+                      s.stepText?.trim() || s.thinking?.length || s.toolCalls?.length
+                    )
+                  );
+                  pushErrorDivider(
+                    sessionId,
+                    event.message.errorMessage,
+                    'message_end_stop_reason_error',
+                    hasPartialContent,
+                  );
+                }
+              }  // ← close if (event.message?.usage && idx >= 0)
               // v0.5.0-D 第17轮 (D204) REVERT D200/D202/D203 emptyResponse 主动告警:
               //   之前 D200 (b379f76) 在 message_end 探测"空 message" → D202/D203 在 UI 弹 AlertTriangle.
               //   实测 D202 截图暴露的问题: sensenova-6.7-flash-lite 合法地先发空 message (warmup / control),

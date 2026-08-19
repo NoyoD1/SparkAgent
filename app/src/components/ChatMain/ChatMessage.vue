@@ -484,6 +484,34 @@ const statusText = computed(() => {
     <span class="pad-msg__compaction-line" />
   </div>
 
+  <!-- ============== SYSTEM MESSAGE: v0.5.0-D 第29轮 (D212) LLM 异常错误分界线 ==============
+       跟 compaction divider 平行的新类型, 复用同一组 .pad-msg__compaction-* 样式 class
+       (因为视觉一致 — 居中横线 + icon + 文本), 改 class prefix 太啰嗦.
+       user 反馈 (D212): "我发送一个内容后, ai 在回复过程中可能出现 error 时,
+       没有友好提示, 会出现突然终止的情况, 这种情况在一些调用LLM时由于TPM限制, 时常发生"
+       修法: chat.ts message_end 检测 errorMessage + stopReason='error' → 推
+       errorMarker system message, 这里渲染为居中橙色横线 "── ⚠ 生成失败: ... ───".
+       - hasPartialContent=true: "生成中断 (已输出部分内容)"
+       - hasPartialContent=false: "生成失败 (无任何内容)"
+       跟压缩 UX 一致: 不用 toast, 全部走分隔线. -->
+  <div
+    v-else-if="message.role === 'system' && message.errorMarker"
+    :class="['pad-msg__compaction-divider', 'is-failure']"
+    :data-message-id="message.id"
+  >
+    <span class="pad-msg__compaction-line" />
+    <span class="pad-msg__compaction-label">
+      <AlertTriangle :size="12" :stroke-width="1.75" />
+      <span>
+        生成失败: {{ message.errorMarker.errorMessage || '未知错误' }}
+        <template v-if="message.errorMarker.hasPartialContent">
+          <span class="pad-msg__error-hint">(已输出部分内容)</span>
+        </template>
+      </span>
+    </span>
+    <span class="pad-msg__compaction-line" />
+  </div>
+
   <!-- ============== ASSISTANT MESSAGE: v0.5.0-D 第4轮 per-step group 风格 ============== -->
   <div
     v-else
@@ -986,6 +1014,15 @@ const statusText = computed(() => {
 }
 .pad-msg__compaction-divider.is-failure .pad-msg__compaction-label {
   color: var(--pad-fg-warning, #d97706);
+}
+/* v0.5.0-D 第29轮 (D212): error divider hint 文字弱化 (e.g. "已输出部分内容") */
+.pad-msg__error-hint {
+  margin-left: 6px;
+  font-size: var(--pad-fs-10, 10px);
+  color: var(--pad-fg-tertiary, #71717a);
+  font-weight: var(--pad-fw-regular, 400);
+  font-style: italic;
+  opacity: 0.85;
 }
 
 /* ===== v0.4.6 Cursor 风格: thinking 累积区 (顶部) ===== */
