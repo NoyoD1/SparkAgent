@@ -7,7 +7,7 @@
     "frontendDist": "../app/dist",
     "devUrl": "http://localhost:5174",
     "beforeDevCommand": "node scripts/dev-fe.mjs",
-    "beforeBuildCommand": "node ../scripts/build-fe.mjs"
+    "beforeBuildCommand": "node scripts/build-fe.mjs"
   },
   "app": {
     "windows": [

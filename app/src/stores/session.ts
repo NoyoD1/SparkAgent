@@ -10,6 +10,9 @@
  */
 import { defineStore } from 'pinia';
 import { computed, ref, watch } from 'vue';
+// 2026-08-20 P0-1 补充 B: addSession 从全局 configStore 当前值复制 mode/model 作为新 session 初值.
+//   config.ts 不反向 import session, 单向依赖安全.
+import { useConfigStore } from './config';
 
 export interface Workspace {
   id: string;
@@ -50,6 +53,19 @@ export interface Session {
   pinnedAt?: string;
   /** 用户自定义标签, 走 sidebar 搜索时也匹配 */
   tags?: string[];
+
+  // ===== 2026-08-20 P0-1 补充 B: per-session 存授权模式 + model =====
+  // 旧实现是全局共用 (configStore.permissionMode / activeProvider / activeModel), 业务上不合理:
+  //   - 用户开新 session, 但全局 mode 切到 'ask' 了, 上一个 'smart' session 也跟着变
+  //   - 多 session 并行 (一个跑 deepseek, 一个跑 minimax) 做不到
+  // 新实现: 每 session 存自己用的 mode + provider + model. addSession 时从全局当前值复制作为初值.
+  // undefined 表示"用全局默认" (兼容旧 session, 不强制 migrate).
+  /** tool permission mode, undefined = 跟全局 configStore.permissionMode. */
+  permissionMode?: 'ask' | 'smart' | 'allow';
+  /** 当前 session 用的 provider id, undefined = 跟全局 configStore.activeProviderId. */
+  providerId?: string;
+  /** 当前 session 用的 model id, undefined = 跟全局 configStore.activeProvider.activeModelId. */
+  modelId?: string;
 }
 
 const STORAGE_KEY = 'pi-agent:session:v1';
@@ -365,7 +381,36 @@ export const useSessionStore = defineStore('session', () => {
     expandedWorkspaceIds.value = set;
   }
 
-  function addSession(workspaceId: string, title = '新任务'): Session {
+  function addSession(
+    workspaceId: string,
+    title = '新任务',
+    /**
+     * 2026-08-20 P0-1 补充 B: per-session settings 初值.
+     * 不传则从全局 configStore 当前值复制 (用户新建 session 时, 看到的还是他刚选的 model/mode).
+     * 调用方传非 undefined 时完全用传入的 (e.g. 编程式新建带固定 mode).
+     */
+    defaults?: { permissionMode?: 'ask' | 'smart' | 'allow'; providerId?: string; modelId?: string },
+  ): Session {
+    // 复制全局当前值作为新 session 默认 (单向 import configStore, configStore 不引 session, 无循环).
+    let initialMode: 'ask' | 'smart' | 'allow' | undefined;
+    let initialProviderId: string | undefined;
+    let initialModelId: string | undefined;
+    if (defaults) {
+      initialMode = defaults.permissionMode;
+      initialProviderId = defaults.providerId;
+      initialModelId = defaults.modelId;
+    } else {
+      try {
+        const cfg = useConfigStore();
+        initialMode = cfg.permissionMode;
+        const activeProvider = cfg.activeProvider;
+        initialProviderId = activeProvider?.id ?? undefined;
+        initialModelId = activeProvider?.activeModelId ?? undefined;
+      } catch (e) {
+        // configStore 还没 init (e.g. 测试环境), 走 fallback undefined → 上层走全局 fallback
+        console.warn('[session] addSession: configStore unavailable, leave per-session settings undefined', e);
+      }
+    }
     const sess: Session = {
       id: genId('sess'),
       workspaceId,
@@ -374,6 +419,10 @@ export const useSessionStore = defineStore('session', () => {
       updatedAt: new Date().toISOString(),
       // Bug #1 修 (2026-08-18): 每个 FE session 独立的 piSessionId
       piSessionId: genPiSessionId(),
+      // 2026-08-20 P0-1 补充 B: per-session settings 初值
+      permissionMode: initialMode,
+      providerId: initialProviderId,
+      modelId: initialModelId,
     };
     sessions.value = [sess, ...sessions.value];
     activeSessionId.value = sess.id;
@@ -615,6 +664,80 @@ export const useSessionStore = defineStore('session', () => {
     s.updatedAt = new Date().toISOString();
   }
 
+  // ===== 2026-08-20 P0-1 补充 B: per-session settings 读写 helpers =====
+  // 设计: session 上字段 undefined → 用全局 configStore 当前值 (call-by-call 查, 不缓存)
+  // 原因: 全局值可能在跑的时候改 (P1 的 set_permission_mode), 不缓存避免一致性问题.
+  // 同时这些函数不抛错, 找不到 session / configStore 未 init 时返回 fallback, 上层零负担.
+
+  /**
+   * 取 session 的 permission mode, undefined → 走全局 configStore.permissionMode.
+   * 永远返回合法值 (ask / smart / allow), 不会 undefined.
+   */
+  function getSessionPermissionMode(id: string): 'ask' | 'smart' | 'allow' {
+    const s = sessions.value.find((x) => x.id === id);
+    if (s?.permissionMode) return s.permissionMode;
+    try {
+      return useConfigStore().permissionMode;
+    } catch {
+      return 'ask';
+    }
+  }
+
+  /**
+   * 取 session 的 provider id, undefined → 走全局 configStore.activeProviderId.
+   * 可能返回 null (没 active provider).
+   */
+  function getSessionProviderId(id: string): string | null {
+    const s = sessions.value.find((x) => x.id === id);
+    if (s?.providerId) return s.providerId;
+    try {
+      return useConfigStore().activeProviderId;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 取 session 的 model id, undefined → 走 session provider 的 activeModelId.
+   * 找不到 provider 时返回 null.
+   */
+  function getSessionModelId(id: string): string | null {
+    const s = sessions.value.find((x) => x.id === id);
+    if (s?.modelId) return s.modelId;
+    const providerId = getSessionProviderId(id);
+    if (!providerId) return null;
+    try {
+      const cfg = useConfigStore();
+      const p = cfg.providers.find((x) => x.id === providerId);
+      return p?.activeModelId ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 直接设 session 自己的 permission mode (不联动全局).
+   * UI 入口: Composer 切 mode → sessionStore.setSessionPermissionMode(activeId, mode).
+   */
+  function setSessionPermissionMode(id: string, mode: 'ask' | 'smart' | 'allow') {
+    const s = sessions.value.find((x) => x.id === id);
+    if (!s) return;
+    s.permissionMode = mode;
+    s.updatedAt = new Date().toISOString();
+  }
+
+  /**
+   * 直接设 session 自己的 provider + model (不联动全局).
+   * UI 入口: Composer 切 model → sessionStore.setSessionModel(activeId, providerId, modelId).
+   */
+  function setSessionModel(id: string, providerId: string, modelId: string) {
+    const s = sessions.value.find((x) => x.id === id);
+    if (!s) return;
+    s.providerId = providerId;
+    s.modelId = modelId;
+    s.updatedAt = new Date().toISOString();
+  }
+
   return {
     // state
     workspaces,
@@ -658,5 +781,11 @@ export const useSessionStore = defineStore('session', () => {
     setAutoTitle,
     addTag,
     removeTag,
+    // 2026-08-20 P0-1 补充 B: per-session settings helpers
+    getSessionPermissionMode,
+    getSessionProviderId,
+    getSessionModelId,
+    setSessionPermissionMode,
+    setSessionModel,
   };
 });

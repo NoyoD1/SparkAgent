@@ -138,6 +138,17 @@ export const useChatStore = defineStore('chat', () => {
         lastUsageBySession.value = nextUsage;
         contextTokensBySession.value = nextCtx;
       }
+      // 2026-08-20 P0-1 补充 A: 同步清孤儿 send queue (防内存泄漏).
+      //   session 删了但队列残留 → 永远取不出来,纯浪费内存. 跟 messages / usage 同 pattern.
+      const nextQueue = { ...sendQueueBySession.value };
+      let queueChanged = false;
+      for (const k of Object.keys(nextQueue)) {
+        if (!idSet.has(k)) { delete nextQueue[k]; queueChanged = true; }
+      }
+      if (queueChanged) {
+        sendQueueBySession.value = nextQueue;
+        console.log('[chat] sendQueueBySession pruned: removed queues for deleted sessions');
+      }
     },
   );
 
@@ -164,6 +175,33 @@ export const useChatStore = defineStore('chat', () => {
   // ===== Streaming state =====
   const streamingBySession = ref<Record<string, boolean>>({});
   const errorBySession = ref<Record<string, string | null>>({});
+  // 2026-08-20 P0-1 补充 A: send queue (per-session FIFO, 多消息支持)
+  // 业务约束: 用户在 LLM 还在回的时候可以继续编辑+点 send, 但不能再 spawn 一个 sidecar (状态机冲突),
+  //   所以消息先进队, 等当前 turn 走完 (agent_end willRetry=false) 再自动出队发送.
+  // 设计选择: 不在内存里限上限 (用户连发 100 条也允许), session 切换 / force stop 都不清空 (用户随时能看到).
+  //   session 删除 (removeSession) 才清队列, 防内存泄漏.
+  const sendQueueBySession = ref<Record<string, string[]>>({});
+
+  /** 取某 session 队列长度, UI 用来显示 "队列中 N 条" 徽标. */
+  function getQueueLength(sessionId: string): number {
+    return sendQueueBySession.value[sessionId]?.length ?? 0;
+  }
+
+  /** 清空某 session 队列. 用户在 Composer 队列气泡上点 × 调. */
+  function clearSendQueue(sessionId: string) {
+    if (!sendQueueBySession.value[sessionId]?.length) return;
+    sendQueueBySession.value = { ...sendQueueBySession.value, [sessionId]: [] };
+    console.log('[chat] clearSendQueue: session=', sessionId);
+  }
+
+  /** 删队列里某条 (按 index). 用户点队列气泡里某条 × 调. */
+  function removeFromQueue(sessionId: string, index: number) {
+    const list = sendQueueBySession.value[sessionId];
+    if (!list || index < 0 || index >= list.length) return;
+    const next = list.filter((_, i) => i !== index);
+    sendQueueBySession.value = { ...sendQueueBySession.value, [sessionId]: next };
+    console.log('[chat] removeFromQueue: session=', sessionId, 'index=', index, 'remaining=', next.length);
+  }
   // v0.4.2+ LLM 错误重试: retryBySession 记录当前 retry 状态 (attempt 进度 + 上次错误)
   // FE UI 可以根据这个显示"重试中 1/5..."提示
   const retryBySession = ref<Record<string, { attempt: number; maxAttempts: number; errorMessage: string } | null>>({});
@@ -761,7 +799,7 @@ export const useChatStore = defineStore('chat', () => {
    * - 没 workspace → 用 piTauri.ensureDefaultWorkspace() (<home>/PiAgent) 建 workspace + session, 再发
    *   (用户可手动通过 sidebar / tab strip 的"本地"下拉选别的路径)
    */
-  async function sendPrompt(content: string, opts: { fromAutoRetry?: boolean } = {}) {
+  async function sendPrompt(content: string, opts: { fromAutoRetry?: boolean; fromQueue?: boolean } = {}) {
     const text = content.trim();
     if (!text) return;
     // 0.3: 切 workspace in-flight 期间拒绝发. sidecar 还没就绪, 发过去会用旧 cwd 写到错位置.
@@ -771,7 +809,22 @@ export const useChatStore = defineStore('chat', () => {
       errorBySession.value = { ...errorBySession.value, ['']: '工作区切换中, 请稍候再发' };
       return;
     }
-    console.log('[chat] sendPrompt: contentLen=', text.length, 'activeSession=', sessionStore.activeSessionId, 'fromAutoRetry=', !!opts.fromAutoRetry);
+    // 2026-08-20 P0-1 补充 A: streaming 时入队 (不直接发, 避免冲突)
+    // 业务: 用户在 LLM 回复中也可以编辑+send, 但要排队. 等当前 turn 走完, agent_end 自动从队列取下一条发.
+    // fromQueue=true 时跳过入队判断 (从队列取出来发不能再入队, 死循环).
+    // 注意: activeSession 可能为 null (initial hero), 这种情况下 sessionId 后面会创建, sendQueueBySession
+    //   按 session 索引, 新 session 创建后 push 到对应 key.
+    const targetSessionIdForQueue = sessionStore.activeSessionId;
+    if (targetSessionIdForQueue && isStreaming(targetSessionIdForQueue) && !opts.fromQueue) {
+      const list = sendQueueBySession.value[targetSessionIdForQueue] ?? [];
+      sendQueueBySession.value = {
+        ...sendQueueBySession.value,
+        [targetSessionIdForQueue]: [...list, text],
+      };
+      console.log('[chat] sendPrompt: enqueued (streaming), session=', targetSessionIdForQueue, 'queueLen=', list.length + 1, 'preview=', text.slice(0, 40));
+      return;
+    }
+    console.log('[chat] sendPrompt: contentLen=', text.length, 'activeSession=', sessionStore.activeSessionId, 'fromAutoRetry=', !!opts.fromAutoRetry, 'fromQueue=', !!opts.fromQueue);
 
     // 1. 确保有 active session
     let sessionId = sessionStore.activeSessionId;
@@ -1057,6 +1110,22 @@ export const useChatStore = defineStore('chat', () => {
           );
           off();
           maybeAutoNameSession(sessionId, text);
+          // 2026-08-20 P0-1 补充 A: 当前 turn 走完, 自动从队列取下一条发.
+          // 关键时序: 必须先 streaming=false, 再调 sendPrompt (否则 sendPrompt 会入队死循环).
+          // 业务期望: 用户在 streaming 期间发的消息, LLM 一回完就自动按顺序发, 用户不用手动操作.
+          // 用 queueMicrotask 推到下一个 tick, 避免 listener 闭包内同步重入 sendPrompt
+          // 引发"on/off 顺序"问题 (off 上面刚调, sendPrompt 会创建新 listener, 同步重入可能跟老 listener 互锁).
+          // 注意: 只在 active session 还是这个 sessionId 时发 (用户可能已切到别的 session, 那个 session 自己有队列, 别混).
+          const queue = sendQueueBySession.value[sessionId] ?? [];
+          if (queue.length > 0 && sessionStore.activeSessionId === sessionId) {
+            const next = queue[0];
+            const remaining = queue.slice(1);
+            sendQueueBySession.value = { ...sendQueueBySession.value, [sessionId]: remaining };
+            console.log('[chat] agent_end: dequeue sendPrompt, remaining=', remaining.length, 'preview=', next.slice(0, 40));
+            queueMicrotask(() => {
+              void sendPrompt(next, { fromQueue: true });
+            });
+          }
           return;
         case 'agent_settled':
           // v0.5.0: Pi SDK AgentSession 内部最后的事件 (turn 收尾 + tool 清理完后)
@@ -1468,8 +1537,8 @@ export const useChatStore = defineStore('chat', () => {
       // (从 sessionStore 取 activeWorkspace.path, 让 LLM 知道在哪个目录下操作)
       const activeWs = sessionStore.activeWorkspace;
       const workspacePath = activeWs?.path ?? null;
-      // v0.4.1+: 注入当前 permission mode 作为初始值
-      const permissionMode = config.permissionMode;
+      // 2026-08-20 P0-1 补充 B: permissionMode 改用 session 自己的 (下面计算 sessionPermissionMode),
+      //   不再用全局 config.permissionMode (那样多 session 并行不可能, 切 session 跟着切).
       // Bug #1 修 (2026-08-18): 改用 per-session 独立 piSessionId (不用 per-workspace 固定)
       //   之前 per-workspace 固定 id  → 不同 FE session 串了 (都写到同一个 jsonl)
       //   现在每个 FE session 独立   → 各自独立 jsonl, 切 session 真隔离
@@ -1484,23 +1553,43 @@ export const useChatStore = defineStore('chat', () => {
       //   store 里 `appendUserMessage(sessionId, fullUserText)` 存了完整版本 (含 quote),
       //   但 sidecar 收到的是不含 quote 的版本 → AI 看不到引用, 报 "你没引用任何外部来源".
       //   修法: sendPrompt 传 fullUserText, 跟 store 保持一致.
+      // 2026-08-20 P0-1 补充 B: provider / model / permissionMode 改用 session 自己的设置
+      //   (sessionStore.getSessionXxx fallback 到全局). 旧实现全用 configStore.activeXxx
+      //   → 多 session 并行不可能 (切 session 时全切), 用户被迫每次新建都要重选.
+      const sessionProviderId = sessionStore.getSessionProviderId(sessionId!);
+      const sessionModelId = sessionStore.getSessionModelId(sessionId!);
+      const sessionPermissionMode = sessionStore.getSessionPermissionMode(sessionId!);
+      // 三段 fallback: session 指定 → 找不到回 session provider active → 再回全局 active
+      let effectiveProvider = sessionProviderId
+        ? config.providers.find((p) => p.id === sessionProviderId) ?? null
+        : null;
+      if (!effectiveProvider) effectiveProvider = active;
+      let effectiveModel = sessionModelId
+        ? effectiveProvider.models.find((m) => m.id === sessionModelId) ?? null
+        : null;
+      if (!effectiveModel) effectiveModel = effectiveProvider.models.find((m) => m.id === effectiveProvider.activeModelId) ?? null;
+      if (!effectiveModel) effectiveModel = model;  // 最后兜底: 全局 active
+      console.log('[chat] sendPrompt: session=', sessionId, 'effectiveProvider=', effectiveProvider?.label, 'model=', effectiveModel?.id, 'permissionMode=', sessionPermissionMode);
+      if (!effectiveProvider || !effectiveModel) {
+        throw new Error('请先在 Settings → Providers 添加并选一个 active provider + model');
+      }
       const cfgFn = () => ({
-        providerId: active.id,
-        provider: active.type,
-        model: model.id,
-        baseUrl: active.baseUrl,
+        providerId: effectiveProvider.id,
+        provider: effectiveProvider.type,
+        model: effectiveModel.id,
+        baseUrl: effectiveProvider.baseUrl,
         thinkingLevel: config.thinkingLevel,
         workspacePath,
-        permissionMode,
+        permissionMode: sessionPermissionMode,
         sessionId: piSessionId,
         skills: { enabledNames },
         modelMetadata: {
-          type: model.type,
-          vision: model.vision,
-          contextWindow: model.contextWindow,
-          maxOutput: model.maxOutput,
-          maxRounds: model.maxRounds,
-          reasoning: model.reasoning,
+          type: effectiveModel.type,
+          vision: effectiveModel.vision,
+          contextWindow: effectiveModel.contextWindow,
+          maxOutput: effectiveModel.maxOutput,
+          maxRounds: effectiveModel.maxRounds,
+          reasoning: effectiveModel.reasoning,
         },
       });
       await piTauri.sendPrompt(sessionId, fullUserText, cfgFn);
@@ -1574,6 +1663,23 @@ export const useChatStore = defineStore('chat', () => {
     }
     const activeWs = sessionStore.activeWorkspace;
     const workspacePath = activeWs?.path ?? null;
+    // 2026-08-20 P0-1 补充 B: compact 独立算 session 自己的 settings (跟 sendPrompt 一样的三段 fallback)
+    const sessionProviderId = sessionStore.getSessionProviderId(sid);
+    const sessionModelId = sessionStore.getSessionModelId(sid);
+    const sessionPermissionMode = sessionStore.getSessionPermissionMode(sid);
+    let effectiveProvider = sessionProviderId
+      ? config.providers.find((p) => p.id === sessionProviderId) ?? null
+      : null;
+    if (!effectiveProvider) effectiveProvider = active;
+    let effectiveModel = sessionModelId
+      ? effectiveProvider.models.find((m) => m.id === sessionModelId) ?? null
+      : null;
+    if (!effectiveModel) effectiveModel = effectiveProvider.models.find((m) => m.id === effectiveProvider.activeModelId) ?? null;
+    if (!effectiveModel) effectiveModel = model;
+    if (!effectiveProvider || !effectiveModel) {
+      useUiStore().showToast('未配置 provider + model, 无法压缩', 'error');
+      return;
+    }
     // Bug #1 修: 用当前 active session 的独立 piSessionId (不用 per-workspace 固定)
     const piSessionId = sessionStore.ensurePiSessionId(sid);
     const skills = useSkillsStore();
@@ -1606,22 +1712,23 @@ export const useChatStore = defineStore('chat', () => {
         // 其他事件类型 (agent_start / message_* / etc.) 不是 compact 流程, 忽略
       });
       await piTauri.compactSession(sid, () => ({
-        providerId: active.id,
-        provider: active.type,
-        model: model.id,
-        baseUrl: active.baseUrl,
+        // 2026-08-20 P0-1 补充 B: compact 也用 session 自己的 settings (跟 sendPrompt 同步)
+        providerId: effectiveProvider.id,
+        provider: effectiveProvider.type,
+        model: effectiveModel.id,
+        baseUrl: effectiveProvider.baseUrl,
         thinkingLevel: config.thinkingLevel,
         workspacePath,
-        permissionMode: config.permissionMode,
+        permissionMode: sessionPermissionMode,
         sessionId: piSessionId,
         skills: { enabledNames },
         modelMetadata: {
-          type: model.type,
-          vision: model.vision,
-          contextWindow: model.contextWindow,
-          maxOutput: model.maxOutput,
-          maxRounds: model.maxRounds,
-          reasoning: model.reasoning,
+          type: effectiveModel.type,
+          vision: effectiveModel.vision,
+          contextWindow: effectiveModel.contextWindow,
+          maxOutput: effectiveModel.maxOutput,
+          maxRounds: effectiveModel.maxRounds,
+          reasoning: effectiveModel.reasoning,
         },
       }));
       // v0.5.0-D 第27轮 (D210.4) 改 UX: 不用 toast, 走分隔线
@@ -1744,6 +1851,20 @@ export const useChatStore = defineStore('chat', () => {
       await piTauri.killSidecar(sessionId);
     } catch (e) {
       console.warn('[chat] forceStopStreaming: killSidecar failed (ignored)', e);
+    }
+    // 2026-08-20 P0-1 补充 A: 用户主动 stop 后, 也尝试从队列取下一条发.
+    //   业务: 用户 stop 完想立即发下一条, 不用再手敲. 跟 agent_end 一样的"自动续传"语义.
+    //   forceStop 后 streaming 已经被翻成 false (上面), 调 sendPrompt 不会被入队.
+    //   只在 active session 还是这个时取, 避免切到别的 session 时把别人的队列搞乱.
+    const queue = sendQueueBySession.value[sessionId] ?? [];
+    if (queue.length > 0 && sessionStore.activeSessionId === sessionId) {
+      const next = queue[0];
+      const remaining = queue.slice(1);
+      sendQueueBySession.value = { ...sendQueueBySession.value, [sessionId]: remaining };
+      console.log('[chat] forceStopStreaming: dequeue sendPrompt, remaining=', remaining.length, 'preview=', next.slice(0, 40));
+      queueMicrotask(() => {
+        void sendPrompt(next, { fromQueue: true });
+      });
     }
   }
 
@@ -2024,5 +2145,10 @@ export const useChatStore = defineStore('chat', () => {
     setStepThinkingCollapsed,
     compact, // v0.4.3: 手动触发 context 压缩
     forceStopStreaming, // v0.5.0-PR3: 强制把 streaming 翻 false (abort 30s timeout / catch 兜底)
+    // 2026-08-20 P0-1 补充 A: send queue (per-session FIFO, 队列里消息等 LLM 回完自动发)
+    sendQueueBySession,
+    getQueueLength,
+    clearSendQueue,
+    removeFromQueue,
   };
 });

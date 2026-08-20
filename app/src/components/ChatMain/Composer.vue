@@ -9,7 +9,7 @@
  */
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
-import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck, Quote, X } from 'lucide-vue-next';
+import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck, Quote, X, Lock, ListOrdered } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
 import { useConfigStore, PROVIDER_OPTIONS, PERMISSION_MODE_OPTIONS, type PermissionMode } from '@/stores/config';
@@ -125,8 +125,16 @@ function removeSkillRef(name: string) {
 // v0.4.1+ tool permission 菜单
 const showPermissionMenu = ref(false);
 
+// 2026-08-20 P0-1 补充 B: 改用 session 自己的 permission mode (per-session 存)
+// 旧实现读 configStore.permissionMode (全局), 导致一个 session 切了 ask, 所有 session 都跟着 ask.
+// 新实现 sessionStore.getSessionPermissionMode(activeId) → session 自己 mode → fallback 全局.
+const currentPermissionMode = computed<PermissionMode>(() => {
+  const sid = activeSession.value?.id;
+  if (!sid) return configStore.permissionMode;  // 没 active session 走全局
+  return sessionStore.getSessionPermissionMode(sid);
+});
 const currentPermissionOption = computed(
-  () => PERMISSION_MODE_OPTIONS.find((o) => o.value === configStore.permissionMode) ?? PERMISSION_MODE_OPTIONS[0],
+  () => PERMISSION_MODE_OPTIONS.find((o) => o.value === currentPermissionMode.value) ?? PERMISSION_MODE_OPTIONS[0],
 );
 
 /** v0.4.1+ 解析 PERMISSION_MODE_OPTIONS.icon 字符串成 lucide 组件 (因为 store 是纯 TS, 不能直接 import vue 组件) */
@@ -143,22 +151,32 @@ function togglePermissionMenu() {
 }
 
 function pickPermission(mode: PermissionMode) {
-  configStore.setPermissionMode(mode);
+  // 2026-08-20 P0-1 补充 B: 写 session 自己的 mode, 不动全局 configStore.
+  // 没 active session 时 (e.g. 用户在 initial hero 状态点 dropdown) 退化为改全局,
+  // 保持向后兼容:用户新建 session 时仍然用全局当前值 (addSession 从 configStore 读).
+  const sid = activeSession.value?.id;
+  if (sid) {
+    sessionStore.setSessionPermissionMode(sid, mode);
+  } else {
+    configStore.setPermissionMode(mode);
+  }
   showPermissionMenu.value = false;
   // v0.5.0: Pi SDK 0.84.2 没有"运行时修改 permission mode" 的 RpcCommand — permission mode
   //   是 AgentSession 创建时设的, 跟 session 绑定. 要换 mode 必须 abort 当前 session
-  //   + 新建 session. 当前策略: mode 改了只存到 config, 下次新 session 自动用新 mode,
-  //   当前 session 继续用旧 mode (走完当前 turn). 后续如果用户强烈要求"中途切换"再加
-  //   abort + new_session RpcCommand 流程.
-  console.log('[Composer] permission mode changed (v0.5.0: only applies to new sessions)', { mode });
+  //   + 新建 session. 当前策略: mode 改了只存到 session, 下次该 session 触发 sendPrompt
+  //   重启 sidecar 时自动用新 mode; 当前正在跑的 turn 走旧 mode (走完当前 turn).
+  //   旧实现改 configStore 全局, 切 session 也没用; 现在改 session 至少切换 session 时立即生效.
+  console.log('[Composer] permission mode changed (per-session, applies on next sendPrompt for this session)', { sessionId: sid, mode });
 }
 
 // ===== v0.4.1+ 点外部关闭 permission menu + v0.4.4.6 model menu =====
 // 标准 pattern: document.addEventListener('click') + contains 检查. 跟 ChatMain.vue / PadSelect.vue 一致.
 // v0.4.4.6: 一起处理 model menu (以前只有 perm menu 走这个 pattern, model menu 点空白不关, user 反馈)
 // v0.5.0-v0.1: 删 agent menu (multi-agent persona 回滚, 不需要切主)
+// 2026-08-20 P0-1 补充 A: 加上 queue panel (3 选 1 弹层, 跟 perm / model 互斥)
 const permMenuRef = ref<HTMLElement | null>(null);
 const modelMenuRef = ref<HTMLElement | null>(null);
+const queuePanelRef = ref<HTMLElement | null>(null);
 function onClickOutsideAnyMenu(e: MouseEvent) {
   const target = e.target as Node;
   if (showPermissionMenu.value && permMenuRef.value && !permMenuRef.value.contains(target)) {
@@ -167,14 +185,41 @@ function onClickOutsideAnyMenu(e: MouseEvent) {
   if (showModelMenu.value && modelMenuRef.value && !modelMenuRef.value.contains(target)) {
     showModelMenu.value = false;
   }
+  if (showQueuePanel.value && queuePanelRef.value && !queuePanelRef.value.contains(target)) {
+    showQueuePanel.value = false;
+  }
 }
 onMounted(() => {
   document.addEventListener('click', onClickOutsideAnyMenu);
 });
 onUnmounted(() => document.removeEventListener('click', onClickOutsideAnyMenu));
 
-const activeProvider = computed(() => configStore.activeProvider);
-const activeModel = computed(() => configStore.activeModel);
+// 2026-08-20 P0-1 补充 B: 改用 session 自己的 provider/model (per-session 存)
+// 旧实现读 configStore.activeProvider / activeModel (全局), 切 session 时 chip 跟着变,
+// 用户不能"一个 session 用 deepseek, 另一个用 minimax". 新实现 session 优先, fallback 全局.
+//   三段 fallback 跟 chat.ts sendPrompt 里一样: session.modelId → session provider.activeModelId → 全局 activeModel.
+const activeProvider = computed(() => {
+  const sid = activeSession.value?.id;
+  if (!sid) return configStore.activeProvider;
+  const sessionProviderId = sessionStore.getSessionProviderId(sid);
+  if (sessionProviderId) {
+    const p = configStore.providers.find((x) => x.id === sessionProviderId);
+    if (p) return p;
+  }
+  return configStore.activeProvider;
+});
+const activeModel = computed(() => {
+  const sid = activeSession.value?.id;
+  const p = activeProvider.value;
+  if (!p) return configStore.activeModel;
+  if (!sid) return p.models.find((m) => m.id === p.activeModelId) ?? null;
+  const sessionModelId = sessionStore.getSessionModelId(sid);
+  if (sessionModelId) {
+    const m = p.models.find((x) => x.id === sessionModelId);
+    if (m) return m;
+  }
+  return p.models.find((m) => m.id === p.activeModelId) ?? null;
+});
 const providerTypeLabel = computed(() => {
   const p = activeProvider.value;
   if (!p) return null;
@@ -187,8 +232,47 @@ const isStreaming = computed(() =>
   activeSession.value ? chatStore.isStreamingSession(activeSession.value.id) : false,
 );
 
+// 2026-08-20 P0-1 补充 A: 当前 session 的 send queue. reactive ref 让 UI 实时反映队列变化.
+//   storeToRefs 解构 sendQueueBySession 后, 内部改值会触发本组件重新计算 length/列表.
+const { sendQueueBySession } = storeToRefs(chatStore);
+const currentSessionQueue = computed<string[]>(() => {
+  const sid = activeSession.value?.id;
+  if (!sid) return [];
+  return sendQueueBySession.value[sid] ?? [];
+});
+const queueLength = computed(() => currentSessionQueue.value.length);
+const showQueuePanel = ref(false);
+
 function toggleModelMenu() {
+  // 2026-08-20 P0-1 补充 A: streaming 期间禁 model 切换.
+  // 业务约束: 模型切换要重启 sidecar, 跟正在跑的 stream 冲突 (current turn 状态机没法跨模型).
+  // 允许编辑输入框 + send (入队, 见 chat store.sendQueue), 但 model 切换在 stream 期间不能点.
+  if (isStreaming.value) {
+    console.log('[Composer] model menu blocked: session is streaming');
+    return;
+  }
   showModelMenu.value = !showModelMenu.value;
+  if (showModelMenu.value) showPermissionMenu.value = false;  // 二选一开
+}
+
+function toggleQueuePanel() {
+  showQueuePanel.value = !showQueuePanel.value;
+  if (showQueuePanel.value) {
+    showModelMenu.value = false;
+    showPermissionMenu.value = false;
+  }
+}
+
+function clearQueue() {
+  const sid = activeSession.value?.id;
+  if (!sid) return;
+  chatStore.clearSendQueue(sid);
+}
+
+function removeQueueItem(index: number) {
+  const sid = activeSession.value?.id;
+  if (!sid) return;
+  chatStore.removeFromQueue(sid, index);
 }
 
 // ===== v0.4.7a: Composer / popover 监听 =====
@@ -307,8 +391,21 @@ function onTextareaKeydown(e: KeyboardEvent) {
 }
 
 function pickModel(providerId: string, modelId: string) {
-  configStore.setActiveModel(providerId, modelId);
+  // 2026-08-20 P0-1 补充 A: streaming 兜底 (UI 也禁了, 防 bypass)
+  if (isStreaming.value) {
+    console.warn('[Composer] pickModel blocked: session is streaming');
+    return;
+  }
+  // 2026-08-20 P0-1 补充 B: 写 session 自己的 model, 不动全局 configStore.
+  // 没 active session 时退化为改全局, 保持向后兼容.
+  const sid = activeSession.value?.id;
+  if (sid) {
+    sessionStore.setSessionModel(sid, providerId, modelId);
+  } else {
+    configStore.setActiveModel(providerId, modelId);
+  }
   showModelMenu.value = false;
+  console.log('[Composer] model changed (per-session, applies on next sendPrompt for this session)', { sessionId: sid, providerId, modelId });
 }
 
 function openSettings() {
@@ -591,7 +688,7 @@ onMounted(() => nextTick(autoResize));
               v-for="opt in PERMISSION_MODE_OPTIONS"
               :key="opt.value"
               class="pad-composer__perm-menu-item"
-              :class="{ 'is-active': opt.value === configStore.permissionMode }"
+              :class="{ 'is-active': opt.value === currentPermissionMode }"
               @click="pickPermission(opt.value)"
             >
               <span class="pad-composer__perm-menu-item-body">
@@ -618,17 +715,23 @@ onMounted(() => nextTick(autoResize));
         <div ref="modelMenuRef" class="pad-composer__model-wrap">
           <button
             class="pad-composer__modelchip"
-            :class="{ 'is-warn': !hasConfig, 'is-open': showModelMenu }"
-            :title="hasConfig ? `当前: ${providerTypeLabel} / ${activeModel?.id}` : '未配置 provider, 点击去设置'"
+            :class="{ 'is-warn': !hasConfig, 'is-open': showModelMenu, 'is-locked': isStreaming && hasConfig }"
+            :disabled="isStreaming && hasConfig"
+            :title="isStreaming
+              ? `LLM 还在回复, 等回完才能切换 model (现在改会跟当前 turn 状态机冲突)`
+              : hasConfig
+                ? `当前: ${providerTypeLabel} / ${activeModel?.id}`
+                : '未配置 provider, 点击去设置'"
             @click="toggleModelMenu"
           >
-            <AlertTriangle v-if="!hasConfig" :size="14" :stroke-width="1.75" />
+            <Lock v-if="isStreaming && hasConfig" :size="12" :stroke-width="1.75" />
+            <AlertTriangle v-else-if="!hasConfig" :size="14" :stroke-width="1.75" />
             <Star v-else :size="12" :stroke-width="1.75" fill="currentColor" />
             <span class="pad-composer__chip-label">
               <span v-if="hasConfig">{{ activeModel?.id }}</span>
               <span v-else>未配置</span>
             </span>
-            <ChevronDown :size="14" :stroke-width="1.75" :class="['pad-composer__chip-chev', { 'is-flipped': showModelMenu }]" />
+            <ChevronDown v-if="!isStreaming || !hasConfig" :size="14" :stroke-width="1.75" :class="['pad-composer__chip-chev', { 'is-flipped': showModelMenu }]" />
           </button>
 
           <div v-if="showModelMenu" class="pad-composer__model-menu" @click.stop>
@@ -648,7 +751,7 @@ onMounted(() => nextTick(autoResize));
                 <div class="pad-composer__model-menu-group-label">
                   <span>{{ p.label }}</span>
                   <span
-                    v-if="p.id === configStore.activeProviderId"
+                    v-if="p.id === activeProvider?.id"
                     class="pad-composer__model-menu-active-tag"
                   >active</span>
                 </div>
@@ -663,7 +766,7 @@ onMounted(() => nextTick(autoResize));
                   v-for="m in configStore.enabledModels(p.id)"
                   :key="m.id"
                   class="pad-composer__model-menu-item"
-                  :class="{ 'is-active': p.id === configStore.activeProviderId && p.activeModelId === m.id }"
+                  :class="{ 'is-active': p.id === activeProvider?.id && activeModel?.id === m.id }"
                   @click="pickModel(p.id, m.id)"
                 >
                   <span class="pad-composer__model-menu-item-body">
@@ -671,7 +774,7 @@ onMounted(() => nextTick(autoResize));
                     <span v-if="m.label" class="pad-composer__model-menu-item-label">{{ m.label }}</span>
                   </span>
                   <Check
-                    v-if="p.id === configStore.activeProviderId && p.activeModelId === m.id"
+                    v-if="p.id === activeProvider?.id && activeModel?.id === m.id"
                     :size="14"
                     :stroke-width="2"
                     class="pad-composer__model-menu-item-check"
@@ -679,6 +782,45 @@ onMounted(() => nextTick(autoResize));
                 </button>
               </div>
             </template>
+          </div>
+        </div>
+        <!-- 2026-08-20 P0-1 补充 A: 队列气泡 (LLM 还在回时用户发的消息排队) -->
+        <div v-if="queueLength > 0" ref="queuePanelRef" class="pad-composer__queue-wrap">
+          <button
+            class="pad-composer__queuechip"
+            :class="{ 'is-open': showQueuePanel }"
+            :title="`队列中 ${queueLength} 条消息, LLM 回完会自动按顺序发送`"
+            @click="toggleQueuePanel"
+          >
+            <ListOrdered :size="12" :stroke-width="1.75" />
+            <span>队列 {{ queueLength }}</span>
+          </button>
+          <!-- 队列 popover (跟 model 菜单同 pattern, 列出来源 + 可删单条 / 全清) -->
+          <div v-if="showQueuePanel" class="pad-composer__queue-panel" @click.stop>
+            <div class="pad-composer__queue-panel-head">
+              <span>发送队列 ({{ queueLength }})</span>
+              <button class="pad-composer__queue-panel-clear" @click="clearQueue">清空全部</button>
+            </div>
+            <div class="pad-composer__queue-panel-list">
+              <div
+                v-for="(item, idx) in currentSessionQueue"
+                :key="idx"
+                class="pad-composer__queue-panel-item"
+              >
+                <span class="pad-composer__queue-panel-num">{{ idx + 1 }}</span>
+                <span class="pad-composer__queue-panel-text">{{ item.length > 80 ? item.slice(0, 80) + '…' : item }}</span>
+                <button
+                  class="pad-composer__queue-panel-remove"
+                  :title="`从队列删除 (剩余 ${queueLength - idx - 1} 条)`"
+                  @click="removeQueueItem(idx)"
+                >
+                  <X :size="12" :stroke-width="1.75" />
+                </button>
+              </div>
+            </div>
+            <div class="pad-composer__queue-panel-foot">
+              LLM 完成后自动按顺序发送, 也可点 ↑ 删单条
+            </div>
           </div>
         </div>
         <button class="pad-composer__iconbtn" title="语音输入">
@@ -1363,6 +1505,159 @@ onMounted(() => nextTick(autoResize));
   padding: 6px 14px 8px;
   font-size: var(--pad-fs-12);
   color: var(--pad-fg-tertiary);
+}
+
+/* 2026-08-20 P0-1 补充 A: 队列气泡 + 面板样式
+ * 视觉跟 model chip 同语言 (圆角 + border + hover 灰底), 颜色用 primary 强调"等待发送"
+ * popover 跟 model menu 同 z-index + 弹出位置
+ */
+.pad-composer__modelchip.is-locked {
+  /* 跟 is-warn 区分: is-warn 是黄色 (没配 provider), is-locked 是灰色 (streaming 锁) */
+  color: var(--pad-fg-tertiary);
+  background: var(--pad-bg-active);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.pad-composer__modelchip.is-locked:hover {
+  background: var(--pad-bg-active);
+  color: var(--pad-fg-tertiary);
+}
+.pad-composer__queue-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.pad-composer__queuechip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--pad-radius-md);
+  background: var(--pad-bg-active);
+  border: 1px solid var(--pad-border);
+  color: var(--pad-primary);
+  font-size: var(--pad-fs-12);
+  font-weight: var(--pad-fw-medium);
+  cursor: pointer;
+  transition:
+    background var(--pad-dur-fast) ease,
+    border-color var(--pad-dur-fast) ease;
+  font-family: inherit;
+}
+.pad-composer__queuechip:hover {
+  background: var(--pad-bg-hover);
+  border-color: var(--pad-border-strong);
+}
+.pad-composer__queuechip.is-open {
+  background: var(--pad-bg-hover);
+  border-color: var(--pad-border-strong);
+}
+.pad-composer__queue-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 100;
+  min-width: 280px;
+  max-width: 360px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--pad-popover);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-lg);
+  box-shadow: var(--pad-shadow-modal-large);
+  overflow: hidden;
+}
+.pad-composer__queue-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--pad-divider);
+  font-size: var(--pad-fs-12);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-primary);
+  background: var(--pad-bg-active);
+}
+.pad-composer__queue-panel-clear {
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
+  background: transparent;
+  border: none;
+  padding: 2px 6px;
+  border-radius: var(--pad-radius-sm);
+  cursor: pointer;
+  font-family: inherit;
+}
+.pad-composer__queue-panel-clear:hover {
+  color: var(--pad-danger, var(--pad-fg-secondary));
+  background: var(--pad-bg-hover);
+}
+.pad-composer__queue-panel-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pad-composer__queue-panel-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: var(--pad-fs-12);
+  color: var(--pad-fg-secondary);
+  border-bottom: 1px solid transparent;
+}
+.pad-composer__queue-panel-item:hover {
+  background: var(--pad-bg-hover);
+}
+.pad-composer__queue-panel-num {
+  flex-shrink: 0;
+  min-width: 18px;
+  text-align: center;
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
+  background: var(--pad-muted);
+  border-radius: var(--pad-radius-sm);
+  padding: 1px 4px;
+}
+.pad-composer__queue-panel-text {
+  flex: 1;
+  word-break: break-all;
+  color: var(--pad-fg-primary);
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-12);
+  line-height: 1.4;
+}
+.pad-composer__queue-panel-remove {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--pad-fg-tertiary);
+  border-radius: var(--pad-radius-sm);
+  cursor: pointer;
+  transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
+}
+.pad-composer__queue-panel-remove:hover {
+  background: var(--pad-bg-active);
+  color: var(--pad-danger, var(--pad-fg-primary));
+}
+.pad-composer__queue-panel-foot {
+  padding: 6px 12px;
+  font-size: var(--pad-fs-11);
+  color: var(--pad-fg-tertiary);
+  border-top: 1px solid var(--pad-divider);
+  background: var(--pad-bg-input);
+  text-align: center;
 }
 .pad-composer__send {
   display: inline-flex;

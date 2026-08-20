@@ -383,9 +383,12 @@ intent across the session is still part of the conversation.
       //   跟 permission 无关).
       // P1 #5: maxRounds extension 跟 permission 独立, mode=allow 也注册 (限制是 model 行为,
       //   不是 user 行为). null 时 (maxRounds 没设) 自动跳过.
+      // 2026-08-20 fix: 之前 P1 #5 commit 585c23a 写 `createMaxRoundsExtension(mm.maxRounds)` 但 `mm` 是
+      //   createUserCustomProvider 内的 const,不在这个 scope,运行时 ReferenceError → sidecar 启动即崩.
+      //   修: 直接从 config.modelMetadata 取 (FE 传进来的对象,user 没配 maxRounds 时是 undefined,自然跳过).
       extensionFactories: (() => {
         const factories = [];
-        const maxRoundsExt = createMaxRoundsExtension(mm.maxRounds);
+        const maxRoundsExt = createMaxRoundsExtension(config.modelMetadata?.maxRounds);
         if (maxRoundsExt) factories.push(maxRoundsExt);
         if (config.permissionMode !== 'allow') {
           factories.push(createPermissionExtension(config.permissionMode));
@@ -476,7 +479,16 @@ intent across the session is still part of the conversation.
  *
  * 跟 v0.4.x 区别: v0.4.x 是我们 sidecar 直接 emit permission_request 跟 FE 通信.
  *   v0.5.0 走 Pi SDK 标准 extension_ui_request 协议, 跟 Pi 生态兼容.
+ *
+ * 2026-08-20 P0-1 修 (D-tool-permission-smart): 之前 'smart' 模式只是 UI 摆了个 option,
+ *   sidecar 实际行为跟 'ask' 一模一样 (任何 tool call 都弹窗) — 用户切过去没效果, 跟 ADR-0014
+ *   标的 ✅ 严重不符. 根因: createPermissionExtension 漏了 smart 分支, 默认走 confirm 路径.
+ *   修法: 显式区分 read-only 工具集 (read/ls/find/grep), mode='smart' 时静默放行, 跟 ADR
+ *   "smart: 读类自动放行, 写类+bash 弹 confirm" 对齐. 用 Set 避免每次构造数组, hot path
+ *   (每个 tool call 都查一次) 用 O(1) 命中.
  */
+const READ_ONLY_TOOLS = new Set(['read', 'ls', 'find', 'grep']);
+
 function createPermissionExtension(permissionMode) {
   return (pi) => {
     pi.on('tool_call', async (event, ctx) => {
@@ -490,6 +502,8 @@ function createPermissionExtension(permissionMode) {
       //   (e.g. D:\UnityWork\Tools\Pi) 或其他无关位置 ("agent 把桌面端程序给改掉了" 用户反馈).
       //   - bash 工具无法静态检查 (command 字符串里可能塞路径), 由 permission mode 兜底.
       //   - read / ls / grep / find 通常不破坏, 不强制沙箱 (避免影响跨目录查询).
+      // 注意: 沙箱检查放在 mode 分支之前, 跟 mode 无关 — 即使 allow 模式也不能写 workspace 外
+      //   (P0-1 之前 allow 走的是 mode 分支早返回, 沙箱跳过了; 这是 ADR 已知妥协, 保留原行为).
       if ((toolName === 'write' || toolName === 'edit') && workspacePath) {
         const filePath = toolArgs.path || toolArgs.filePath;
         if (filePath && typeof filePath === 'string' && !isPathWithinWorkspace(filePath, workspacePath)) {
@@ -507,14 +521,21 @@ function createPermissionExtension(permissionMode) {
         return { block: true, reason: 'Tool use denied (permission mode=deny)' };
       }
 
+      // P0-1 修: 'smart' 模式 + read-only 工具 → 静默放行, 跟 ADR-0014 承诺对齐.
+      // 之前这个分支缺失, smart 模式行为 = ask (每个 tool 都弹窗), 等于摆设.
+      if (permissionMode === 'smart' && READ_ONLY_TOOLS.has(toolName)) {
+        console.error(`[perm] smart auto-allow read-only ${toolName} args=${argsPreview}`);
+        return undefined;
+      }
+
       if (permissionMode === 'allow') {
         // 理论上不会到这里 (mode=allow 不传 extensionFactories), 兜底
         console.error(`[perm] allow ${toolName} (mode=allow fallback)`);
         return undefined;
       }
 
-      // mode = 'ask' (默认): 弹 confirm 弹窗
-      console.error(`[perm] ask ${toolName} args=${argsPreview}`);
+      // mode = 'ask' / 'smart'+ 写类工具 / 其他未知: 弹 confirm 弹窗
+      console.error(`[perm] ask ${toolName} (mode=${permissionMode}) args=${argsPreview}`);
       try {
         const allowed = await ctx.ui.confirm(
           `Allow tool: ${toolName}`,
