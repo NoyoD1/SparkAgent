@@ -329,7 +329,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocClick));
   background: var(--pad-popover);
   border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-lg);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.10), 0 2px 8px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--pad-shadow-popover-lg);
   overflow: hidden;
   animation: pad-select-fade-in var(--pad-dur-base) var(--pad-ease-out-soft);
 }

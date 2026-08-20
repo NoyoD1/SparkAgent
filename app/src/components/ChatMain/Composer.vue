@@ -685,8 +685,7 @@ onMounted(() => nextTick(autoResize));
   position: relative;
   /* v0.3.7+ floating shadow: 让 composer 看起来浮在消息上方 */
   box-shadow:
-    0 8px 24px rgba(0, 0, 0, 0.06),
-    0 2px 6px rgba(0, 0, 0, 0.03),
+    var(--pad-shadow-composer),
     0 0 0 1px var(--pad-border);
   /* v0.3.8.25: 去掉 :focus-within 状态变化, 选中/不选中看着一样.
    * 用户反馈"输入框选中是也不要有边框高亮, 就保持正常状态".
@@ -845,7 +844,7 @@ onMounted(() => nextTick(autoResize));
   background: var(--pad-card, #fff);
   border: 1px solid var(--pad-border, rgba(0,0,0,0.1));
   border-radius: var(--pad-radius-md, 8px);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  box-shadow: var(--pad-shadow-popover);
   padding: 4px;
   max-height: 280px;
   overflow-y: auto;
@@ -999,7 +998,7 @@ onMounted(() => nextTick(autoResize));
   background: var(--pad-popover);
   border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-lg);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.10), 0 2px 8px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--pad-shadow-popover-lg);
   padding: 4px 0 6px;
   z-index: 30;
 }
@@ -1147,7 +1146,7 @@ onMounted(() => nextTick(autoResize));
   background: var(--pad-popover);
   border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-lg);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.10), 0 2px 8px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--pad-shadow-popover-lg);
   padding: 4px 0 6px;
   z-index: 30;
 }

@@ -118,7 +118,7 @@ onMounted(async () => {
   border-radius: var(--pad-radius-pill);
   font-size: var(--pad-fs-13);
   z-index: 9999;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--pad-shadow-toast);
 }
 .pad-mig-fade-enter-active,
 .pad-mig-fade-leave-active {
@@ -153,7 +153,7 @@ onMounted(async () => {
   border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-pill);
   font-size: var(--pad-fs-13);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--pad-shadow-toast);
   user-select: none;
   display: inline-flex;
   align-items: center;

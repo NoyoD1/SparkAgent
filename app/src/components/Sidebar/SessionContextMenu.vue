@@ -226,7 +226,7 @@ function emitAction(type: string, payload?: any) {
   background: var(--pad-card);
   border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-md, 6px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--pad-shadow-menu);
   padding: var(--pad-sp-1, 4px);
   z-index: 9998;
   user-select: none;

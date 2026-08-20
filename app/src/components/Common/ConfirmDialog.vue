@@ -116,7 +116,7 @@ watch(
 .pad-confirm-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--pad-modal-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -131,7 +131,7 @@ watch(
   padding: var(--pad-sp-6, 24px);
   max-width: 420px;
   width: 90%;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--pad-shadow-modal-strong);
 }
 
 .pad-confirm-title {

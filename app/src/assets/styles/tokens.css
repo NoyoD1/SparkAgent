@@ -224,6 +224,18 @@
   --pad-shadow-modal: 0 8px 24px rgba(0, 0, 0, 0.08);
   --pad-shadow-drawer: var(--pad-shadow-modal);
 
+  /* Phase 二阶段 B5: 整理 hardcoded rgba. 7 处直接 rgba(...) 集中到 token.
+   *   minimalist 风格 dark mode 沿用同色阴影 (黑色 0.1 在 #171717 背景上还能看清),
+   *   不加 dark 覆盖. */
+  --pad-modal-overlay: rgba(0, 0, 0, 0.5);                                /* ConfirmDialog 遮罩 */
+  --pad-shadow-toast: 0 4px 16px rgba(0, 0, 0, 0.12);                     /* App.vue toast + migration banner */
+  --pad-shadow-modal-strong: 0 4px 20px rgba(0, 0, 0, 0.15);              /* ConfirmDialog 弹框 */
+  --pad-shadow-menu: 0 4px 16px rgba(0, 0, 0, 0.18);                      /* SessionContextMenu 菜单 */
+  --pad-shadow-composer: 0 8px 24px rgba(0, 0, 0, 0.06), 0 2px 6px rgba(0, 0, 0, 0.03);  /* Composer 多层浮阴影 (2 layer, 边框层 inline 配 var(--pad-border)) */
+  --pad-shadow-popover-lg: 0 8px 24px rgba(0, 0, 0, 0.10), 0 2px 8px rgba(0, 0, 0, 0.04);  /* PadSelect / Composer 1001+1149 大弹层 (复用, 同一值) */
+  --pad-shadow-modal-large: 0 16px 48px rgba(0, 0, 0, 0.18), 0 4px 12px rgba(0, 0, 0, 0.08);  /* PermissionDialog 较大弹框 */
+  --pad-shadow-popover-subtle: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.04);  /* ProviderTab 1050 内嵌面板轻阴影 */
+
   --shadow-1: var(--pad-shadow-button);
   --shadow-2: var(--pad-shadow-popover);
   --shadow-3: var(--pad-shadow-modal);

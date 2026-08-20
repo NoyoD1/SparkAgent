@@ -900,7 +900,14 @@ function onProviderAdded(id: string) {
                     v-if="config.activeProviderId === selectedProvider!.id && config.activeProvider?.activeModelId === m.id"
                     class="pad-provider-detail__model-current-tag"
                     title="当前正在 input box 使用的 model (在 chat 输入框点其他 model 即可切换)"
-                  >current</span>
+                  >当前</span>
+                  <!-- Phase 二阶段 B4: 已停用 badge (model.enabled === false). 跟 current tag 同样尺寸,
+                       灰底配 tertiary 文字, 跟 current 绿底对比明显, 不会被误以为是"被选过" -->
+                  <span
+                    v-else-if="!isModelEnabled(m)"
+                    class="pad-provider-detail__model-disabled-tag"
+                    title="此 model 已停用, 不会出现在 chat 输入框的 model 选择列表里. 勾选左侧 checkbox 重新启用."
+                  >已停用</span>
                   <button
                     class="pad-provider-detail__model-config"
                     type="button"
@@ -1040,7 +1047,7 @@ function onProviderAdded(id: string) {
   overflow: hidden;
   flex: 1;
   min-height: 0;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--pad-shadow-popover-subtle);
 }
 .pad-providers__list-col {
   width: 260px;
@@ -1340,7 +1347,14 @@ function onProviderAdded(id: string) {
 .pad-provider-detail__model:hover { background: var(--pad-bg-hover); }
 /* v0.5.0-PR2: 详情面板不切 active — current 标识用浅绿底高亮 (只读, 跟 input box 同步) */
 .pad-provider-detail__model.is-current { background: var(--pad-success-soft, var(--pad-accent-soft)); }
-.pad-provider-detail__model.is-disabled { opacity: 0.5; }
+/* Phase 二阶段 B4: 停用 model 不止 opacity 0.5, 还要 model id 划线 + 右侧 "已停用" 灰底 pill.
+ *   opacity 0.5 单独用看不出"是没启用"还是"被选过没松手", 加显式文字跟划线更明确. */
+.pad-provider-detail__model.is-disabled { opacity: 0.55; }
+.pad-provider-detail__model.is-disabled .pad-provider-detail__model-id {
+  text-decoration: line-through;
+  text-decoration-color: var(--pad-fg-tertiary, #888);
+  text-decoration-thickness: 1px;
+}
 .pad-provider-detail__model-body { flex: 1; min-width: 0; }
 .pad-provider-detail__model-id { font-size: var(--pad-fs-13); font-family: var(--pad-font-mono); color: var(--pad-fg-primary); }
 .pad-provider-detail__model-label { font-size: var(--pad-fs-11); color: var(--pad-fg-tertiary); margin-top: 1px; }
@@ -1356,7 +1370,21 @@ function onProviderAdded(id: string) {
   color: var(--pad-fg-inverse, #fff);
   font-weight: var(--pad-fw-semibold);
   letter-spacing: 0.02em;
-  text-transform: lowercase;
+  flex-shrink: 0;
+}
+/* Phase 二阶段 B4: 已停用 标签. 跟 current 同样尺寸对齐, 灰底 + tertiary 文字,
+ *   跟绿底 current 视觉对比强, 跟 enabled model 的 metadata tag 不冲突. */
+.pad-provider-detail__model-disabled-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 1px 8px;
+  border-radius: var(--pad-radius-pill);
+  background: var(--pad-bg-tertiary, rgba(0, 0, 0, 0.06));
+  color: var(--pad-fg-tertiary, #888);
+  font-weight: var(--pad-fw-medium, 500);
+  letter-spacing: 0.02em;
   flex-shrink: 0;
 }
 /* v0.4.4.6: metadata 摘要 (type/vision/ctx/out/rounds/reasoning 已设的项) */

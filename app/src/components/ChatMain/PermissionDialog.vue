@@ -126,7 +126,7 @@ async function respond(allow: boolean) {
   background: var(--pad-popover);
   border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-lg);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18), 0 4px 12px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--pad-shadow-modal-large);
   display: flex;
   flex-direction: column;
   overflow: hidden;

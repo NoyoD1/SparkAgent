@@ -1519,7 +1519,7 @@ const statusText = computed(() => {
   font-weight: var(--pad-fw-medium, 500);
   color: var(--pad-fg-primary);
   cursor: pointer;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--pad-shadow-button);
   transition: background var(--pad-dur-fast, 0.15s) ease, color var(--pad-dur-fast, 0.15s) ease, border-color var(--pad-dur-fast, 0.15s) ease;
 }
 .pad-msg__quote-floating-btn:hover {
