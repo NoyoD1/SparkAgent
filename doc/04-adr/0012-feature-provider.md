@@ -157,6 +157,57 @@
 - 全量扫 hardcoded `rgba(0,0,0,0.0X)` 改 token
 - `migrateFromLocalStorage` 加备份 (防旧数据脏了污染新 config)
 
+## 后续计划 (Roadmap)
+
+> 排序原则: **高 ROI 优先 (低投入高回报) → 战略级最后 (高投入但定义产品未来)**. 工作量按单个开发者全职估算.
+
+### Phase 1: 1-2 周内能推完, 高 ROI
+
+| # | 项 | 工作量 | 价值 | 依赖 | 验收 |
+|---|---|---|---|---|---|
+| 1.1 | **Provider 导出 / 导入** (JSON, 不含 keychain 里的 key) | 2-3 天 | 🟢 高 — 跨机器同步 + 备份最实在的需求 | 无 | 导出 → 改 baseUrl → 导入能跑 |
+| 1.2 | **migrateFromLocalStorage 加备份** (迁移前 `.bak` 副本) | 1-2 小时 | 🟡 中 — 防旧数据脏污染 | 无 | 故意灌一个非法 JSON, 看是否保留 .bak |
+| 1.3 | **Gemini live API 解析** (`/v1beta/models` 走通, 跟 catalog merge) | 0.5 天 | 🟢 高 — google model 更新零延迟, 顺带干掉 catalog 里 google 那 8 个 | 已有 `parse_openai_compatible_meta`, google 协议类似 | 跑一次 `/v1beta/models`, 字段全填 |
+| 1.4 | **全量扫 hardcoded rgba → token** | 1-2 天 | 🟡 中 — 修剩下 ~5-10 个深色模式透白问题 | 已知大部分在 `ProviderTab.vue` / `ChatHeader.vue` | 切深色模式全 app 走一遍, 无透白 |
+
+**总投入**: ~1 周. **风险**: 低 (都是局部改动).
+
+### Phase 2: 中期, 1-2 月内
+
+| # | 项 | 工作量 | 价值 | 依赖 | 验收 |
+|---|---|---|---|---|---|
+| 2.1 | **静态 catalog 自动更新** (CI 跑脚本: 拉厂商 changelog → diff → auto PR) | 1-2 周 | 🟡 中 — 减少手动维护, 但厂商 changelog 格式杂 | GitHub Actions | 每周自动出 "catalog 待更新" PR, merge 后下次 build 自动应用 |
+| 2.2 | **i18n 框架** (vue-i18n, 中英双语起步) | 1 周 | 🟡 中 — 真出海 / 给国外用户用之前必备 | 无 | 切到英文 locale 全部 UI 翻译 |
+| 2.3 | **FE bundle 拆分** (vite manualChunks, 当前 1.6 MB 单 chunk) | 1-2 天 | 🟡 中 — 启动速度 + 2G 内存用户体验 | 已有 `vite build` 配置 | 首屏 JS < 500 KB |
+| 2.4 | **错误监控** (前端 window.onerror / Rust tauri-plugin-log → 远端 sink) | 3-5 天 | 🟡 中 — 出问题能收到信号, 不靠 user 截图 | 决定用 Sentry / 自己写 | 控制台 1 个错 → 远端 1 条记录 |
+
+**总投入**: ~3-4 周. **风险**: 中 (i18n 一旦接后面每条文案都要走 key, 改动散).
+
+### Phase 3: 战略级, 决定产品形态, 3+ 月
+
+| # | 项 | 工作量 | 价值 | 依赖 | 验收 |
+|---|---|---|---|---|---|
+| 3.1 | **Provider 分享 / 导入** (单条 provider 配置 JSON, **不**含 key, 走"分享链接") | 1 周 | 🟢 高 — 用户之间互推 provider 配置, viral 增长基础 | 1.1 导出导入能力 | 一条 provider 配置发到群里, 别人点开能装 |
+| 3.2 | **Community-shared catalog** (用户把自己维护的 catalog 上传到 Pi 中心仓, 别人订阅) | 2-3 周 | 🟡 中 — 静态 catalog 的多源扩展, 但需要"中心"基建 | 3.1 分享机制 | 一个用户提交 5 个 model 的 catalog, 别人能订阅 |
+| 3.3 | **Team 共享 config** (云端 sync config.json, 多设备 / 团队成员) | 4-6 周 | 🟢 高 — 切换设备无缝, 团队 onboarding 提速 | 决定 auth (自建 / OAuth) + 后端 (Postgres / Cloudflare D1) | 两台电脑登录同一账号, provider 配置实时同步 |
+| 3.4 | **Provider marketplace** (Pi Agent 官方维护 + community 提交流程) | 6-8 周 | 🟢 高 — 形成生态护城河 | 3.2 + 3.3 | 第三方提交 provider 配置, 走审核, 上架后一键安装 |
+
+**总投入**: 3-4 月. **风险**: 高 (每项都涉及产品决策 + 后端基建, 不是纯前端能搞定的).
+
+### 决策时考虑的因素
+
+- **Q1 推 1.x**: 用户基数还小时推 Team / Marketplace 是自嗨. 先把单设备体验打透.
+- **Q2 看数据**: 如果 NPS / 留存 OK, 推分享 / 社区 catalog (1.x → 2.0).
+- **Q3 决定后端**: Team 共享必然要后端 + auth, 是"自建 Pi Cloud" 还是"接现成 auth (GitHub/Google)" 是个大决策.
+- **持续维护成本**: catalog 自动更新是"低投入高回报"但要排个 bot 维护, 别让它变僵尸.
+
+### 暂不做 / 永久搁置
+
+- **Provider marketplace (第三方可上传 provider 插件)**: 安全风险太大, 不是 Pi Agent 这种桌面 app 该承担的, 跟 VSCode marketplace 的审核成本比, 我们玩不起
+- **云端备份 session 历史**: 跟 team 共享合并考虑, 别单独做
+
+## 提交历史
+
 ## 提交历史
 
 - `585c23a` — feat(provider): ADR-0012 P0+P1+P2 全面修复 (测试连接/实时同步/校验/二次确认/maxRounds/debounce/清理)
