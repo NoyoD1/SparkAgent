@@ -815,6 +815,14 @@ class PiTauriClient {
     return (await invoke('ensure_default_workspace')) as string;
   }
 
+  // v0.6.3-rc1 P2-1.4: 返回默认 agent dir (全局 MCP 配置目录).
+  //   - Windows: C:\Users\<user>\.pi\agent
+  //   - Unix: <user.home>/.pi/agent
+  //   FE 用这个显示 "global scope 会写到哪" 透明性, 也可以传给 MCP command 当 agentDir.
+  async getAgentDir(): Promise<string> {
+    return (await invoke('get_agent_dir')) as string;
+  }
+
   // ====== 2.1: 文件树浏览器 ======
   //   读 workspace 目录树, UI 用. 不走 sidecar, 走 Tauri 直 invoke.
   async listWorkspaceTree(path: string, maxDepth = 2): Promise<WorkspaceTreeNode[]> {

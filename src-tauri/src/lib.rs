@@ -1454,8 +1454,25 @@ fn resolve_mcp_servers_dir(scope: &str, workspace_path: Option<String>, agent_di
             Ok(PathBuf::from(ws).join(".pi").join("mcp"))
         }
         "global" => {
-            let dir = agent_dir.as_ref().filter(|s| !s.is_empty())
-                .ok_or("global scope 需要 agentDir")?;
+            // v0.6.3-rc1 P2-1.4 fix: FE 之前永远传 agent_dir=None, 选 global 必报错.
+            //   兜底逻辑: 优先用 FE 传的 agent_dir; 拿不到时用 <user.home>/.pi/agent (跟
+            //   Pi SDK 0.84.2 getAgentDir() 默认行为对齐 — Windows 实际是 %APPDATA%/pi-agent,
+            //   macOS/Linux 是 ~/.local/share/pi-agent; 这里简化用 <user.home>/.pi/agent 跟
+            //   Pi SDK 兼容, FE 后续可以调 getAgentDir 拿真值覆盖).
+            let dir = agent_dir
+                .as_ref()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .or_else(|| {
+                    // 拿 <user.home>: Windows 用 USERPROFILE, Unix 用 HOME
+                    std::env::var_os("USERPROFILE")
+                        .or_else(|| std::env::var_os("HOME"))
+                        .map(|p| {
+                            let home = p.to_string_lossy().to_string();
+                            format!("{}{}.pi{}agent", home, std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR)
+                        })
+                })
+                .ok_or("global scope 需要 agentDir (FE 没传 + 环境变量也拿不到 home dir)")?;
             Ok(PathBuf::from(dir).join("mcp"))
         }
         other => Err(format!("scope 必须是 'workspace' 或 'global', got '{}'", other)),
@@ -2234,6 +2251,21 @@ async fn ensure_default_workspace(app: AppHandle) -> Result<String, String> {
     Ok(default_path.to_string_lossy().to_string())
 }
 
+/// v0.6.3-rc1 P2-1.4: 返回默认 agent dir (全局 MCP 配置目录).
+///   - Windows: C:\Users\<user>\.pi\agent
+///   - macOS/Linux: <user.home>/.pi/agent
+///   跟 ensure_default_workspace 同一个 home_dir 解析, 路径规范化.
+///   FE 用这个显示 "global scope 会写到哪" (透明性), 也可以传给 MCP command 当 agentDir.
+#[tauri::command]
+async fn get_agent_dir(app: AppHandle) -> Result<String, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|e| format!("home_dir: {e}"))?;
+    let agent_dir = home.join(".pi").join("agent");
+    Ok(agent_dir.to_string_lossy().to_string())
+}
+
 // ====== 2.1: 文件树浏览器 ======
 //   读 workspace 目录树, 给 sidebar UI 用. 不走 sidecar (UI-only, 不需要 LLM 介入).
 //   - 限制 max_depth (默认 2 层, 防 node_modules 把 UI 撑爆)
@@ -2451,6 +2483,7 @@ pub fn run() {
             get_model_catalog,  // v0.5.0-D D213: 静态 catalog
             migrate_from_env,
             ensure_default_workspace,
+            get_agent_dir,  // v0.6.3-rc1 P2-1.4: 全局 MCP 目录路径 (FE 显示用)
             // 2.1: 文件树浏览器 (UI-only, 不走 sidecar)
             list_workspace_tree,
             // 2.2: workspace 模板 (空目录 / git clone)

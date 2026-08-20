@@ -108,6 +108,9 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
   /**
    * 写 MCP server JSON. name / command / args / env / cwd / timeout 校验由 Rust 端
    *   validate_mcp_server_body 兜底, FE 端做基本检查给用户即时反馈.
+   *
+   * 走 active workspace (跟 P2-1.2 之前行为一致). 如果 user 在 dialog 选了别的 workspace
+   *   或要写 global scope, 用 writeWithPath 显式传路径.
    */
   async function write(scope: McpServerScope, name: string, body: string): Promise<string> {
     validateName(name);
@@ -117,6 +120,36 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
       scope,
       workspacePath: wsPath,
       agentDir: null,
+      name,
+      body,
+    });
+  }
+
+  /**
+   * v0.6.3-rc1 P2-1.4: 显式传 workspace / agent dir 的 write (绕开 ensureActiveWorkspace).
+   *   - workspace scope: 传 wsPath (用户从 dialog 选中的那个, 不一定是 active)
+   *   - global scope: 传 agDir (Tauri 端兜底逻辑会用 <user.home>/.pi/agent)
+   *   不做 ensureActiveWorkspace, 让 caller 完全控制路径.
+   */
+  async function writeWithPath(
+    scope: McpServerScope,
+    name: string,
+    body: string,
+    workspacePath: string | null,
+    agentDir: string | null,
+  ): Promise<string> {
+    validateName(name);
+    validateBody(body);
+    if (scope === 'workspace' && !workspacePath) {
+      throw new Error('workspace scope 需要 workspacePath (请先选择工作区)');
+    }
+    if (scope === 'global' && !agentDir) {
+      throw new Error('global scope 需要 agentDir (Tauri 端应该用 <user.home>/.pi/agent 兜底, 但这次没拿到)');
+    }
+    return await piTauri.writeMcpServer({
+      scope,
+      workspacePath,
+      agentDir,
       name,
       body,
     });
@@ -243,6 +276,7 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
     refresh,
     read,
     write,
+    writeWithPath,  // v0.6.3-rc1 P2-1.4: dialog 显式传 workspace / agent dir (绕开 ensureActiveWorkspace)
     remove,
     importServers,
     buildDefaultBody,

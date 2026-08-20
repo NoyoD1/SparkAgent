@@ -19,12 +19,14 @@
  * sidecar 启动时自动加载 MCP server 配置 + spawn + 拉 tools/list 转 Pi SDK ToolDefinition
  *   (工具名加 mcp_<server>_<tool> 前缀). **不**支持热重载 (P1.5 之后再说), 改完需重启 sidecar.
  */
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import {
   Plug, Plus, X, Trash2, AlertCircle, Check, Info, Pencil, Upload, FileJson,
 } from 'lucide-vue-next';
 import { useMcpServersStore, type McpServerScope } from '@/stores/mcpServers';
+import { useSessionStore } from '@/stores/session';
+import { piTauri } from '@/lib/tauri';
 import {
   parseMcpImportJson,
   describeFormat,
@@ -33,10 +35,20 @@ import {
 
 const mcpStore = useMcpServersStore();
 const { servers, loading, error } = storeToRefs(mcpStore);
+const sessionStore = useSessionStore();
 
 // v0.6.3-rc1 P2-1.2: 记录当前 MCP 操作的 workspace path, 给 UI 显示 + 排查
 //   list_mcp_servers 拿不到 server 时, user 一看路径就知道是不是 active workspace 选错了
 const currentWsPath = ref<string>('');
+
+// v0.6.3-rc1 P2-1.4: dialog 选中的 workspace (高级区下拉). computed 拿对应 path
+//   找不到时 fallback 到 currentWsPath (确保 save 时不会传空字符串)
+const dialogSelectedWsPath = computed(() => {
+  const id = dialogSelectedWorkspaceId.value;
+  if (!id) return currentWsPath.value;
+  const ws = sessionStore.workspaces.find((w) => w.id === id);
+  return ws?.path || currentWsPath.value;
+});
 
 // ====== 新建 dialog state ======
 const isCreating = ref(false);
@@ -57,6 +69,11 @@ const isSavingEdit = ref(false);
 //   JSON tab 完全砍掉 (批量配置走顶部"导入 JSON"按钮, 单个高级配置走 env textarea).
 const dialogMode = ref<'create' | 'edit'>('create');   // 当前是新建还是编辑
 const editingScope = ref<McpServerScope>('workspace');  // 作用域 (高级区)
+// v0.6.3-rc1 P2-1.4 修: 让 user 选要写到哪个 workspace (而不是只看"当前工作区"暗箱).
+//   dialogSelectedWorkspaceId 默认 = 当前 active workspace; 多个 workspace 时可切换.
+//   global scope 时该 select 隐藏 (global 跟 workspace 无关).
+const dialogSelectedWorkspaceId = ref<string | null>(null);
+const globalDirPath = ref<string>('');                  // 缓存 getAgentDir() 结果 (高级区显示)
 const dialogFormEnv = ref('');                         // env 字段 (JSON object string, 高级区)
 const dialogFormTimeout = ref(30000);                 // 超时 (ms, 高级区)
 
@@ -66,9 +83,17 @@ function startCreate() {
   formCommand.value = 'node';
   formArgs.value = '';
   editingScope.value = 'workspace';
+  // 默认选当前 active workspace (user 可在下拉里改)
+  dialogSelectedWorkspaceId.value = sessionStore.activeWorkspaceId
+    || sessionStore.workspaces[0]?.id
+    || null;
   dialogFormEnv.value = '{}';
   dialogFormTimeout.value = 30000;
   isCreating.value = true;
+  // 异步加载 global dir path 给 UI 显示
+  if (!globalDirPath.value) {
+    piTauri.getAgentDir().then((p) => { globalDirPath.value = p; }).catch(() => { /* 忽略 */ });
+  }
 }
 
 function cancelCreate() {
@@ -99,7 +124,11 @@ async function saveCreate() {
       env,
       timeout: dialogFormTimeout.value || 30000,
     });
-    await mcpStore.write(editingScope.value, formName.value, body);
+    // v0.6.3-rc1 P2-1.4: 走 mcpStore.writeWithPath 传用户选中的 workspace / agent dir
+    //   (老的 write() 走 active workspace, 多个 ws 时 user 没切换入口 → 现在补上)
+    const wsPath = editingScope.value === 'workspace' ? dialogSelectedWsPath.value : null;
+    const agDir = editingScope.value === 'global' ? (globalDirPath.value || null) : null;
+    await mcpStore.writeWithPath(editingScope.value, formName.value, body, wsPath, agDir);
     toast.value = { type: 'ok', message: `已创建 ${formName.value}` };
     cancelCreate();
     await mcpStore.refresh();
@@ -117,6 +146,11 @@ async function startEdit(scope: McpServerScope, name: string) {
     editingScope.value = scope;
     editingName.value = name;
     editingBody.value = body;
+    // v0.6.3-rc1 P2-1.4: edit 模式下也设置 workspace id (用作显示, 但 disabled)
+    //   编辑时不允许改 scope / workspace, 想搬移请删除+新建
+    dialogSelectedWorkspaceId.value = sessionStore.activeWorkspaceId
+      || sessionStore.workspaces[0]?.id
+      || null;
     // 反解 body 到 form 字段
     try {
       const obj = JSON.parse(body);
@@ -133,6 +167,9 @@ async function startEdit(scope: McpServerScope, name: string) {
     }
     isCreating.value = true;  // 跟新建共用一个 dialog
     toast.value = null;
+    if (!globalDirPath.value) {
+      piTauri.getAgentDir().then((p) => { globalDirPath.value = p; }).catch(() => { /* 忽略 */ });
+    }
   } catch (e) {
     toast.value = { type: 'fail', message: e instanceof Error ? e.message : String(e) };
   }
@@ -156,7 +193,11 @@ async function saveEdit() {
       env,
       timeout: dialogFormTimeout.value || 30000,
     });
-    await mcpStore.write(editingScope.value, editingName.value, body);
+    // v0.6.3-rc1 P2-1.4: edit 模式 workspace/scope 锁住, 用原 editingScope 写入
+    //   (dialogSelectedWsPath 仍用作"显示这个 server 在哪个 ws", 写入路径用 editingScope 解析的 active)
+    const wsPath = editingScope.value === 'workspace' ? dialogSelectedWsPath.value : null;
+    const agDir = editingScope.value === 'global' ? (globalDirPath.value || null) : null;
+    await mcpStore.writeWithPath(editingScope.value, editingName.value, body, wsPath, agDir);
     toast.value = { type: 'ok', message: `已更新 ${editingName.value}` };
     cancelCreate();
     await mcpStore.refresh();
@@ -399,26 +440,56 @@ async function refreshAndShowPath() {
         <details class="pad-mcptab__advanced">
           <summary>高级</summary>
           <div class="pad-mcptab__advanced-body">
+            <!-- v0.6.3-rc1 P2-1.4: 目标选择 (workspace / global) + workspace 下拉
+                 解决 user 反馈"创建多个 workspace 时不知道放到哪个"的问题
+            -->
             <div class="pad-mcptab__form-row">
-              <label class="pad-mcptab__label-small">作用域</label>
-              <div class="pad-mcptab__radio-group pad-mcptab__radio-group--inline">
-                <label class="pad-mcptab__radio">
+              <label class="pad-mcptab__label-small">目标</label>
+              <div class="pad-mcptab__radio-group pad-mcptab__radio-group--stack">
+                <label class="pad-mcptab__radio pad-mcptab__radio--block">
                   <input
                     type="radio"
                     value="workspace"
                     v-model="editingScope"
                     :disabled="dialogMode === 'edit' || isSavingCreate"
                   />
-                  <span>workspace (当前工作区)</span>
+                  <div class="pad-mcptab__radio-content">
+                    <span class="pad-mcptab__radio-label">当前工作区</span>
+                    <!-- workspace 选择: 默认 = active, 多 ws 时可切换 -->
+                    <select
+                      v-model="dialogSelectedWorkspaceId"
+                      class="pad-mcptab__select"
+                      :disabled="dialogMode === 'edit' || editingScope !== 'workspace' || isSavingCreate || sessionStore.workspaces.length <= 1"
+                    >
+                      <option
+                        v-for="ws in sessionStore.workspaces"
+                        :key="ws.id"
+                        :value="ws.id"
+                      >
+                        {{ ws.name || ws.path.split(/[\\/]/).filter(Boolean).slice(-1)[0] }} — {{ ws.path }}
+                      </option>
+                    </select>
+                    <code v-if="editingScope === 'workspace' && dialogSelectedWsPath" class="pad-mcptab__path-hint">
+                      → 写到 <code>&lt;ws&gt;/.pi/mcp/&lt;name&gt;.json</code> = <code>{{ dialogSelectedWsPath }}\.pi\mcp\&lt;name&gt;.json</code>
+                    </code>
+                  </div>
                 </label>
-                <label class="pad-mcptab__radio">
+                <label class="pad-mcptab__radio pad-mcptab__radio--block">
                   <input
                     type="radio"
                     value="global"
                     v-model="editingScope"
                     :disabled="dialogMode === 'edit' || isSavingCreate"
                   />
-                  <span>global (跨工作区)</span>
+                  <div class="pad-mcptab__radio-content">
+                    <span class="pad-mcptab__radio-label">全局 (跨工作区)</span>
+                    <code v-if="globalDirPath" class="pad-mcptab__path-hint">
+                      → 写到 <code>{{ globalDirPath }}\mcp\&lt;name&gt;.json</code>
+                    </code>
+                    <code v-else class="pad-mcptab__path-hint pad-mcptab__path-hint--muted">
+                      (加载全局路径中...)
+                    </code>
+                  </div>
                 </label>
               </div>
             </div>
@@ -1111,6 +1182,79 @@ async function refreshAndShowPath() {
   font-style: normal;
   font-size: var(--pad-fs-11, 11px);
   margin-left: 2px;
+}
+
+/* v0.6.3-rc1 P2-1.4: stack radio (目标: workspace / global, 垂直堆叠) */
+.pad-mcptab__radio-group--stack {
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+}
+.pad-mcptab__radio--block {
+  align-items: flex-start;
+  padding: 8px 10px;
+  background: var(--pad-popover);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm);
+  cursor: pointer;
+}
+.pad-mcptab__radio--block:has(input:checked) {
+  border-color: var(--pad-accent);
+  background: color-mix(in srgb, var(--pad-accent) 6%, transparent);
+}
+.pad-mcptab__radio--block:has(input:disabled) {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.pad-mcptab__radio-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.pad-mcptab__radio-label {
+  font-size: var(--pad-fs-13, 13px);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-primary);
+}
+.pad-mcptab__path-hint {
+  font-size: var(--pad-fs-11, 11px);
+  color: var(--pad-fg-tertiary);
+  font-family: var(--pad-font-mono);
+  line-height: 1.5;
+  word-break: break-all;
+}
+.pad-mcptab__path-hint code {
+  background: var(--pad-muted);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: var(--pad-fs-10, 10px);
+}
+.pad-mcptab__path-hint--muted {
+  opacity: 0.6;
+  font-style: italic;
+}
+
+/* v0.6.3-rc1 P2-1.4: select (workspace 选择) */
+.pad-mcptab__select {
+  padding: 4px 8px;
+  background: var(--pad-popover);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm);
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-primary);
+  max-width: 100%;
+  cursor: pointer;
+}
+.pad-mcptab__select:focus {
+  outline: none;
+  border-color: var(--pad-accent);
+}
+.pad-mcptab__select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .pad-mcptab__item-cmd {
   display: flex;
