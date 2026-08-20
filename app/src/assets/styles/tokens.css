@@ -304,7 +304,9 @@
   --pad-primary-foreground: #0a0a0a;        /* 按钮上的文字 (深色, 因为按钮变浅) */
   --pad-secondary-foreground: #fafafa;
   --pad-muted-foreground: #a3a1aa;          /* 在 #171717 上 4.5:1+ */
-  --pad-accent-foreground: #fafafa;
+  /* Phase 8: dark 模式 --pad-accent (#fafafa 浅按钮) 上的文字应该是深色 (#0a0a0a)
+     跟 --pad-primary-foreground 一致. 之前 #fafafa 跟 bg 撞色, primary 按钮看着像白块. */
+  --pad-accent-foreground: #0a0a0a;
   --pad-destructive-foreground: #fafafa;
   --pad-fg-primary: #fafafa;
   --pad-fg-secondary: #c4c4c4;

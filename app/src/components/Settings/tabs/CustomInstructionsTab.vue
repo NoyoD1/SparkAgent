@@ -258,7 +258,7 @@ onMounted(() => {
 }
 .pad-instrtab__btn:hover:not(:disabled) { background: var(--pad-bg-hover); }
 .pad-instrtab__btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.pad-instrtab__btn--primary { background: var(--pad-accent, #6366f1); border-color: var(--pad-accent, #6366f1); color: var(--pad-fg-on-accent, #fff); }
+.pad-instrtab__btn--primary { background: var(--pad-accent, #6366f1); border-color: var(--pad-accent, #6366f1); color: var(--pad-accent-foreground); }
 .pad-instrtab__btn--primary:hover:not(:disabled) { opacity: 0.9; }
 .pad-instrtab__btn--danger { color: var(--pad-fg-danger, #dc2626); }
 .pad-instrtab__btn--danger:hover:not(:disabled) { background: var(--pad-bg-danger-soft, rgba(220,38,38,0.08)); }

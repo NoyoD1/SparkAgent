@@ -1468,7 +1468,7 @@ function onProviderAdded(id: string) {
 .pad-provider-detail__btn--primary {
   background: var(--pad-accent);
   border-color: var(--pad-accent);
-  color: var(--pad-fg-on-accent);
+  color: var(--pad-accent-foreground);
 }
 .pad-provider-detail__btn--primary:hover { opacity: 0.9; }
 .pad-provider-detail__btn--ghost { background: transparent; }

@@ -284,7 +284,7 @@ onMounted(() => {
 }
 .pad-slashtab__btn:hover:not(:disabled) { background: var(--pad-bg-hover); }
 .pad-slashtab__btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.pad-slashtab__btn--primary { background: var(--pad-accent, #6366f1); border-color: var(--pad-accent, #6366f1); color: var(--pad-fg-on-accent, #fff); }
+.pad-slashtab__btn--primary { background: var(--pad-accent, #6366f1); border-color: var(--pad-accent, #6366f1); color: var(--pad-accent-foreground); }
 .pad-slashtab__btn--primary:hover:not(:disabled) { opacity: 0.9; }
 .pad-slashtab__btn--danger { color: var(--pad-fg-danger, #dc2626); }
 .pad-slashtab__btn--danger:hover:not(:disabled) { background: var(--pad-bg-danger-soft, rgba(220,38,38,0.08)); }
