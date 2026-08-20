@@ -28,6 +28,10 @@ const apiKey = ref<string>('');
 const submitState = ref<'idle' | 'submitting' | 'ok' | 'fail'>('idle');
 const submitMessage = ref<string>('');
 
+// P0 #1: 测试连接 — 提交前的可选预检
+const testState = ref<'idle' | 'testing' | 'ok' | 'fail'>('idle');
+const testMessage = ref<string>('');
+
 const needsBaseUrl = computed(() =>
   PROVIDER_OPTIONS.find((o) => o.id === type.value)?.needsBaseUrl ?? false,
 );
@@ -94,6 +98,38 @@ async function submit() {
 
 function cancel() {
   emit('close');
+}
+
+/**
+ * P0 #1 fix: 测试连接. 直接传 apiKey 给 Tauri, 不污染 store/config (避免"测个连接就建个临时 provider" 又删).
+ * providerId 传一个虚拟的就行 (Tauri 这层在 apiKey 模式下不查 keychain).
+ */
+async function testConnection() {
+  if (needsBaseUrl.value && !baseUrl.value.trim()) {
+    testState.value = 'fail';
+    testMessage.value = 'openai-compatible 需要 baseUrl';
+    return;
+  }
+  if (!apiKey.value.trim()) {
+    testState.value = 'fail';
+    testMessage.value = '需要填 API Key';
+    return;
+  }
+  testState.value = 'testing';
+  testMessage.value = '测试中…';
+  try {
+    const result = await piTauri.verifyProviderConnection({
+      providerId: '__test__',  // Tauri 收到 apiKey 后不会查 keychain, 这个 id 仅占位
+      providerType: type.value,
+      baseUrl: needsBaseUrl.value ? baseUrl.value.trim() : '',
+      apiKey: apiKey.value.trim(),
+    });
+    testState.value = result.ok ? 'ok' : 'fail';
+    testMessage.value = result.message;
+  } catch (e) {
+    testState.value = 'fail';
+    testMessage.value = e instanceof Error ? e.message : String(e);
+  }
 }
 </script>
 
@@ -172,6 +208,25 @@ function cancel() {
     <div class="pad-addprov__foot">
       <Transition name="pad-addprov-fade">
         <div
+          v-if="testMessage"
+          class="pad-addprov__result"
+          :class="{
+            'is-ok': testState === 'ok',
+            'is-fail': testState === 'fail',
+            'is-submitting': testState === 'testing',
+          }"
+        >
+          <span class="pad-addprov__result-icon">
+            <Loader2 v-if="testState === 'testing'" :size="12" :stroke-width="1.75" class="is-spinning" />
+            <Check v-else-if="testState === 'ok'" :size="12" :stroke-width="2" />
+            <AlertCircle v-else :size="12" :stroke-width="1.75" />
+          </span>
+          <span class="pad-addprov__result-text">{{ testMessage }}</span>
+        </div>
+      </Transition>
+
+      <Transition name="pad-addprov-fade">
+        <div
           v-if="submitMessage"
           class="pad-addprov__result"
           :class="{
@@ -191,6 +246,15 @@ function cancel() {
 
       <div class="pad-addprov__foot-actions">
         <button class="pad-addprov__btn" type="button" @click="cancel">取消</button>
+        <button
+          class="pad-addprov__btn"
+          type="button"
+          :disabled="testState === 'testing' || submitState === 'submitting'"
+          @click="testConnection"
+        >
+          <Loader2 v-if="testState === 'testing'" :size="14" :stroke-width="1.75" class="is-spinning" />
+          <span v-else>测试连接</span>
+        </button>
         <button
           class="pad-addprov__btn pad-addprov__btn--primary"
           type="button"

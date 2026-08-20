@@ -617,6 +617,40 @@ class PiTauriClient {
   }
 
   /**
+   * P0 #1: "测试连接" 按钮. 验证 provider 配置是否可用.
+   * - openai-compatible: 实际调 <baseUrl>/models, 验 key + baseUrl
+   * - 内置 provider: 只验 keychain 里有 key, 实际 LLM 调通性在首次对话验证
+   *
+   * apiKey 可选: 传了就直接用 (避免 AddProviderForm 测连接时建临时 provider 污染 store);
+   * 不传从 keychain 拿 providerId 对应的 key.
+   */
+  async verifyProviderConnection(args: {
+    providerId: string;
+    providerType: string;
+    baseUrl: string;
+    apiKey?: string | null;
+  }): Promise<{
+    ok: boolean;
+    message: string;
+    modelCount: number | null;
+    latencyMs: number | null;
+    detail: string | null;
+  }> {
+    return (await invoke('verify_provider_connection', {
+      providerId: args.providerId,
+      providerType: args.providerType,
+      baseUrl: args.baseUrl,
+      apiKey: args.apiKey ?? null,
+    })) as {
+      ok: boolean;
+      message: string;
+      modelCount: number | null;
+      latencyMs: number | null;
+      detail: string | null;
+    };
+  }
+
+  /**
    * v0.3.5+ 默认工作区: 在 home dir 下创建 PiAgent/ 目录 (e.g. C:\Users\<user>\PiAgent).
    * 初始状态发消息时无 workspace → 调这个拿一个默认地址, 不弹 picker.
    * 用户仍可通过 sidebar / tab strip 的"本地"下拉手动选别处.
@@ -712,7 +746,7 @@ export interface AppProviderConfig {
   type: string;
   label: string;
   baseUrl?: string;
-  apiKeyEnv?: string;
+  // P2 #1 fix: 删 apiKeyEnv dead code 字段 (跟 stores/config.ts 同步, 字段全删)
   models: AppModelInfo[];
   activeModelId?: string;
   enabled: boolean;

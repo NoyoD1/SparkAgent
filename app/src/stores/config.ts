@@ -93,12 +93,9 @@ export interface ProviderConfig {
    */
   apiKey?: string;  // deprecated, will be stripped on load
   baseUrl?: string;
-  /**
-   * v0.2+: openai-compatible 专用. client 告诉 server "用 env 名字 X 拿 key".
-   * 例: 'MYPROXY_KEY' / 'SHANGTANG_KEY' / 'OPENAI_COMPATIBLE_KEY'.
-   * 内置 provider 忽略此字段.
-   */
-  apiKeyEnv?: string;
+  // P2 #1 fix: 删 apiKeyEnv dead code 字段. v0.2 设计是"openai-compatible 用 env 名取 key",
+  //   实际 BYOK 全部走 keychain, 整个字段没人读 (UI / sidecar / Rust DTO 全无引用).
+  //   保留 schema 字段反而是 tech debt, 后续开发看到会以为是 feature.
   models: ModelInfo[];
   activeModelId?: string;
   enabled: boolean;
@@ -150,12 +147,13 @@ export const BUILTIN_MODELS: Record<Exclude<ProviderType, 'openai-compatible'>, 
 
 // R2: provider id 改用 crypto.randomUUID() (128 bit 熵), 不再可猜
 // 老 id (timestamp 形式) 仍合法, 不会被破坏; 新 id 用 UUID v4
+// P2 #4 fix: 没 crypto.randomUUID 直接抛错, 不用低熵 fallback (Date.now + Math.random 可猜).
+//   现代 Tauri WebView2 / 浏览器都有 crypto.randomUUID, 跑不到 fallback 算代码 bug.
 function genId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
   }
-  // 极端 fallback: 旧实现, 不在现代浏览器/Tauri 走
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  throw new Error('[config] crypto.randomUUID 不可用 — 当前 runtime 太老或 polyfill 缺失, 不能生成安全 id');
 }
 
 export const useConfigStore = defineStore('config', () => {
@@ -267,11 +265,25 @@ export const useConfigStore = defineStore('config', () => {
     }
   }
 
-  // deep watch: 任一字段变 → persist
+  // P1 #4 fix: 500ms debounce, 避免连续改 metadata form / 多次 setActiveModel 触发连串写盘.
+  // 之前每个 watch 触发都立刻 saveAppConfig, 改 6 字段 form 写 6 次盘.
+  // 注意: load 流程 / migrateFromLocalStorage 仍走 persist() 直接调用, 不走 debounce (避免覆盖时序).
+  let persistDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  function schedulePersist() {
+    if (persistDebounceTimer !== null) {
+      clearTimeout(persistDebounceTimer);
+    }
+    persistDebounceTimer = setTimeout(() => {
+      persistDebounceTimer = null;
+      void persist();
+    }, 500);
+  }
+
+  // deep watch: 任一字段变 → debounce 500ms → persist
   watch(
     [providers, activeProviderId, thinkingLevel, permissionMode, perWorkspaceSessionId],
     () => {
-      void persist();
+      schedulePersist();
     },
     { deep: true },
   );
@@ -282,8 +294,16 @@ export const useConfigStore = defineStore('config', () => {
     type: ProviderType;
     label?: string;
     baseUrl?: string;
-    apiKeyEnv?: string;
+    /** P2 #2 fix: 内置 type 已配过, 允许覆盖 (例如用户误删想重建). 走 builtin UI 流程时 force=true. */
+    force?: boolean;
   }): ProviderConfig {
+    // P2 #2 fix: 防重复 type 拒绝 (内置 provider 配过就不让再加; openai-compatible 允许多个)
+    if (!input.force && input.type !== 'openai-compatible') {
+      const existing = providers.value.find((p) => p.type === input.type);
+      if (existing) {
+        throw new Error(`已存在 ${input.type} provider (label: ${existing.label}). 删除旧的后再加, 或在 builtin 流程用 force.`);
+      }
+    }
     const opt = PROVIDER_OPTIONS.find((o) => o.id === input.type);
     const defaultLabel = opt?.label ?? input.type;
     const provider: ProviderConfig = {
@@ -291,7 +311,6 @@ export const useConfigStore = defineStore('config', () => {
       type: input.type,
       label: input.label?.trim() || `${defaultLabel} #${providers.value.length + 1}`,
       baseUrl: input.baseUrl?.trim() || undefined,
-      apiKeyEnv: input.apiKeyEnv?.trim() || undefined,
       models: [],
       enabled: true,
       createdAt: new Date().toISOString(),

@@ -521,6 +521,7 @@ export const useChatStore = defineStore('chat', () => {
   // 之前: 硬编码 200K (跟主流 LLM 默认对齐, 但 user 配小模型时 context % 永远不触发压缩)
   // 现在: user 在 Settings → Provider tab 配 model.contextWindow 后, Composer 显示的
   //   "X.XK / YK" 跟压缩阈值都用 user 配的值.
+  // P2 #5 fix: 跟 sidecar/src/index.mjs 的 `mm.contextWindow ?? 200000` 对齐 (之前 128K vs 200K)
   const DEFAULT_CONTEXT_WINDOW = 200_000;
 
   function getContextTokens(sessionId: string): number {

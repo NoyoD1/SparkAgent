@@ -286,7 +286,10 @@ if (config.baseUrl) {
       // Pi SDK 0.84.2 input 字段: vision → ['text', 'image'], 默认 'text' only
       input: hasVision ? ['text', 'image'] : ['text'],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: mm.contextWindow ?? 128000,  // v0.4.4.6: user 配的上下文, 缺省 128K
+      // P2 #5 fix: 缺省 200K, 跟 FE stores/chat.ts 的 DEFAULT_CONTEXT_WINDOW 对齐 (现代 LLM 默认)
+      //   之前 sidecar 128K vs FE 200K 对不上, Composer 显示的 "X.XK / 200K" 跟 Pi SDK 内部用的
+      //   contextWindow 不一致 (侧车拿 128K 算百分比, FE 用 200K 算百分比), 视觉上混乱
+      contextWindow: mm.contextWindow ?? 200000,
       maxTokens: mm.maxOutput ?? 8192,           // v0.4.4.6: user 配的单次回复上限, 缺省 8K
       // Pi SDK reasoning: true 走 thinking mode (DeepSeek-R1 / Claude extended thinking)
       ...(mm.reasoning === true ? { reasoning: true } : {}),
@@ -378,9 +381,17 @@ intent across the session is still part of the conversation.
       // permissionMode === 'allow' 时不传 InlineExtension (Pi SDK 默认 tool 放行),
       //   但 appendSystemPromptOverride 仍要传 (Context awareness 是 model behavior 修正,
       //   跟 permission 无关).
-      extensionFactories: config.permissionMode === 'allow'
-        ? []
-        : [createPermissionExtension(config.permissionMode)],
+      // P1 #5: maxRounds extension 跟 permission 独立, mode=allow 也注册 (限制是 model 行为,
+      //   不是 user 行为). null 时 (maxRounds 没设) 自动跳过.
+      extensionFactories: (() => {
+        const factories = [];
+        const maxRoundsExt = createMaxRoundsExtension(mm.maxRounds);
+        if (maxRoundsExt) factories.push(maxRoundsExt);
+        if (config.permissionMode !== 'allow') {
+          factories.push(createPermissionExtension(config.permissionMode));
+        }
+        return factories;
+      })(),
       appendSystemPromptOverride: (base) => [
         ...base,
         CONTEXT_AWARENESS_INSTRUCTION,
@@ -521,6 +532,43 @@ function createPermissionExtension(permissionMode) {
         console.error(`[perm] confirm failed for ${toolName}:`, e instanceof Error ? e.message : String(e));
         return { block: true, reason: `Permission prompt failed: ${e instanceof Error ? e.message : String(e)}` };
       }
+    });
+  };
+}
+
+/**
+ * P1 #5: maxRounds Extension. 限制单次 user turn 内连续 tool call 数量.
+ *
+ * 工作流:
+ *   - turn_start: 重置 toolCallCount = 0
+ *   - tool_call: 计数 +1, 超过 maxRounds 就 block
+ *
+ * maxRounds 来源: config.modelMetadata.maxRounds (FE 配的 model metadata)
+ *   - undefined / 0 / 负数 → 不限制 (走 Pi SDK 默认)
+ *   - 正整数 → 限制
+ *
+ * 注意: maxRounds 是"连续 tool call 轮数", 跟"LLM thinking 步数"不完全等价 (一个 turn 里
+ *   LLM 可能多次调工具). 这里按"tool_call event 计数"实现, 跟 FE 字段语义对齐.
+ */
+function createMaxRoundsExtension(maxRounds) {
+  if (!maxRounds || maxRounds <= 0) {
+    return null;  // 不限制, 不注册 extension (空跑浪费)
+  }
+  let toolCallCount = 0;
+  return (pi) => {
+    pi.on('turn_start', () => {
+      toolCallCount = 0;
+    });
+    pi.on('tool_call', async (event, ctx) => {
+      toolCallCount++;
+      if (toolCallCount > maxRounds) {
+        console.error(`[maxRounds] BLOCK tool call #${toolCallCount} (limit=${maxRounds}) tool=${event.toolName}`);
+        return {
+          block: true,
+          reason: `Reached maxRounds limit (${maxRounds} continuous tool calls per user turn). If you need more iterations, ask the user for guidance or break the task into smaller steps.`,
+        };
+      }
+      return undefined;
     });
   };
 }

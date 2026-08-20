@@ -24,7 +24,9 @@ import {
 } from '@/stores/config';
 import { fetchProviderModels } from '@/lib/providers-api';
 import { piTauri } from '@/lib/tauri';
+import { useSessionStore } from '@/stores/session';
 import AddProviderForm from './AddProviderForm.vue';
+import ConfirmDialog from '@/components/Common/ConfirmDialog.vue';
 
 const config = useConfigStore();
 
@@ -49,8 +51,57 @@ const keyMessage = ref<string>('');
 const newKeyInput = ref<string>('');
 const newModelInput = ref<string>('');
 
+// P0 #1: 测试连接 (现有 provider 详情面板, 不动 key 也能测)
+const testState = ref<'idle' | 'testing' | 'ok' | 'fail'>('idle');
+const testMessage = ref<string>('');
+
+// P1 #1: ConfirmDialog 状态 (替代 window.confirm/alert, 统一风格)
+const confirmState = ref<{
+  open: boolean;
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  danger: boolean;
+  onConfirm: (() => void) | null;
+  onCancel: (() => void) | null;
+}>({
+  open: false,
+  title: '',
+  message: '',
+  confirmLabel: '确定',
+  cancelLabel: '取消',
+  danger: false,
+  onConfirm: null,
+  onCancel: null,
+});
+
+/** P1 #1: 显示 confirm 弹窗. 返回 Promise<boolean>. */
+function showConfirm(opts: {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  danger?: boolean;
+}): Promise<boolean> {
+  return new Promise((resolve) => {
+    confirmState.value = {
+      open: true,
+      title: opts.title,
+      message: opts.message,
+      confirmLabel: opts.confirmLabel ?? '确定',
+      cancelLabel: opts.cancelLabel ?? '取消',
+      danger: opts.danger ?? false,
+      onConfirm: () => resolve(true),
+      onCancel: () => resolve(false),
+    };
+  });
+}
+
 // v0.4.4.6: model metadata form (per-model 配置 5 字段: type / vision / contextWindow / maxOutput / maxRounds / reasoning)
 const editingMetadataModelId = ref<string | null>(null);
+// P1 #2: 校验 metadata 数字字段 (提前定义, cancelMetadataForm 引用)
+const metadataFormError = ref<string>('');
 const metadataForm = ref<{
   type: 'chat' | 'image' | 'video' | 'audio' | 'embedding';
   vision: boolean;
@@ -81,9 +132,45 @@ function openMetadataForm(model: ModelInfo) {
 }
 function cancelMetadataForm() {
   editingMetadataModelId.value = null;
+  metadataFormError.value = '';
 }
+
+/** P1 #2: 校验 metadata form 当前值, 返回第一个错误信息 (空 = 通过) */
+function validateMetadataForm(): string {
+  const f = metadataForm.value;
+  if (f.contextWindow !== null && (!Number.isFinite(f.contextWindow) || f.contextWindow <= 0)) {
+    return 'contextWindow 必须 > 0 (单位: tokens)';
+  }
+  if (f.maxOutput !== null && (!Number.isFinite(f.maxOutput) || f.maxOutput <= 0)) {
+    return 'maxOutput 必须 > 0 (单位: tokens)';
+  }
+  if (f.maxRounds !== null && (!Number.isFinite(f.maxRounds) || f.maxRounds < 1)) {
+    return 'maxRounds 必须 ≥ 1 (最大连续 tool call 轮数)';
+  }
+  if (f.contextWindow !== null && f.contextWindow > 10_000_000) {
+    return 'contextWindow 太大 (上限 10M tokens)';
+  }
+  if (f.maxOutput !== null && f.maxOutput > 1_000_000) {
+    return 'maxOutput 太大 (上限 1M tokens)';
+  }
+  if (f.maxRounds !== null && f.maxRounds > 100) {
+    return 'maxRounds 太大 (上限 100 轮)';
+  }
+  // 关系校验: contextWindow ≥ maxOutput
+  if (f.contextWindow !== null && f.maxOutput !== null && f.contextWindow < f.maxOutput) {
+    return `contextWindow (${f.contextWindow}) 不能小于 maxOutput (${f.maxOutput})`;
+  }
+  return '';
+}
+
 function saveMetadata(modelId: string) {
   if (!selectedProvider.value) return;
+  const err = validateMetadataForm();
+  if (err) {
+    metadataFormError.value = err;
+    return;
+  }
+  metadataFormError.value = '';
   config.updateModelMetadata(selectedProvider.value.id, modelId, {
     type: metadataForm.value.type,
     vision: metadataForm.value.vision,
@@ -180,6 +267,8 @@ function resetForms() {
   keyMessage.value = '';
   newKeyInput.value = '';
   newModelInput.value = '';
+  testState.value = 'idle';
+  testMessage.value = '';
 }
 
 onMounted(async () => {
@@ -260,7 +349,14 @@ async function saveKey() {
 
 async function deleteKey() {
   if (!selectedProvider.value) return;
-  if (!confirm(`从 OS keychain 删除 ${selectedProvider.value.label} 的 API key?`)) return;
+  // P1 #1: 用 ConfirmDialog 替代 window.confirm
+  const ok = await showConfirm({
+    title: '删除 API key',
+    message: `从 OS keychain 删除 ${selectedProvider.value.label} 的 API key? (provider 配置会保留, 只是断开 key)`,
+    confirmLabel: '删除',
+    danger: true,
+  });
+  if (!ok) return;
   keyState.value = 'deleting';
   keyMessage.value = '删 keychain…';
   try {
@@ -275,14 +371,94 @@ async function deleteKey() {
   }
 }
 
-function removeProvider(provider: ProviderConfig) {
-  // v0.5.0-PR2: 删的如果是当前 active, 提示 user input box 会回退
-  if (provider.id === config.activeProviderId) {
-    if (!confirm(`"${provider.label}" 是当前正在使用的 provider, 确定删除? 删除后 input box 会回退到第一个可用的 provider.`)) return;
-  } else {
-    if (!confirm(`确定删除 "${provider.label}"? 会清除这个 provider 的本地 config + keychain 里的 key.`)) return;
+async function testConnection() {
+  if (!selectedProvider.value) return;
+  const p = selectedProvider.value;
+  const status = keyStatus.value[p.id];
+  if (!status?.configured) {
+    testState.value = 'fail';
+    testMessage.value = '需要先配 key (存到 keychain)';
+    return;
   }
-  piTauri.deleteApiKey(provider.id).catch(() => {});
+  testState.value = 'testing';
+  testMessage.value = '测试中…';
+  try {
+    const result = await piTauri.verifyProviderConnection({
+      providerId: p.id,
+      providerType: p.type,
+      baseUrl: p.baseUrl ?? '',
+    });
+    testState.value = result.ok ? 'ok' : 'fail';
+    testMessage.value = result.message;
+  } catch (e) {
+    testState.value = 'fail';
+    testMessage.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function removeProvider(provider: ProviderConfig) {
+  // v0.5.0-PR2: 删的如果是当前 active, 提示 user input box 会回退
+  // P0 #4 fix: 删 active 之前, 先算 fallback. 如果 fallback 不可用 (没 key / 没选 model),
+  //   阻止删除并提示 user 先配置 fallback, 避免删完啥也发不出去.
+  // P1 #1: 用 ConfirmDialog 替代 window.confirm/alert
+  if (provider.id === config.activeProviderId) {
+    const remaining = config.providers.filter((p) => p.id !== provider.id);
+    if (remaining.length === 0) {
+      const ok = await showConfirm({
+        title: '删除最后一个 provider',
+        message: `"${provider.label}" 是当前正在使用的 provider, 也是唯一一个. 删除后将没有任何 active provider, 需要重新配置后才能发消息. 继续?`,
+        confirmLabel: '仍然删除',
+        danger: true,
+      });
+      if (!ok) return;
+    } else {
+      const fallback = remaining[0];
+      const fallbackKeyOk = keyStatus.value[fallback.id]?.configured === true;
+      const fallbackModelOk = !!fallback.activeModelId;
+      if (!fallbackKeyOk || !fallbackModelOk) {
+        const reasons: string[] = [];
+        if (!fallbackKeyOk) reasons.push('未配置 API key');
+        if (!fallbackModelOk) reasons.push('未选择 active model');
+        await showConfirm({
+          title: '无法删除',
+          message: `删除 "${provider.label}" 后会 fallback 到 "${fallback.label}", 但它${reasons.join('、')}, 会导致发不出消息.\n\n请先配置好 fallback 再删.`,
+          confirmLabel: '我知道了',
+          cancelLabel: '',
+          danger: true,
+        });
+        return;
+      }
+      const ok = await showConfirm({
+        title: '删除当前 provider',
+        message: `"${provider.label}" 是当前正在使用的 provider, 确定删除? 删除后 input box 会回退到 "${fallback.label}".`,
+        confirmLabel: '删除',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+  } else {
+    const ok = await showConfirm({
+      title: '删除 provider',
+      message: `确定删除 "${provider.label}"? 会清除这个 provider 的本地 config + keychain 里的 key.`,
+      confirmLabel: '删除',
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  // P1 #6 fix: 顺序改为先删 keychain, 成功后再删 config, 失败回滚提示 user
+  try {
+    await piTauri.deleteApiKey(provider.id);
+  } catch (e) {
+    console.error('[ProviderTab] deleteApiKey failed:', e);
+    await showConfirm({
+      title: '删除 keychain 失败',
+      message: `从 OS keychain 删除 API key 失败: ${e instanceof Error ? e.message : String(e)}\n\nprovider 配置已保留, keychain 里的 key 可能成孤儿. 请去系统凭据管理器手动清理.`,
+      confirmLabel: '我知道了',
+      cancelLabel: '',
+      danger: true,
+    });
+    return;
+  }
   config.removeProvider(provider.id);
   void refreshAllKeyStatus();
   // 选回这个 type 对应的 builtin (新建或重选)
@@ -301,9 +477,11 @@ function addCustomModel() {
   if (!selectedProvider.value) return;
   const id = newModelInput.value.trim();
   if (!id) return;
+  // P2 #3 fix: 重复 id 提示, 不再静默吞. 之前用户加重复 model 不知道是没加成功还是已经在了.
   const existing = selectedProvider.value.models.find((m) => m.id === id);
   if (existing) {
-    newModelInput.value = '';
+    fetchState.value = 'fail';
+    fetchMessage.value = `model "${id}" 已存在, 不用重复加`;
     return;
   }
   config.setProviderModels(selectedProvider.value.id, [
@@ -315,12 +493,19 @@ function addCustomModel() {
   fetchMessage.value = `已添加 model ${id}`;
 }
 
-function removeModel(modelId: string) {
+async function removeModel(modelId: string) {
   if (!selectedProvider.value) return;
   const p = selectedProvider.value;
   // v0.5.0-PR2: 删的如果是当前 active, 提示 user — setProviderModels 会自动清 activeModelId, 下次 send 会用第一个 enabled
   if (p.id === config.activeProviderId && p.activeModelId === modelId) {
-    if (!confirm(`"${modelId}" 是当前正在使用的 model, 确定删除? 删除后下次发送会自动用这个 provider 的第一个 enabled model.`)) return;
+    // P1 #1: 用 ConfirmDialog 替代 window.confirm
+    const ok = await showConfirm({
+      title: '删除当前 model',
+      message: `"${modelId}" 是当前正在使用的 model, 确定删除? 删除后下次发送会自动用这个 provider 的第一个 enabled model.`,
+      confirmLabel: '删除',
+      danger: true,
+    });
+    if (!ok) return;
   }
   const next = p.models.filter((m) => m.id !== modelId);
   config.setProviderModels(p.id, next);
@@ -362,6 +547,15 @@ async function fetchModels(provider: ProviderConfig) {
 
 function setThinking(level: 'off' | 'low' | 'medium' | 'high') {
   config.setThinkingLevel(level);
+  // P0 #2 fix: 实时同步到运行中的 sidecar (通过 Pi SDK RpcCommand set_thinking_level).
+  // 之前只在 session 创建时传一次, 中途切只对下一轮生效.
+  const sessionStore = useSessionStore();
+  const sid = sessionStore.activeSessionId;
+  if (sid) {
+    piTauri.sendRpcCommand(sid, { type: 'set_thinking_level', level }).catch((e) => {
+      console.warn('[ProviderTab] set_thinking_level RpcCommand 发送失败 (忽略, 下轮 prompt 会用新值):', e);
+    });
+  }
 }
 
 function openAddCustom() {
@@ -539,8 +733,8 @@ function onProviderAdded(id: string) {
               <input
                 class="pad-provider-detail__input pad-provider-detail__input--inline"
                 type="text"
-                :value="selectedProvider.label"
-                @input="config.updateProvider(selectedProvider.id, { label: ($event.target as HTMLInputElement).value })"
+                :value="selectedProvider!.label"
+                @input="config.updateProvider(selectedProvider!.id, { label: ($event.target as HTMLInputElement).value })"
               />
               <p class="pad-provider-detail__head-sub">
                 {{ builtinOptions.find((o) => o.id === selectedProvider!.type)?.label ?? '自定义' }}
@@ -557,9 +751,9 @@ function onProviderAdded(id: string) {
             <input
               class="pad-provider-detail__input"
               type="text"
-              :value="selectedProvider.baseUrl ?? ''"
+              :value="selectedProvider!.baseUrl ?? ''"
               placeholder="https://your-proxy.com/v1"
-              @input="config.updateProvider(selectedProvider.id, { baseUrl: ($event.target as HTMLInputElement).value })"
+              @input="config.updateProvider(selectedProvider!.id, { baseUrl: ($event.target as HTMLInputElement).value })"
             />
           </div>
 
@@ -604,18 +798,47 @@ function onProviderAdded(id: string) {
             <p v-if="keyMessage" class="pad-provider-detail__hint" :class="{ 'is-err': keyState === 'idle' && keyMessage.includes('不能') }">
               {{ keyMessage }}
             </p>
+
+            <!-- P0 #1: 测试连接 (keychain 配好 key 后才能测) -->
+            <div v-if="currentKeyStatus?.configured" class="pad-provider-detail__row" style="margin-top: 8px;">
+              <div class="pad-provider-detail__row-label">
+                <span>连通性</span>
+                <span class="pad-provider-detail__hint">
+                  <template v-if="selectedProvider!.type === 'openai-compatible'">真实 HTTP 测试 ({{ selectedProvider!.baseUrl || 'no baseUrl' }})</template>
+                  <template v-else>keychain 验证 (内置 provider 首次对话时验通)</template>
+                </span>
+              </div>
+              <div class="pad-provider-detail__key-form">
+                <button
+                  class="pad-provider-detail__btn pad-provider-detail__btn--small"
+                  type="button"
+                  :disabled="testState === 'testing'"
+                  @click="testConnection"
+                >
+                  <span v-if="testState === 'testing'">测试中…</span>
+                  <span v-else>测试连接</span>
+                </button>
+              </div>
+              <p
+                v-if="testMessage"
+                class="pad-provider-detail__hint"
+                :class="{ 'is-err': testState === 'fail', 'is-ok': testState === 'ok' }"
+              >
+                {{ testMessage }}
+              </p>
+            </div>
           </div>
 
           <!-- Models -->
           <div class="pad-provider-detail__section">
             <div class="pad-provider-detail__section-head">
-              <span class="pad-provider-detail__section-title">模型 ({{ selectedProvider.models.length }})</span>
+              <span class="pad-provider-detail__section-title">模型 ({{ selectedProvider!.models.length }})</span>
               <button
                 v-if="isOpenAICompatible"
                 class="pad-provider-detail__iconbtn"
                 :disabled="fetchState === 'fetching'"
                 title="从 provider 拉取模型"
-                @click="fetchModels(selectedProvider)"
+                @click="fetchModels(selectedProvider!)"
               >
                 <RefreshCw :size="14" :stroke-width="1.75" :class="{ 'is-spinning': fetchState === 'fetching' }" />
                 <span>拉取</span>
@@ -641,15 +864,15 @@ function onProviderAdded(id: string) {
               </button>
             </div>
 
-            <div v-if="selectedProvider.models.length === 0" class="pad-provider-detail__models-empty">
+            <div v-if="selectedProvider!.models.length === 0" class="pad-provider-detail__models-empty">
               还没模型. {{ isOpenAICompatible ? '点"拉取" 或手输 model id.' : '从下方预填列表选, 或手输 id.' }}
             </div>
             <div v-else class="pad-provider-detail__models">
-              <template v-for="m in selectedProvider.models" :key="m.id">
+              <template v-for="m in selectedProvider!.models" :key="m.id">
                 <label
                   class="pad-provider-detail__model"
                   :class="{
-                    'is-current': config.activeProviderId === selectedProvider.id && config.activeProvider?.activeModelId === m.id,
+                    'is-current': config.activeProviderId === selectedProvider!.id && config.activeProvider?.activeModelId === m.id,
                     'is-disabled': !isModelEnabled(m),
                   }"
                 >
@@ -657,7 +880,7 @@ function onProviderAdded(id: string) {
                     type="checkbox"
                     class="pad-provider-detail__model-toggle"
                     :checked="isModelEnabled(m)"
-                    @change="config.toggleModelEnabled(selectedProvider.id, m.id)"
+                    @change="config.toggleModelEnabled(selectedProvider!.id, m.id)"
                   />
                   <div class="pad-provider-detail__model-body">
                     <div class="pad-provider-detail__model-id">{{ m.id }}</div>
@@ -674,7 +897,7 @@ function onProviderAdded(id: string) {
                   </div>
                   <!-- v0.5.0-PR2: current 标识 (只读, 跟 input box 同步 — 全局 activeProviderId + activeModelId 决定的) -->
                   <span
-                    v-if="config.activeProviderId === selectedProvider.id && config.activeProvider?.activeModelId === m.id"
+                    v-if="config.activeProviderId === selectedProvider!.id && config.activeProvider?.activeModelId === m.id"
                     class="pad-provider-detail__model-current-tag"
                     title="当前正在 input box 使用的 model (在 chat 输入框点其他 model 即可切换)"
                   >current</span>
@@ -729,6 +952,13 @@ function onProviderAdded(id: string) {
                     <label class="pad-provider-detail__form-label">持续回复轮数上限 (tool call 最多 N 轮)</label>
                     <input v-model.number="metadataForm.maxRounds" type="number" min="0" step="1" class="pad-provider-detail__form-input" placeholder="不设" />
                   </div>
+                  <p
+                    v-if="metadataFormError"
+                    class="pad-provider-detail__hint is-err"
+                    style="margin-top: 6px;"
+                  >
+                    {{ metadataFormError }}
+                  </p>
                   <div class="pad-provider-detail__form-actions">
                     <button class="pad-provider-detail__btn pad-provider-detail__btn--ghost" type="button" @click="cancelMetadataForm">取消</button>
                     <button class="pad-provider-detail__btn pad-provider-detail__btn--primary" type="button" @click="saveMetadata(m.id)">保存 metadata</button>
@@ -757,7 +987,7 @@ function onProviderAdded(id: string) {
             <!-- v0.5.0-PR2: 详情面板只管 enabled, current active 完全归 input box 管 — 删 "设为当前" 按钮 -->
             <button
               class="pad-provider-detail__btn pad-provider-detail__btn--danger"
-              @click="removeProvider(selectedProvider)"
+              @click="removeProvider(selectedProvider!)"
             >
               <Trash2 :size="14" :stroke-width="1.75" /> 删除
             </button>
@@ -779,6 +1009,19 @@ function onProviderAdded(id: string) {
         </div>
       </div>
     </div>
+
+    <!-- P1 #1: ConfirmDialog (替代 window.confirm/alert, 统一风格) — 放在 v-if 链外, 不打断 v-else-if 邻接 -->
+    <ConfirmDialog
+      :open="confirmState.open"
+      :title="confirmState.title"
+      :message="confirmState.message"
+      :confirm-label="confirmState.confirmLabel"
+      :cancel-label="confirmState.cancelLabel"
+      :danger="confirmState.danger"
+      @update:open="(v) => { if (!v && confirmState.onCancel) confirmState.onCancel(); confirmState.open = v; }"
+      @confirm="() => { if (confirmState.onConfirm) confirmState.onConfirm(); }"
+      @cancel="() => { if (confirmState.onCancel) confirmState.onCancel(); }"
+    />
   </div>
 </template>
 

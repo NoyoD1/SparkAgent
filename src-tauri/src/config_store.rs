@@ -58,8 +58,8 @@ pub struct ProviderConfigDto {
     pub label: String,
     #[serde(default)]
     pub base_url: Option<String>,
-    #[serde(default)]
-    pub api_key_env: Option<String>,
+    // P2 #1 fix: 删 api_key_env dead code. 旧 v0.2 设计字段, 实际没人用, 保留会误导后续开发.
+    //   注: 旧 config.json 里这个字段会被 serde silently drop (unknown field), 数据不会丢但也没意义.
     #[serde(default)]
     pub models: Vec<ModelInfoDto>,
     #[serde(default)]

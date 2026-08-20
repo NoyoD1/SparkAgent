@@ -1282,6 +1282,21 @@ pub struct ModelInfoDto {
     pub label: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyConnectionResult {
+    /// true = 连接/key 看起来 OK (实际 LLM 调通性以首次对话为准)
+    pub ok: bool,
+    /// 用户可见的简短状态 (e.g. "✓ 通了, 拿到 12 个 model" / "✗ 401 Unauthorized, key 无效")
+    pub message: String,
+    /// openai-compatible 时返回 /models 拉到的 model 数, 其它为 None
+    pub model_count: Option<u32>,
+    /// HTTP 延迟 ms (openai-compatible), 其它为 None
+    pub latency_ms: Option<u32>,
+    /// 详细原始错误 (ok=false 时), 方便 debug
+    pub detail: Option<String>,
+}
+
 #[tauri::command]
 async fn fetch_provider_models(
     provider_id: String,
@@ -1318,6 +1333,136 @@ async fn fetch_provider_models(
     .map_err(|e| format!("join: {e}"))??;
 
     Ok(models)
+}
+
+/// P0 #1 fix: "测试连接" 按钮. 区分 provider 类型:
+/// - openai-compatible: 真实 HTTP 调 <baseUrl>/models, 验 key + baseUrl + 返回 model 数
+/// - 内置 provider (anthropic/openai/etc): 只验 keychain 里有 key (非空). 实际 LLM 调通性
+///   由首次对话验证 (内置 provider 走 Pi SDK 内置端点, Tauri 这层不知道 URL, 不假装测).
+///
+/// `api_key` 可选: 传了就直接用 (避免 AddProviderForm 测连接时建临时 provider 污染 store);
+/// 不传就从 keychain 拿 providerId 对应的 key.
+#[tauri::command]
+async fn verify_provider_connection(
+    provider_id: String,
+    provider_type: String,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<VerifyConnectionResult, String> {
+    let api_key = match api_key {
+        Some(k) if !k.trim().is_empty() => k,
+        _ => match keyring::get(&provider_id)? {
+            Some(k) => k,
+            None => {
+                return Ok(VerifyConnectionResult {
+                    ok: false,
+                    message: "未找到 keychain 里的 API key, 请先保存".to_string(),
+                    model_count: None,
+                    latency_ms: None,
+                    detail: Some(format!("keyring::get({provider_id}) returned None")),
+                });
+            }
+        },
+    };
+
+    if api_key.trim().is_empty() {
+        return Ok(VerifyConnectionResult {
+            ok: false,
+            message: "API key 为空, 请重新填".to_string(),
+            model_count: None,
+            latency_ms: None,
+            detail: None,
+        });
+    }
+
+    if provider_type == "openai-compatible" {
+        if base_url.trim().is_empty() {
+            return Ok(VerifyConnectionResult {
+                ok: false,
+                message: "openai-compatible 必须填 baseUrl".to_string(),
+                model_count: None,
+                latency_ms: None,
+                detail: None,
+            });
+        }
+        let clean_base = base_url.trim_end_matches('/');
+        let url = format!("{clean_base}/models");
+        let url_clone = url.clone();
+        let api_key_clone = api_key.clone();
+        // 用 spawn_blocking 包 ureq 同步 HTTP, 跟 fetch_provider_models 一致
+        let res = tokio::task::spawn_blocking(move || -> Result<(u32, u32, String), String> {
+            let start = std::time::Instant::now();
+            let resp = ureq::get(&url_clone)
+                .set("Authorization", &format!("Bearer {api_key_clone}"))
+                .timeout(std::time::Duration::from_secs(15))
+                .call();
+            let latency = start.elapsed().as_millis() as u32;
+            match resp {
+                Ok(r) => {
+                    let status = r.status() as u32;
+                    let body_text = r.into_string().unwrap_or_default();
+                    Ok((status, latency, body_text))
+                }
+                Err(ureq::Error::Status(status, response)) => {
+                    let body = response.into_string().unwrap_or_default();
+                    Err(format!("HTTP {status}: {body}"))
+                }
+                Err(e) => Err(format!("network error: {e}")),
+            }
+        })
+        .await
+        .map_err(|e| format!("join: {e}"))?;
+
+        match res {
+            Ok((status, latency, body)) => {
+                if !(200..300).contains(&status) {
+                    return Ok(VerifyConnectionResult {
+                        ok: false,
+                        message: format!("HTTP {status} (key 错或 baseUrl 错?)"),
+                        model_count: None,
+                        latency_ms: Some(latency),
+                        detail: Some(body.chars().take(500).collect()),
+                    });
+                }
+                // 尝试解析 .data 数组拿 model 数
+                let model_count = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("data").and_then(|d| d.as_array()).map(|a| a.len() as u32));
+                let msg = if let Some(n) = model_count {
+                    if n > 0 {
+                        format!("✓ 通了, 拿到 {n} 个 model (HTTP {status}, {latency}ms)")
+                    } else {
+                        format!("✓ 连通 (HTTP {status}, {latency}ms), 但返回 0 个 model")
+                    }
+                } else {
+                    format!("✓ 连通 (HTTP {status}, {latency}ms), 但响应格式不像 OpenAI /models")
+                };
+                Ok(VerifyConnectionResult {
+                    ok: true,
+                    message: msg,
+                    model_count,
+                    latency_ms: Some(latency),
+                    detail: None,
+                })
+            }
+            Err(e) => Ok(VerifyConnectionResult {
+                ok: false,
+                message: format!("✗ 连不上: {e}"),
+                model_count: None,
+                latency_ms: None,
+                detail: Some(e),
+            }),
+        }
+    } else {
+        // 内置 provider: 走 Pi SDK 内置端点, Tauri 这层没法独立测, 只验 keychain 存在
+        Ok(VerifyConnectionResult {
+            ok: true,
+            message: format!("✓ Key 已存 ({} 字符), 实际连通性会在首次对话时验证", api_key.len()),
+            model_count: None,
+            latency_ms: None,
+            detail: Some("built-in provider: Pi SDK 内置端点, 不在 Tauri 这层做 HTTP 测试".to_string()),
+        })
+    }
 }
 
 #[tauri::command]
@@ -1453,6 +1598,7 @@ pub fn run() {
             compact_session,  // Bug #2 修 (2026-08-18): 独立 compact invoke
             kill_sidecar,  // v0.4.6 修 (2026-08-18): abort 兜底时 force kill 旧 sidecar
             fetch_provider_models,
+            verify_provider_connection,  // P0 #1: 测试连接按钮
             migrate_from_env,
             ensure_default_workspace,
             load_app_config,

@@ -19,12 +19,7 @@ export type ClientToServer =
       thinkingLevel: ThinkingLevel;
       /** OpenAI-compatible custom baseUrl (Phase 3+ LLM 调支持). 内置 provider 不需要. */
       baseUrl?: string;
-      /**
-       * v0.2+: openai-compatible 专用, server 从 process.env[apiKeyEnv] 读 key.
-       * 传的是 env 变量名 (不是 key 本身), 比如 'MYPROXY_KEY'.
-       * 内置 provider 走固定 ${PROVIDER}_API_KEY 约定, 忽略此字段.
-       */
-      apiKeyEnv?: string;
+      // P2 #1 fix: 删 apiKeyEnv dead code. 旧 v0.2 设计, 实际 BYOK 全走 keychain, 字段没人用.
     }
   | { type: 'prompt'; sessionId: string; content: string };
 
