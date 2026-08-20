@@ -462,7 +462,11 @@ intent across the session is still part of the conversation.
   }
 
   // 4) tools: 7 内置 (read/bash/edit/write/grep/find/ls), 跟 v0.4.2 step 1 一致
-  const tools = config.tools ?? ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'];
+  // 2026-08-21 P2-1 fix: 把 customTools 的名字也加进 tools 白名单
+  //   Pi SDK 0.84.2 isAllowedTool (agent-session.ts:2468) 只允许在 tools 数组里的工具,
+  //   customTools 不在白名单会被静默过滤掉 → LLM 看不到 MCP/user tool.
+  //   修法: 拼一个 toolsAll = builtin + customTools 名字, 传给 Pi SDK.
+  const builtinTools = config.tools ?? ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'];
 
   // 2026-08-20 P1-5: 加载 user-defined tools (从 builtin 派生的 args 预设模板).
   //   跟 builtin 7 个一起 merge 到 Pi SDK customTools, LLM 可见的 tools list = builtin + user.
@@ -503,14 +507,20 @@ intent across the session is still part of the conversation.
     console.error(`[sidecar] total customTools: ${allCustomTools.length} (user=${userTools.length}, mcp=${mcpCustomTools.length})`);
   }
 
-  console.error(`[sidecar] creating agent session: model=${model.provider}/${model.id} thinking=${config.thinkingLevel ?? 'medium'} tools=${tools.join(',')} userTools=${userTools.length} mcpTools=${mcpCustomTools.length} permissionMode=${config.permissionMode ?? 'ask'}`);
+  // 2026-08-21 P2-1 fix: tools 白名单合并 builtin + customTools 名字.
+  //   Pi SDK 0.84.2 isAllowedTool (agent-session.ts:2468) 只放行 tools 数组里有的工具名,
+  //   customTools 不在白名单会被静默过滤掉. 这里把 customTools.name 也加进白名单,
+  //   LLM 才会真正看到 mcp_*/user_* 工具.
+  const allTools = [...builtinTools, ...allCustomTools.map((t) => t.name)];
+
+  console.error(`[sidecar] creating agent session: model=${model.provider}/${model.id} thinking=${config.thinkingLevel ?? 'medium'} tools=${allTools.join(',')} userTools=${userTools.length} mcpTools=${mcpCustomTools.length} permissionMode=${config.permissionMode ?? 'ask'}`);
 
   return createAgentSessionFromServices({
     services,
     sessionManager: sm,
     model,
     thinkingLevel: config.thinkingLevel,
-    tools,
+    tools: allTools,
     customTools: allCustomTools.length > 0 ? allCustomTools : undefined,
   });
 };
