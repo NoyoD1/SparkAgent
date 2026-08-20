@@ -284,8 +284,19 @@ onMounted(() => {
 }
 .pad-slashtab__btn:hover:not(:disabled) { background: var(--pad-bg-hover); }
 .pad-slashtab__btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.pad-slashtab__btn--primary { background: var(--pad-accent, #6366f1); border-color: var(--pad-accent, #6366f1); color: var(--pad-accent-foreground); }
-.pad-slashtab__btn--primary:hover:not(:disabled) { opacity: 0.9; }
+/* Phase 8c: primary 按钮改成跟 Skills "添加自定义" 一样 — secondary 风格
+   (card bg + border + secondary text), hover 升级到 primary text + accent border.
+   之前用 var(--pad-accent) 填充, light 下 #18181b 深色 bg 配 #fafafa/var(--pad-fg-900) 撞色难看. */
+.pad-slashtab__btn--primary {
+  background: var(--pad-card);
+  border-color: var(--pad-border);
+  color: var(--pad-fg-secondary);
+}
+.pad-slashtab__btn--primary:hover:not(:disabled) {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
+  border-color: var(--pad-accent, #6366f1);
+}
 .pad-slashtab__btn--danger { color: var(--pad-fg-danger, #dc2626); }
 .pad-slashtab__btn--danger:hover:not(:disabled) { background: var(--pad-bg-danger-soft, rgba(220,38,38,0.08)); }
 .pad-slashtab__form {

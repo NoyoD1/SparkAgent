@@ -70,7 +70,10 @@
   --pad-primary-foreground: var(--pad-fg-50);
   --pad-secondary-foreground: var(--pad-fg-900);
   --pad-muted-foreground: var(--pad-fg-600);
-  --pad-accent-foreground: var(--pad-fg-900);
+  /* Phase 8c: light 模式 --pad-accent (#18181b 深近黑) 上的文字应该是浅色 (#fafafa)
+     跟 dark 模式 --pad-accent (#fafafa 浅) 上的文字是深色 (#0a0a0a) 对称.
+     之前用 var(--pad-fg-900) = #0a0a0a, light 下深字深底撞色看不见. */
+  --pad-accent-foreground: var(--pad-fg-50);
   --pad-destructive-foreground: var(--pad-bg-50);
   --pad-fg-primary: var(--pad-fg-900);
   --pad-fg-secondary: var(--pad-fg-600);

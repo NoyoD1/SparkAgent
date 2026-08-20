@@ -1465,12 +1465,18 @@ function onProviderAdded(id: string) {
   transition: all var(--pad-dur-fast) ease;
 }
 .pad-provider-detail__btn:hover { background: var(--pad-bg-hover); }
+/* Phase 8c: primary 按钮改成跟 Skills "添加自定义" 一样 — secondary 风格
+   (card bg + border + secondary text), hover 升级到 primary text + accent border. */
 .pad-provider-detail__btn--primary {
-  background: var(--pad-accent);
-  border-color: var(--pad-accent);
-  color: var(--pad-accent-foreground);
+  background: var(--pad-card);
+  border-color: var(--pad-border);
+  color: var(--pad-fg-secondary);
 }
-.pad-provider-detail__btn--primary:hover { opacity: 0.9; }
+.pad-provider-detail__btn--primary:hover {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
+  border-color: var(--pad-accent, #6366f1);
+}
 .pad-provider-detail__btn--ghost { background: transparent; }
 
 .pad-provider-detail__seg {
