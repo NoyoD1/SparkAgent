@@ -1453,30 +1453,30 @@ fn resolve_mcp_servers_dir(scope: &str, workspace_path: Option<String>, agent_di
                 .ok_or("workspace scope 需要 workspacePath")?;
             Ok(PathBuf::from(ws).join(".pi").join("mcp"))
         }
-        "global" => {
-            // v0.6.3-rc1 P2-1.4 fix: FE 之前永远传 agent_dir=None, 选 global 必报错.
-            //   兜底逻辑: 优先用 FE 传的 agent_dir; 拿不到时用 <user.home>/.pi/agent (跟
-            //   Pi SDK 0.84.2 getAgentDir() 默认行为对齐 — Windows 实际是 %APPDATA%/pi-agent,
-            //   macOS/Linux 是 ~/.local/share/pi-agent; 这里简化用 <user.home>/.pi/agent 跟
-            //   Pi SDK 兼容, FE 后续可以调 getAgentDir 拿真值覆盖).
-            let dir = agent_dir
-                .as_ref()
-                .filter(|s| !s.is_empty())
-                .cloned()
-                .or_else(|| {
-                    // 拿 <user.home>: Windows 用 USERPROFILE, Unix 用 HOME
-                    std::env::var_os("USERPROFILE")
-                        .or_else(|| std::env::var_os("HOME"))
-                        .map(|p| {
-                            let home = p.to_string_lossy().to_string();
-                            format!("{}{}.pi{}agent", home, std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR)
-                        })
-                })
-                .ok_or("global scope 需要 agentDir (FE 没传 + 环境变量也拿不到 home dir)")?;
-            Ok(PathBuf::from(dir).join("mcp"))
-        }
+        "global" => Ok(resolve_mcp_agent_dir(agent_dir)?.join("mcp")),
         other => Err(format!("scope 必须是 'workspace' 或 'global', got '{}'", other)),
     }
+}
+
+/// v0.6.3-rc1 P2-1.6: 抽出 MCP 用的 agentDir 解析逻辑 (跟 resolve_mcp_servers_dir 共用).
+///   FE 之前永远传 None, 兜底: 优先用 FE 传值, 拿不到用 <user.home>/.pi/agent.
+///   USERPROFILE env 优先 (Windows), fallback HOME env (Unix).
+///   跟 skill 用的 resolve_agent_dir (line 729, 没兜底) 不同, 命名区分一下.
+fn resolve_mcp_agent_dir(agent_dir: Option<String>) -> Result<PathBuf, String> {
+    let dir_str = agent_dir
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(|p| {
+                    let home = p.to_string_lossy().to_string();
+                    format!("{}{}.pi{}agent", home, std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR)
+                })
+        })
+        .ok_or("global scope 需要 agentDir (FE 没传 + 环境变量也拿不到 home dir)")?;
+    Ok(PathBuf::from(dir_str))
 }
 
 /// 解析 mcp server JSON body, 校验必填字段 + 字段类型.
@@ -1614,9 +1614,14 @@ async fn list_mcp_servers(workspace_path: Option<String>, agent_dir: Option<Stri
     }
 
     // 1. global scope: <agentDir>/mcp/*.json
-    if let Some(agent_dir_str) = agent_dir.as_ref().filter(|s| !s.is_empty()) {
-        let global_dir = PathBuf::from(agent_dir_str).join("mcp");
+    // 1. global scope: <agentDir>/mcp/*.json (覆盖 global 同名)
+    // v0.6.3-rc1 P2-1.6 fix: FE 永远传 None, 加兜底用 <user.home>/.pi/agent
+    //   (跟 write_mcp_server 行为一致, 共享 resolve_agent_dir)
+    if let Ok(agent_dir_path) = resolve_mcp_agent_dir(agent_dir) {
+        let global_dir = agent_dir_path.join("mcp");
         scan_scope_dir(&global_dir, "global", &mut servers, &mut seen_names, false)?;
+    } else {
+        debug_log(&format!("list_mcp_servers: skip global scan, agent_dir 拿不到 (FE 没传, 环境变量也没 home)"));
     }
     // 2. workspace scope: <workspacePath>/.pi/mcp/*.json (覆盖 global 同名)
     if let Some(ws_str) = workspace_path.as_ref().filter(|s| !s.is_empty()) {
