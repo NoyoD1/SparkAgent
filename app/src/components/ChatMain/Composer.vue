@@ -417,7 +417,9 @@ async function send() {
   const rawText = inputText.value;
   const text = rawText.trim();
   if (!text) return;
-  if (isStreaming.value) return;
+  // 2026-08-20 P0-1 补充 A: 去掉之前的 `if (isStreaming.value) return`.
+  //   业务要求: streaming 时允许 send (入队, 等 LLM 回完自动发), 不应该拦.
+  //   sendPrompt 内部已经有 streaming 入队判断 (chat.ts:780-787), 这里直接放行.
   if (!hasConfig.value) {
     openSettings();
     return;
@@ -826,23 +828,27 @@ onMounted(() => nextTick(autoResize));
         <button class="pad-composer__iconbtn" title="语音输入">
           <Mic :size="16" :stroke-width="1.75" />
         </button>
+        <!-- 2026-08-20 P0-1 补充 A: send 按钮始终是 send, 不再按 streaming 切 stop.
+             streaming 时 send → sendPrompt 内部入队 (chat.ts sendQueue).
+             stop 拆成独立按钮, v-if="isStreaming", 显式区分 send / stop. -->
         <button
           class="pad-composer__send"
-          :class="{ 'is-stop': isStreaming, 'is-stopping': isStreaming && userAborted }"
-          :disabled="!hasConfig || (!isStreaming && !inputText.trim())"
-          :title="
-            isStreaming
-              ? userAborted
-                ? '正在停止…'
-                : '停止生成 (Esc)'
-              : hasConfig
-                ? '发送'
-                : '去设置配 provider'
-          "
-          @click="isStreaming ? stop() : send()"
+          :disabled="!hasConfig || !inputText.trim()"
+          :title="hasConfig ? '发送 (Enter) / 加入发送队列' : '去设置配 provider'"
+          @click="send()"
         >
-          <ArrowUp v-if="!isStreaming" :size="16" :stroke-width="2" />
-          <Square v-else :size="12" :stroke-width="2" fill="currentColor" />
+          <ArrowUp :size="16" :stroke-width="2" />
+        </button>
+        <!-- 独立 stop 按钮: 仅 streaming 时显示, 跟 send 并排. Esc 也触发 stop (keybinding). -->
+        <button
+          v-if="isStreaming"
+          class="pad-composer__send is-stop"
+          :class="{ 'is-stopping': userAborted }"
+          :disabled="userAborted"
+          :title="userAborted ? '正在停止…' : '停止生成 (Esc)'"
+          @click="stop()"
+        >
+          <Square :size="12" :stroke-width="2" fill="currentColor" />
         </button>
       </div>
     </div>
