@@ -594,6 +594,52 @@ class PiTauriClient {
     return (await invoke('delete_user_tool', { args })) as boolean
   }
 
+  // ====== 2026-08-21 v0.6.3-rc1 P2-1: MCP server 配置 CRUD ======
+  // 跟 P1-5 user tool 同 pattern: 两层 scope (workspace + global, workspace 优先)
+  //   - workspace: <workspacePath>/.pi/mcp/<name>.json
+  //   - global:   <agentDir>/mcp/<name>.json
+  // FE UI: Settings → MCP tab (新 tab, 跟 Tools tab 同级)
+  // sidecar 启动时 (Batch 2) 加载 + spawn MCP server 子进程, 走 @modelcontextprotocol/sdk
+  async listMcpServers(args: {
+    workspacePath?: string | null;
+    agentDir?: string | null;
+  }): Promise<TauriMcpServerInfo[]> {
+    return (await invoke('list_mcp_servers', {
+      args: {
+        workspacePath: args.workspacePath ?? null,
+        agentDir: args.agentDir ?? null,
+      },
+    })) as TauriMcpServerInfo[]
+  }
+
+  async readMcpServer(args: {
+    scope: 'workspace' | 'global';
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+  }): Promise<string> {
+    return (await invoke('read_mcp_server', { args })) as string
+  }
+
+  async writeMcpServer(args: {
+    scope: 'workspace' | 'global';
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+    body: string;
+  }): Promise<string> {
+    return (await invoke('write_mcp_server', { args })) as string
+  }
+
+  async deleteMcpServer(args: {
+    scope: 'workspace' | 'global';
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+  }): Promise<boolean> {
+    return (await invoke('delete_mcp_server', { args })) as boolean
+  }
+
   // ====== v0.4.6 Project rules / 自定义指令 (跟 Claude 桌面端 "自定义指令" 模式) ======
   // 持久化到 <workspace>/AGENTS.md (per-workspace) + <agentDir>/AGENTS.md (global).
   // Pi SDK 0.84.2 DefaultResourceLoader 自动 load AGENTS.md (resource-loader.ts:71),
@@ -930,6 +976,31 @@ export interface TauriUserToolInfo {
   description: string;
   /** builtin tool name (read / write / edit / bash / ls / find / grep) */
   basedOn: string;
+  /** 完整 JSON body (跟 file 内容一致, 方便 FE 不重复读) */
+  body: string;
+  /** 绝对文件路径, FE 用于 debug / 显示 */
+  filePath: string;
+  /** 'workspace' | 'global' */
+  scope: 'workspace' | 'global';
+}
+
+/**
+ * 2026-08-21 v0.6.3-rc1 P2-1: MCP server 配置 (返回给 FE 用的类型).
+ *
+ * 跟 builtin tool 的关系:
+ *   - builtin: Pi SDK 内置, 不存文件
+ *   - user tool: builtin 派生的 args 预设包装
+ *   - MCP server: 独立的子进程 (走 JSON-RPC over stdio), sidecar 启动时 spawn,
+ *     通过 @modelcontextprotocol/sdk 拉 tools/list, 转 Pi SDK ToolDefinition
+ *     工具名加 mcp_<server>_<tool> 前缀
+ *
+ * 存储: <workspace>/.pi/mcp/<name>.json + <agentDir>/mcp/<name>.json
+ */
+export interface TauriMcpServerInfo {
+  /** MCP server 名, 跟文件名 sans .json 一致, LLM 看到的 tool 名前缀 mcp_<name>_<tool> */
+  name: string;
+  /** 启动命令 (e.g. npx / node / .exe 绝对路径), 必填 */
+  command: string;
   /** 完整 JSON body (跟 file 内容一致, 方便 FE 不重复读) */
   body: string;
   /** 绝对文件路径, FE 用于 debug / 显示 */

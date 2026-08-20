@@ -105,6 +105,10 @@ const sessionDir = join(agentDir, 'sessions', hash);
 // emit {type:'skills_snapshot', skills:[...]} (类似 v0.4.x config_ok, runRpcMode
 // 接管 stdout 之前), FE 同步解析存 skills store.
 import { loadSkills, formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
+// 2026-08-21 P2-1: MCP (Model Context Protocol) 集成 — 通用框架, 接任意 MCP server
+//   用官方 SDK (@modelcontextprotocol/sdk) 走 JSON-RPC over stdio.
+//   跟 P1-5 user tool 走同一个 customTools path (merge 到 LLM 可见的 tools list).
+import { McpServerClient, McpServerError, jsonSchemaToTypeBox } from './mcpClient.mjs';
 // v0.4.5: Pi SDK 0.84.2 BUILTIN_SLASH_COMMANDS 不在主入口 export, 走 subpath 不稳
 //   (package.json 没声明 ./core/* exports). 复制 21 个常量过来, 跟 Pi SDK 0.84.2 一致.
 //   源: pi-sdk/packages/coding-agent/src/core/slash-commands.ts
@@ -468,7 +472,38 @@ intent across the session is still part of the conversation.
     console.error(`[sidecar] P1-5: loaded ${userTools.length} user tool(s): [${userTools.map((t) => t.name).join(', ')}]`);
   }
 
-  console.error(`[sidecar] creating agent session: model=${model.provider}/${model.id} thinking=${config.thinkingLevel ?? 'medium'} tools=${tools.join(',')} userTools=${userTools.length} permissionMode=${config.permissionMode ?? 'ask'}`);
+  // 2026-08-21 P2-1: 加载 MCP servers (通用框架, 接任意 MCP server).
+  //   跟 user tool 走同一个 customTools path, LLM 看到 mcp_<server>_<tool> 名字 + (MCP: server) 标识.
+  //   错误降级: 1 个 server 启动失败不影响其它 server, 不影响 sidecar 自身.
+  const mcpConfigs = loadMcpServerConfigs(workspacePath, agentDir);
+  const mcpClients = [];
+  for (const config of mcpConfigs) {
+    const client = new McpServerClient(config);
+    try {
+      await client.start();
+      mcpClients.push(client);
+      console.error(`[sidecar] P2-1: MCP server '${config.name}' started (${client.toolCount} tools, ${client.startDurationMs}ms)`);
+    } catch (e) {
+      // 降级: 这个 server 跳过, 不影响其它 server
+      console.error(`[sidecar] P2-1: MCP server '${config.name}' failed to start, skip:`, e instanceof Error ? e.message : String(e));
+    }
+  }
+  // 成功 start 的 clients → wrap 成 Pi SDK ToolDefinition
+  const mcpCustomTools = wrapMcpToolsAsCustomTools(mcpClients);
+  if (mcpCustomTools.length > 0) {
+    console.error(`[sidecar] P2-1: ${mcpCustomTools.length} MCP tool(s) merged into customTools: [${mcpCustomTools.map((t) => t.name).join(', ')}]`);
+  }
+
+  // 注册 sidecar 关闭时 stop 所有 MCP clients (SIGTERM 子进程, 防僵尸)
+  registerMcpCleanup(mcpClients);
+
+  // 合并 user tool + MCP tool 成一个 customTools 列表
+  const allCustomTools = [...userTools, ...mcpCustomTools];
+  if (allCustomTools.length > 0) {
+    console.error(`[sidecar] total customTools: ${allCustomTools.length} (user=${userTools.length}, mcp=${mcpCustomTools.length})`);
+  }
+
+  console.error(`[sidecar] creating agent session: model=${model.provider}/${model.id} thinking=${config.thinkingLevel ?? 'medium'} tools=${tools.join(',')} userTools=${userTools.length} mcpTools=${mcpCustomTools.length} permissionMode=${config.permissionMode ?? 'ask'}`);
 
   return createAgentSessionFromServices({
     services,
@@ -476,7 +511,7 @@ intent across the session is still part of the conversation.
     model,
     thinkingLevel: config.thinkingLevel,
     tools,
-    customTools: userTools.length > 0 ? userTools : undefined,
+    customTools: allCustomTools.length > 0 ? allCustomTools : undefined,
   });
 };
 
@@ -598,6 +633,232 @@ function loadUserTools(cwd, agentDir) {
     }
   }
   return customTools;
+}
+
+/**
+ * 2026-08-21 P2-1: 加载 MCP server 列表 (跟 loadUserTools 同 pattern).
+ *   读 <workspacePath>/.pi/mcp/*.json + <agentDir>/mcp/*.json
+ *   workspace 优先 (同名时 workspace 覆盖 global)
+ *   返回 McpServerClient[] (每个 client 包含一份 .pi/mcp/<name>.json 配置)
+ *
+ * 跟 P1-5 user tool 的差异:
+ *   - 这里**不**做 connect / initialize, 那是 client.start() 干的事
+ *   - 加载阶段只 parse JSON + 校验, 启动阶段才 spawn 子进程
+ *   - 配置坏的文件 log warn + 跳过, 不影响其它 server
+ */
+function loadMcpServerConfigs(cwd, agentDir) {
+  const seen = new Set();
+  const configs = [];
+
+  // 1. global scope: <agentDir>/mcp/*.json
+  if (agentDir) {
+    const globalDir = join(agentDir, 'mcp');
+    if (existsSync(globalDir)) {
+      try {
+        for (const entry of readdirSync(globalDir)) {
+          if (!entry.endsWith('.json')) continue;
+          const config = tryParseMcpServerJson(join(globalDir, entry), 'global');
+          if (config && !seen.has(config.name)) {
+            seen.add(config.name);
+            configs.push(config);
+          }
+        }
+      } catch (e) {
+        console.error(`[sidecar] P2-1: scan global mcp/ failed:`, e instanceof Error ? e.message : String(e));
+      }
+    }
+  }
+  // 2. workspace scope: <workspacePath>/.pi/mcp/*.json (同名覆盖 global)
+  if (cwd) {
+    const workspaceDir = join(cwd, '.pi', 'mcp');
+    if (existsSync(workspaceDir)) {
+      try {
+        for (const entry of readdirSync(workspaceDir)) {
+          if (!entry.endsWith('.json')) continue;
+          const config = tryParseMcpServerJson(join(workspaceDir, entry), 'workspace');
+          if (config) {
+            if (seen.has(config.name)) {
+              // workspace 覆盖 global: 删掉 global 那条
+              const idx = configs.findIndex((c) => c.name === config.name);
+              if (idx >= 0) configs.splice(idx, 1);
+            }
+            seen.add(config.name);
+            configs.push(config);
+          }
+        }
+      } catch (e) {
+        console.error(`[sidecar] P2-1: scan workspace mcp/ failed:`, e instanceof Error ? e.message : String(e));
+      }
+    }
+  }
+  return configs;
+}
+
+function tryParseMcpServerJson(filePath, scope) {
+  let body;
+  try {
+    body = readFileSync(filePath, 'utf-8');
+  } catch (e) {
+    console.error(`[sidecar] P2-1: read ${filePath} failed:`, e instanceof Error ? e.message : String(e));
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch (e) {
+    console.error(`[sidecar] P2-1: parse ${filePath} failed (not valid JSON):`, e instanceof Error ? e.message : String(e));
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    console.error(`[sidecar] P2-1: ${filePath} body 必须是 JSON object, 跳过`);
+    return null;
+  }
+  if (typeof parsed.name !== 'string' || !parsed.name) {
+    console.error(`[sidecar] P2-1: ${filePath} 缺 'name' 字段, 跳过`);
+    return null;
+  }
+  if (typeof parsed.command !== 'string' || !parsed.command) {
+    console.error(`[sidecar] P2-1: ${filePath} 缺 'command' 字段, 跳过`);
+    return null;
+  }
+  // 校验 name 跟 builtin tool 不重 (跟 P1-5 一样, 防 mcp_<name>_<tool> 前缀撞 builtin)
+  // 这里只查 mcp server 名字本身, 实际 LLM 看到的 tool 名字是 mcp_<server>_<tool>, 不会撞
+  // 但 server name 也不能跟 builtin 重, 否则 tools 列表里 mcp_<server>_<tool> 会跟 builtin 同名前缀
+  if (BUILTIN_TOOL_NAMES_P1_5.has(parsed.name)) {
+    console.error(`[sidecar] P2-1: ${filePath} name '${parsed.name}' 跟 builtin tool 重, 跳过`);
+    return null;
+  }
+  return {
+    name: parsed.name,
+    command: parsed.command,
+    args: Array.isArray(parsed.args) ? parsed.args : undefined,
+    env: (parsed.env && typeof parsed.env === 'object') ? parsed.env : undefined,
+    cwd: typeof parsed.cwd === 'string' ? parsed.cwd : undefined,
+    timeout: typeof parsed.timeout === 'number' ? parsed.timeout : undefined,
+    scope,
+  };
+}
+
+/**
+ * 2026-08-21 P2-1: 把 MCP tool 转 Pi SDK ToolDefinition.
+ *   跟 P1-5 user tool 包装 builtin 的 pattern 类似, 但走 JSON-RPC tools/call.
+ *   工具名加 mcp_<server>_<tool> 前缀, 防跟 builtin / user tool 撞名.
+ *   description 加 "(MCP: serverName)" 标识, LLM 知道这是 MCP tool.
+ *   parameters 走 jsonSchemaToTypeBox 把 MCP JSON Schema 转 Pi SDK TypeBox.
+ *
+ * @param mcpClients: 已经 start() 成功的 McpServerClient[]
+ * @returns: ToolDefinition[] (跟 P1-5 user tool 同一个格式)
+ */
+function wrapMcpToolsAsCustomTools(mcpClients) {
+  const out = [];
+  for (const client of mcpClients) {
+    const mcpTools = client.getTools();
+    for (const mcpTool of mcpTools) {
+      // LLM 看到的 tool name: mcp_<server>_<tool>
+      // 例: server="filesystem", mcpTool.name="read_file" → "mcp_filesystem_read_file"
+      const toolName = `mcp_${client.config.name}_${mcpTool.name}`;
+      // parameters: MCP inputSchema (JSON Schema) → Pi SDK TypeBox
+      const parameters = jsonSchemaToTypeBox(mcpTool.inputSchema);
+      // description: 加 (MCP: serverName) 标识, LLM 知道这是 MCP tool 不是 builtin
+      const description = mcpTool.description
+        ? `${mcpTool.description} (MCP: ${client.config.name})`
+        : `(MCP: ${client.config.name})`;
+      // execute 闭包: 转发到 MCP server
+      out.push({
+        name: toolName,
+        label: toolName,
+        description,
+        parameters,
+        execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+          // Pi SDK 0.84.2 的 AgentToolResult.content 是 (TextContent | ImageContent)[]
+          // MCP content 也是类似的数组, 直接转
+          // 错误处理: throw 走 Pi SDK isError=true
+          try {
+            const result = await client.callTool(mcpTool.name, params ?? {});
+            return mcpCallResultToAgentToolResult(result);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(`[sidecar] P2-1: MCP callTool failed (${toolName}): ${msg}`);
+            throw new Error(`MCP callTool failed: ${msg}`);
+          }
+        },
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * MCP tool/call 返回的 result.content 转 Pi SDK AgentToolResult.content.
+ * MCP 三种 content type 映射:
+ *   - 'text' → 直接 textContent
+ *   - 'image' → imageContent (data 是 base64 字符串)
+ *   - 'resource' → 暂时降级为 text (ResourceLink / EmbeddedResource 还没处理, P2.2 增强)
+ *   isError 时只返回 1 个 text content 含错误消息 (跟 builtin tool 一致)
+ */
+function mcpCallResultToAgentToolResult(result) {
+  if (result.isError) {
+    const errText = (result.content ?? [])
+      .filter((c) => c.type === 'text')
+      .map((c) => c.text)
+      .join('\n') || 'MCP tool returned isError=true (no content)';
+    return {
+      content: [{ type: 'text', text: `❌ MCP error: ${errText}` }],
+    };
+  }
+  const content = [];
+  for (const item of result.content ?? []) {
+    if (item.type === 'text') {
+      content.push({ type: 'text', text: item.text });
+    } else if (item.type === 'image') {
+      content.push({ type: 'image', data: item.data, mimeType: item.mimeType });
+    } else if (item.type === 'resource') {
+      // P2.2 增强: ResourceLink / EmbeddedResource 完整处理
+      content.push({ type: 'text', text: `[MCP resource: ${JSON.stringify(item).slice(0, 200)}]` });
+    }
+  }
+  if (content.length === 0) {
+    // 兜底: MCP 返回空 content (正常返回但没数据)
+    content.push({ type: 'text', text: '(MCP tool returned no content)' });
+  }
+  return { content };
+}
+
+/**
+ * 2026-08-21 P2-1: 注册 sidecar 关闭时 stop 所有 MCP clients (SIGTERM 子进程, 防僵尸).
+ *   走 process.on('exit' / 'SIGTERM' / 'SIGINT') 三个事件, 任一触发就 stop 所有 client.
+ *   best-effort: stop 失败不抛 (子进程可能已死), exit 钩子同步执行不能 await, 用 Promise.race 加 timeout.
+ */
+function registerMcpCleanup(clients) {
+  if (clients.length === 0) return;
+  const cleanup = () => {
+    for (const client of clients) {
+      try {
+        // exit 钩子是同步, 不能 await. SDK close 内部 await child.kill, 但这里 fire-and-forget
+        client.stop().catch(() => {});
+      } catch {
+        // ignore
+      }
+    }
+  };
+  // exit 事件: 进程正常退出 (Tauri killSidecar, normal exit)
+  process.on('exit', cleanup);
+  // SIGTERM: Tauri / OS 发送的 kill 信号
+  process.on('SIGTERM', () => {
+    cleanup();
+    process.exit(0);
+  });
+  // SIGINT: Ctrl+C (开发场景, 跑 sidecar 测时常用)
+  process.on('SIGINT', () => {
+    cleanup();
+    process.exit(0);
+  });
+  // SIGHUP: 终端关闭 (Tauri 桌面端不常见, 但 dev 模式可能)
+  process.on('SIGHUP', () => {
+    cleanup();
+    process.exit(0);
+  });
+  console.error(`[sidecar] P2-1: registered cleanup for ${clients.length} MCP client(s) (SIGTERM/SIGINT/SIGHUP/exit)`);
 }
 
 function tryParseUserToolJson(filePath, builtinToolDefs) {

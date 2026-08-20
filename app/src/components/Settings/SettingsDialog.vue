@@ -17,7 +17,7 @@ import {
   Settings2,        // 通用
   Palette,          // 外观
   Keyboard,         // 快捷键
-  Plug,             // 扩展 / MCP
+  Plug,             // MCP (2026-08-21 v0.6.3-rc1 P2-1: Model Context Protocol)
   Sparkles,         // Skills (v0.4.4)
   Terminal,         // Slash (v0.4.5.2 恢复, D184 v9 ❷)
   FileText,         // Custom Instructions (v0.5.0-v0.1 回归 v0.4.6 单 AGENTS.md 编辑)
@@ -32,7 +32,7 @@ import ProviderTab from './tabs/ProviderTab.vue';
 import GeneralTab from './tabs/GeneralTab.vue';
 import AppearanceTab from './tabs/AppearanceTab.vue';
 import ShortcutsTab from './tabs/ShortcutsTab.vue';
-import ExtensionsTab from './tabs/ExtensionsTab.vue';
+import McpTab from './tabs/McpTab.vue';  // 2026-08-21 v0.6.3-rc1 P2-1: MCP 配置 (取代 ExtensionsTab 占位)
 import SkillsTab from './tabs/SkillsTab.vue';
 import SlashTab from './tabs/SlashTab.vue';  // v0.4.5.2 恢复 (D184 v9 ❷)
 import CustomInstructionsTab from './tabs/CustomInstructionsTab.vue';  // v0.5.0-v0.1: 回归单 AGENTS.md 编辑 (取代 v0.4.6.1 Agents tab)
@@ -53,7 +53,7 @@ const TABS: TabDef[] = [
   { id: 'appearance', label: '外观',     icon: markRaw(Palette),    component: markRaw(AppearanceTab), group: '基础设置', implemented: false },
   { id: 'provider',   label: 'Provider', icon: markRaw(KeyRound),   component: markRaw(ProviderTab),   group: '基础设置', implemented: true  },
   { id: 'shortcuts',  label: '快捷键',   icon: markRaw(Keyboard),   component: markRaw(ShortcutsTab),  group: 'Agent 能力', implemented: false },
-  { id: 'extensions', label: '扩展 / MCP', icon: markRaw(Plug),      component: markRaw(ExtensionsTab), group: 'Agent 能力', implemented: false },
+  { id: 'mcp',        label: 'MCP',     icon: markRaw(Plug),        component: markRaw(McpTab),        group: 'Agent 能力', implemented: true  },  // 2026-08-21 v0.6.3-rc1 P2-1: Model Context Protocol 配置
   { id: 'skills',     label: 'Skills',  icon: markRaw(Sparkles),   component: markRaw(SkillsTab),     group: 'Agent 能力', implemented: true  },
   { id: 'slash',      label: 'Slash',   icon: markRaw(Terminal),   component: markRaw(SlashTab),      group: 'Agent 能力', implemented: true  },  // v0.4.5.2 恢复 (D184 v9 ❷)
   { id: 'instructions', label: 'Custom Instructions', icon: markRaw(FileText), component: markRaw(CustomInstructionsTab), group: 'Agent 能力', implemented: true  },  // v0.5.0-v0.1: 回归 v0.4.6 单 AGENTS.md 编辑 (取代 v0.4.6.1 multi-persona Agents tab)

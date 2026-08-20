@@ -204,15 +204,9 @@ export const useChatStore = defineStore('chat', () => {
   }
   // v0.4.2+ LLM 错误重试: retryBySession 记录当前 retry 状态 (attempt 进度 + 上次错误)
   // FE UI 可以根据这个显示"重试中 1/5..."提示
+  // v0.6.3-rc1: 取消了 D210 的 FE 端 auto-retry (force stop + resend). 当前 retryBySession
+  //   只反映 Pi SDK 内部 retry 状态 (auto_retry_start / auto_retry_end events).
   const retryBySession = ref<Record<string, { attempt: number; maxAttempts: number; errorMessage: string } | null>>({});
-  // v0.5.0-D 第23轮 (D210): FE 端 auto-retry
-  //   之前 (D209): stream hang 30s → force stop streaming → user 看横线手动重发
-  //   user 反馈 (D210): "发送消息后 LLM 异常后, 不会主动重试发送, 会一直卡着"
-  //   修法: FE 主动检测 LLM 异常 (stream hang + 空 response), 自动重发 last user msg 1 次
-  //   Pi SDK 内部 retry 不可靠 (不 emit auto_retry_start events, user 看不到进度),
-  //   FE 端重发可控、可视化、有上限 (防 spam).
-  //   autoRetryCountBySession: 每个 session 计数, user 新发消息时清零 (允许再次 auto-retry)
-  const autoRetryCountBySession = ref<Record<string, number>>({});
   // v0.5.0-D 第17轮 (D204): stream hang detector — 30s 无事件 + 仍 isStreaming → 标 hang
   //   替代 D200/D202/D203 的 emptyResponse 主动告警 (那个有 false positive: model 合法的空 message)
   //   这个是真正兜底: 只有 stream 真的 hang 住 (没新事件, 也等不到 agent_end) 才告警
@@ -507,56 +501,27 @@ export const useChatStore = defineStore('chat', () => {
   function startStreamHangWatchdog(sessionId: string): ReturnType<typeof setTimeout> {
     stopStreamHangWatchdog(sessionId);
     const timer = setTimeout(() => {
-      // 30s 没事件 + 仍 isStreaming → 标 hang + force stop streaming
-      // v0.5.0-D 第22轮 (D209) BUG FIX: 之前只 set streamHang=true + 等 user × 关
-      //   但 isStreaming 仍 true, retry banner 还挂着 (willRetry=true 卡住), user 看到
-      //   "等待 LLM 重试中..." 一直不消失, 也无法发新消息
-      //   修法: 30s 无事件兜底时, 强制 force stop streaming (跟 forceStopStreaming 一样
-      //   清理 streaming + retry + active step), 跟 Composer.stop() 30s timeout 行为一致.
-      //   UI: 触发后会显示 stream hang error line, user 可以在 composer 重发或换 model
-      //   v0.5.0-D 第23轮 (D210) 增强: force stop 后立即触发 tryAutoRetry
-      //     如果最新 assistant message 是空的 (LLM 完全没产出), FE 主动重发 last user msg 1 次
-      //     user 反馈 "LLM 异常后, 不会主动重试发送, 会一直卡着" → 让 FE 主动 resend
-      //     Pi SDK 内部 retry 不可靠 (不 emit events), FE 端重发可控 + 有上限 (max 1)
+      // 2026-08-21 v0.6.3-rc1: 30s watchdog 只 warn + UI 提示, **不** force stop streaming
+      //   user 反馈: "AI 有时候回复确实会超过 30 秒, 但实际上它真的在回复"
+      //   之前 D209 + D210 的 force stop + auto retry 强制打断, 不合理.
+      //   业务规则: 除非 sidecar 主动 emit error event, 或 user 主动 stop, 否则不中断 stream.
+      //
+      // 现在的行为:
+      //   1. 30s 无事件 + 仍 isStreaming → 标 streamHang=true (UI 横线提示 "AI 响应较慢")
+      //   2. console.warn 一行给 dev 排查 (P1-1 风格的埋点)
+      //   3. **不**改 streaming / retry / listener 任何状态, 让 LLM 自然跑完
+      //   4. 如果 LLM 真的 emit agent_end, UI 正常收尾
+      //   5. 如果真 hang 了 (emit 错误丢了), user 看 UI 提示 + 手动点 stop
+      //   6. P1-1 埋点 (PERM-LOST / PERM-OK) 留作 lost 排查工具
       const last = lastStreamEventAt.get(sessionId) || 0;
       const stillStreaming = !!streamingBySession.value[sessionId];
       if (stillStreaming && Date.now() - last >= STREAM_HANG_TIMEOUT_MS) {
         streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: true };
-        // D209: 强制 force stop, 跟 Composer.stop() 30s timeout 一样的清理路径
-        //   跟 willRetry stuck 场景特别相关 — 之前只 set 标记, retry banner 一直挂着
-        streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
-        retryBySession.value = { ...retryBySession.value, [sessionId]: null };
-        setPhase(sessionId, 'idle');
-        // v0.5.0-D 第25轮 (D210.2) BUG FIX: 清理老 listener
-        //   agent_end willRetry=true 分支不调 off() (要继续等 Pi SDK 内部 retry events),
-        //   30s 兜底时 watchdog 调 cleanupListenerForSession 把老 listener 清掉,
-        //   然后 tryAutoRetry 的 sendPrompt 会再加新的. 不清的话老 listener 活着,
-        //   后面 sendPrompt 进来前 cleanupListenerForSession 也会清, 但中间窗口老 listener
-        //   还会接到新 events (如果 sidecar 还活着发的话) 造成重复处理.
-        cleanupListenerForSession(sessionId);
-        // 关 active step (跟 forceStopStreaming 一样, 不动已累积的 thinking/text)
-        const d2 = getSessionData(sessionId);
-        if (d2) {
-          const assistant = d2.messages[d2.messages.length - 1];
-          if (assistant && assistant.role === 'assistant' && assistant.steps) {
-            const lastStep = assistant.steps[assistant.steps.length - 1];
-            if (lastStep && lastStep.isActive) {
-              lastStep.isActive = false;
-              lastStep.collapsed = true;
-            }
-          }
-          chatData.value = { ...chatData.value, [sessionId]: { ...d2 } };
-        }
         console.warn(
-          `[chat] D209: stream hang detected for ${sessionId} (no events for ${STREAM_HANG_TIMEOUT_MS}ms). ` +
-          `Force stopped streaming (was willRetry: ${!!retryBySession.value[sessionId]} — cleared). ` +
-          `UI shows inline error line. User can re-send or switch model.`,
+          `[chat] 30s slow stream detected for ${sessionId} (no events for ${STREAM_HANG_TIMEOUT_MS}ms). ` +
+          `UI shows slow-response hint. Stream NOT force-stopped (user 反馈: AI 真的在回复时被强打断不合理). ` +
+          `User 可以手动点 stop, 或继续等 LLM 真正 emit agent_end.`,
         );
-        // D210: 同步触发 tryAutoRetry (会检查空 message, 决定是否真重发)
-        //   注意: tryAutoRetry 是 async, 但这里不 await — 立即返回, 不阻塞 watchdog timer
-        tryAutoRetry(sessionId).catch((e) => {
-          console.warn('[chat] D210: tryAutoRetry failed (ignored)', e);
-        });
       }
     }, STREAM_HANG_TIMEOUT_MS);
     streamHangTimers.set(sessionId, timer);
@@ -915,7 +880,7 @@ export const useChatStore = defineStore('chat', () => {
    * - 没 workspace → 用 piTauri.ensureDefaultWorkspace() (<home>/PiAgent) 建 workspace + session, 再发
    *   (用户可手动通过 sidebar / tab strip 的"本地"下拉选别的路径)
    */
-  async function sendPrompt(content: string, opts: { fromAutoRetry?: boolean; fromQueue?: boolean } = {}) {
+  async function sendPrompt(content: string, opts: { fromQueue?: boolean } = {}) {
     const text = content.trim();
     if (!text) return;
     // 0.3: 切 workspace in-flight 期间拒绝发. sidecar 还没就绪, 发过去会用旧 cwd 写到错位置.
@@ -940,7 +905,7 @@ export const useChatStore = defineStore('chat', () => {
       console.log('[chat] sendPrompt: enqueued (streaming), session=', targetSessionIdForQueue, 'queueLen=', list.length + 1, 'preview=', text.slice(0, 40));
       return;
     }
-    console.log('[chat] sendPrompt: contentLen=', text.length, 'activeSession=', sessionStore.activeSessionId, 'fromAutoRetry=', !!opts.fromAutoRetry, 'fromQueue=', !!opts.fromQueue);
+    console.log('[chat] sendPrompt: contentLen=', text.length, 'activeSession=', sessionStore.activeSessionId, 'fromQueue=', !!opts.fromQueue);
 
     // 1. 确保有 active session
     let sessionId = sessionStore.activeSessionId;
@@ -969,10 +934,10 @@ export const useChatStore = defineStore('chat', () => {
 
     // Phase 6: 检测 first message (用于触发 ghost title prompt).
     //   条件: 新建 session 或 (已有 session 但 0 messages) + 没 autoTitle + title 是默认.
-    //   ghostTriggeredForSession 防重 (retry / 重新 sendPrompt 不重复触发).
+    //   ghostTriggeredForSession 防重 (从队列取出来的 resend 也不重复触发).
     const sessMeta = sessionStore.sessions.find((s) => s.id === sessionId);
     const isFirstMessageForGhost =
-      !opts.fromAutoRetry &&
+      !opts.fromQueue &&
       (wasNewlyCreated || getMessages(sessionId).length === 0) &&
       !sessMeta?.autoTitle &&
       (!sessMeta?.title || sessMeta.title === '新任务') &&
@@ -1030,14 +995,6 @@ export const useChatStore = defineStore('chat', () => {
     appendUserMessage(sessionId, fullUserText, quoteContent);
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: true };
     errorBySession.value = { ...errorBySession.value, [sessionId]: null };
-    // v0.5.0-D 第23轮 (D210): user 新发消息 → 清零 auto-retry count
-    //   之前失败 + auto-retry 用完的 session, user 主动发新消息 → 允许下次再 auto-retry
-    // v0.5.0-D 第25轮 (D210.2) BUG FIX: 只在 user 主动发 (非 auto-retry resend) 时清零.
-    //   之前无脑 clearAutoRetryCount, 导致 auto-retry 的 sendPrompt 调 clearAutoRetryCount
-    //   把 count 清回 0, 下次 watchdog 触发时 count 还是 0 又能 retry 一次 (无限循环).
-    if (!opts.fromAutoRetry) {
-      clearAutoRetryCount(sessionId);
-    }
     // 引用用完即清, 跟发完就消失的 UX 一致 (避免下次发还残留)
     if (quote) clearQuote(sessionId);
     if (fileRefs.length > 0) clearFileRefs(sessionId);
@@ -1070,8 +1027,7 @@ export const useChatStore = defineStore('chat', () => {
     //   retry 后老 listener 都活着, 每个事件被处理 N 次 → content 重复 N 次 / cumulative
     //   context 累加 N 次 / user 看到 "重发三次后, 三个同样结果".
     //   修法: listenerOffBySession map 跟踪 off 函数, 新 sendPrompt 进来前先调旧 off()
-    //   清理掉. watchdog force stop 时也调 off() 清理老 listener (然后 tryAutoRetry 的
-    //   sendPrompt 会再加新的).
+    //   清理掉. (v0.6.3-rc1: 不再有 tryAutoRetry 后续 resend)
     cleanupListenerForSession(sessionId);
     const off = await piTauri.on((event) => {
       // 每个事件到达就 reset watchdog + 清 hang 标记
@@ -1657,8 +1613,8 @@ export const useChatStore = defineStore('chat', () => {
     });
     // v0.5.0-D 第25轮 (D210.2) BUG FIX: 存 off 到 map, 让 cleanupListenerForSession 能清理
     //   agent_end willRetry=true 分支 (line 786 附近) 不调 off() 因为要继续等 Pi SDK 内部 retry,
-    //   这时候老 listener 必须保留. 但下次 sendPrompt / watchdog force stop / 新 tryAutoRetry
-    //   resend 时必须能调 off() 把老 listener 清掉 (否则 N 个老 listener 活着, 每个事件处理 N 次).
+    //   这时候老 listener 必须保留. 但下次 sendPrompt 进来前必须能调 off() 把老 listener 清掉
+    //   (否则 N 个老 listener 活着, 每个事件处理 N 次).
     listenerOffBySession.set(sessionId, off);
     console.log('[chat] listener ready, invoking send_prompt');
 
@@ -2008,110 +1964,16 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  // v0.5.0-D 第23轮 (D210): FE 端 auto-retry 核心函数
-  //   触发条件: stream hang (30s 无事件) 后, 检查最新 assistant message 是不是空
-  //     - 空 = 没 text content, 没 thinking, 没 toolCall, 没 toolResult (model 完全失败)
-  //     - 这种情况下 Pi SDK 内部 retry 不可靠 (不 emit events), FE 主动重发
-  //   上限: 每个 session 最多 1 次 auto-retry (防 spam)
-  //     - user 新发消息时清零 (允许下次再 auto-retry)
-  //     - max=1 是 D210 保守选择: 第一次重试还失败 → 让 user 决定 (不无限循环)
-  //   行为: resend last user message (用完整 sendPrompt 流程, quote 不带)
-  //     - 2s 延迟 (让 sidecar 清理 + user 看到"正在重试..."指示)
-  //   user 取消: forceStopStreaming 会清空 autoRetryCount, 下次不重试
-  const AUTO_RETRY_MAX = 1;
-  const AUTO_RETRY_DELAY_MS = 2_000;
-  function isAssistantMessageEmpty(assistantMsg: { content?: string; steps?: Step[] } | null | undefined): boolean {
-    if (!assistantMsg) return true;
-    // 1. 检查 content (顶层)
-    if ((assistantMsg.content || '').trim().length > 0) return false;
-    // 2. 检查 steps: text / thinking / toolCalls / 任何一项非空都不算空
-    const steps = assistantMsg.steps || [];
-    for (const s of steps) {
-      if ((s.stepText || '').trim().length > 0) return false;
-      if ((s.thinking || []).length > 0) return false;
-      if ((s.toolCalls || []).length > 0) return false;
-    }
-    return true;
-  }
-  function getLastUserMessageContent(sessionId: string): string | null {
-    const d = getSessionData(sessionId);
-    if (!d) return null;
-    for (let i = d.messages.length - 1; i >= 0; i--) {
-      if (d.messages[i].role === 'user') {
-        return d.messages[i].content || null;
-      }
-    }
-    return null;
-  }
-  async function tryAutoRetry(sessionId: string) {
-    const count = autoRetryCountBySession.value[sessionId] ?? 0;
-    if (count >= AUTO_RETRY_MAX) {
-      console.log(`[chat] D210: auto-retry skipped (already retried ${count}/${AUTO_RETRY_MAX} times)`);
-      return false;
-    }
-    // 1. 找最新 assistant message
-    const d = getSessionData(sessionId);
-    if (!d) return false;
-    let lastAssistant: { role: string; content?: string; steps?: Step[] } | null = null;
-    for (let i = d.messages.length - 1; i >= 0; i--) {
-      if (d.messages[i].role === 'assistant') {
-        lastAssistant = d.messages[i];
-        break;
-      }
-    }
-    if (!isAssistantMessageEmpty(lastAssistant)) {
-      console.log('[chat] D210: auto-retry skipped (assistant message has content)');
-      return false;
-    }
-    // 2. 找 user message (要重发的内容)
-    const userContent = getLastUserMessageContent(sessionId);
-    if (!userContent || !userContent.trim()) {
-      console.log('[chat] D210: auto-retry skipped (no user message to resend)');
-      return false;
-    }
-    // 3. 增加计数 + 设置 retryBySession (UI 显示 "正在重试 1/1...")
-    autoRetryCountBySession.value = {
-      ...autoRetryCountBySession.value,
-      [sessionId]: count + 1,
-    };
-    retryBySession.value = {
-      ...retryBySession.value,
-      [sessionId]: {
-        attempt: count + 1,
-        maxAttempts: AUTO_RETRY_MAX,
-        errorMessage: 'LLM 异常, FE 主动重发中...',
-      },
-    };
-    chatData.value = { ...chatData.value };
-    console.log(`[chat] D210: auto-retry triggered (${count + 1}/${AUTO_RETRY_MAX}), resend in ${AUTO_RETRY_DELAY_MS}ms`);
-    // 4. 延迟 2s 后重发 (让 sidecar 清理 + user 看到 retry 指示)
-    setTimeout(async () => {
-      // 再次检查 session 是否还有效 (user 可能在这 2s 内关闭了 session / 切了 session)
-      // 修 (D210): 之前用 activeSession.value?.id 是未定义 ref (编译过但 runtime 永远 true,
-      //   任意 session 都重发). 正确是 sessionStore.activeSessionId.
-      if (sessionStore.activeSessionId !== sessionId) {
-        console.log('[chat] D210: auto-retry aborted (active session changed during delay)');
-        return;
-      }
-      // 5. 重发 (用 sendPrompt 完整流程, quote 不带 — auto-retry 不重复 quote)
-      // v0.5.0-D 第25轮 (D210.2) BUG FIX: fromAutoRetry=true 告诉 sendPrompt 这是 resend,
-      //   不要清零 autoRetryCount. 之前 sendPrompt 入口无脑 clearAutoRetryCount, 导致
-      //   auto-retry 调 sendPrompt 又把 count 清回 0, 下次 watchdog 触发时 count 还是 0
-      //   又能 retry 一次 → 无限循环, user 看到 3 次重发.
-      await sendPrompt(userContent, { fromAutoRetry: true });
-    }, AUTO_RETRY_DELAY_MS);
-    return true;
-  }
-  // v0.5.0-D 第23轮 (D210): user 新发消息时清零 auto-retry count
-  //   让 user 的"再来一段"也能享受 auto-retry 保护
-  function clearAutoRetryCount(sessionId: string) {
-    if (autoRetryCountBySession.value[sessionId]) {
-      autoRetryCountBySession.value = {
-        ...autoRetryCountBySession.value,
-        [sessionId]: 0,
-      };
-    }
-  }
+  // v0.5.0-D 第23轮 (D210) → v0.6.3-rc1 取消: FE 端 auto-retry 已移除
+  //   业务: user 反馈 "AI 真的在回复时, 30s 强制打断不合理"
+  //   之前行为: stream hang (30s 无事件) → force stop + 自动 resend last user msg 1 次
+  //   现在行为: 30s watchdog 只 warn + UI 提示 "AI 响应较慢", **不** force stop, **不** 自动重发
+  //   流走完后由 Pi SDK 正常 emit agent_end 收尾. 真 hang 住时, user 手动 stop 重发.
+  //   相关 cleanup:
+  //     - autoRetryCountBySession ref 移除
+  //     - isAssistantMessageEmpty / getLastUserMessageContent helpers 移除 (仅 tryAutoRetry 用)
+  //     - sendPrompt 的 fromAutoRetry option 移除
+  //     - watchdog 不再 force stop, 只更新 streamHangBySession 给 UI
 
   // ===== Phase 6: autoTitle ghost prompt (first message trigger) =====
   // 思路: 主 session sendPrompt 进来后, 如果是 first message (no messages + no autoTitle +

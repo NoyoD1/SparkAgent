@@ -1,0 +1,8 @@
+{
+  "name": "offline-mcp-test",
+  "command": "node",
+  "args": [
+    "D:\\UnityWork\\Tools\\Pi\\doc\\mcp-test-server\\offline-mcp-server.mjs"
+  ],
+  "timeout": 30000
+}

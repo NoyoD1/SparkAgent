@@ -285,12 +285,16 @@ function jumpToMessage(messageId: string) {
                  user 反馈: "我不要弹窗, 我要的是在chat区域中间一个'------error具体详情-------'这样的横线"
                  横线显示具体错误信息 + × 关闭 (关闭只清标记, 不会触发新请求,
                  user 自行在 composer 重发即可, 不强行 retry)
-                 替代 D200/D202/D203 的 popup-style emptyResponse 警告 (false positive 太多) -->
+                 替代 D200/D202/D203 的 popup-style emptyResponse 警告 (false positive 太多)
+
+                 2026-08-21 v0.6.3-rc1: 30s 超时只 warn + UI 提示, 不 force stop streaming
+                 (user 反馈: AI 真的在回复时被强打断不合理. 业务规则: 除非主动报错才停)
+                 横线文案改 "AI 响应较慢" 而非 "已停止响应", 不再 force stop -->
             <div v-if="isStreamHang" class="pad-chatmain__stream-hang">
               <div class="pad-chatmain__stream-hang-line" />
               <span class="pad-chatmain__stream-hang-text">
                 <AlertTriangle :size="13" :stroke-width="1.75" class="pad-chatmain__stream-hang-icon" />
-                30s 无新事件 · 模型 / sidecar 已停止响应 · 可在 composer 重发或换 model
+                30s 无新事件 · AI 响应较慢 · 可继续等待, 必要时手动点 stop
               </span>
               <div class="pad-chatmain__stream-hang-line" />
               <button

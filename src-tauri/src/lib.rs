@@ -1364,6 +1364,260 @@ async fn delete_user_tool(args: ReadDeleteUserToolArgs) -> Result<bool, String> 
     Ok(true)
 }
 
+// ====== 2026-08-21 v0.6.3-rc1 P2-1: MCP server 配置 CRUD ======
+//   跟 P1-5 user tool 同 pattern: 两层 scope (workspace + global, workspace 优先)
+//     - workspace: <workspacePath>/.pi/mcp/<name>.json
+//     - global:   <agentDir>/mcp/<name>.json
+//   JSON body schema (跟 sidecar mcpClient.mjs McpServerConfig 一致):
+//     { name: string, command: string, args?: string[], env?: Record<string, string>, cwd?: string, timeout?: number }
+//   name 跟 builtin 7 个 tool 不重 (跟 P1-5 一致), 防 mcp_<name>_<tool> 前缀冲突.
+//   存 Tauri 4 个 invoke + 跟 list_user_tools 同 storage 模式.
+//
+//   跟 P1-5 user tool 的核心差异:
+//   - name 校验字符放宽: MCP server name 允许更自由的字符 (e.g. 'fetch', '@scope/name'),
+//     但还是限制 [A-Za-z0-9._@-], 1-64 char, 不跟 builtin 重
+//   - body 校验: 必填 name + command (string), 其它字段 (args / env / cwd / timeout) 可选
+//   - 不要求 body.name 跟 filename 一致 (server name 用 filename, 启动时 fallback 到 body.name)
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServerArgs {
+    /// "workspace" 写到 <workspacePath>/.pi/mcp/<name>.json
+    /// "global"   写到 <agentDir>/mcp/<name>.json
+    scope: String,
+    /// server 名, 跟文件名 sans .json 一致, 1-64 char
+    name: String,
+    /// 完整 JSON 字符串 (含 name / command / args / env / cwd / timeout)
+    body: String,
+    /// workspace scope 必填
+    workspace_path: Option<String>,
+    /// global scope 必填
+    agent_dir: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadDeleteMcpServerArgs {
+    scope: String,
+    name: String,
+    workspace_path: Option<String>,
+    agent_dir: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct McpServerInfo {
+    name: String,
+    /// 启动命令 (e.g. npx / node / .exe 绝对路径)
+    command: String,
+    /// 完整 JSON body (跟 file 内容一致, 方便 FE 不重复读)
+    body: String,
+    /// 绝对文件路径, FE 用于 debug / 显示
+    file_path: String,
+    /// 'workspace' | 'global'
+    scope: String,
+}
+
+fn parse_mcp_server_name(name: &str) -> Result<String, String> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(format!("mcp server name 长度必须 1-64, got {}", name.len()));
+    }
+    // 允许 [a-zA-Z0-9._@-] (MCP server name 常见是 'fetch', '@scope/name' 之类)
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@')) {
+        return Err(format!("mcp server name 只能含 [A-Za-z0-9._@-], got '{}'", name));
+    }
+    if name == "." || name == ".." {
+        return Err("mcp server name 不能是 '.' 或 '..'".to_string());
+    }
+    // 防 mcp_<server>_<tool> 前缀跟 builtin 7 个 tool 撞
+    if BUILTIN_TOOL_NAMES.contains(&name) {
+        return Err(format!(
+            "mcp server name '{}' 跟 builtin tool 重名, 拒绝保存. 加个前缀 (e.g. mcp_{})",
+            name, name
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn resolve_mcp_servers_dir(scope: &str, workspace_path: Option<String>, agent_dir: Option<String>) -> Result<PathBuf, String> {
+    match scope {
+        "workspace" => {
+            let ws = workspace_path.as_ref().filter(|s| !s.is_empty())
+                .ok_or("workspace scope 需要 workspacePath")?;
+            Ok(PathBuf::from(ws).join(".pi").join("mcp"))
+        }
+        "global" => {
+            let dir = agent_dir.as_ref().filter(|s| !s.is_empty())
+                .ok_or("global scope 需要 agentDir")?;
+            Ok(PathBuf::from(dir).join("mcp"))
+        }
+        other => Err(format!("scope 必须是 'workspace' 或 'global', got '{}'", other)),
+    }
+}
+
+/// 解析 mcp server JSON body, 校验必填字段 + 字段类型.
+/// 跟 sidecar/src/mcpClient.mjs tryParseMcpServerJson 校验规则保持一致 (FE 写之前 FE 校验,
+///   FE 跳过时 Rust 端兜底, 防止脏数据落盘). bad JSON / 缺 name / 缺 command / command 不是
+///   string → 拒绝保存.
+fn validate_mcp_server_body(body: &str) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("mcp server body 不是合法 JSON: {}", e))?;
+    let obj = parsed.as_object()
+        .ok_or("mcp server body 必须是 JSON object")?;
+    let name = obj.get("name").and_then(|v| v.as_str())
+        .ok_or("mcp server body 缺 'name' 字段或不是 string")?;
+    if name.is_empty() {
+        return Err("mcp server body 'name' 字段不能为空".to_string());
+    }
+    let command = obj.get("command").and_then(|v| v.as_str())
+        .ok_or("mcp server body 缺 'command' 字段或不是 string")?;
+    if command.is_empty() {
+        return Err("mcp server body 'command' 字段不能为空".to_string());
+    }
+    // args: 可选, 但如果有必须是 array of string
+    if let Some(args) = obj.get("args") {
+        if !args.is_array() {
+            return Err("mcp server body 'args' 字段必须是 array".to_string());
+        }
+        for (i, arg) in args.as_array().unwrap().iter().enumerate() {
+            if !arg.is_string() {
+                return Err(format!("mcp server body 'args[{}]' 必须是 string", i));
+            }
+        }
+    }
+    // env: 可选, 但如果有必须是 object of string
+    if let Some(env) = obj.get("env") {
+        let env_obj = env.as_object()
+            .ok_or("mcp server body 'env' 字段必须是 object")?;
+        for (k, v) in env_obj {
+            if !v.is_string() {
+                return Err(format!("mcp server body 'env.{}' 必须是 string", k));
+            }
+        }
+    }
+    // cwd: 可选, 但如果有必须是 string
+    if let Some(cwd) = obj.get("cwd") {
+        if !cwd.is_string() {
+            return Err("mcp server body 'cwd' 字段必须是 string".to_string());
+        }
+    }
+    // timeout: 可选, 但如果有必须是 number
+    if let Some(timeout) = obj.get("timeout") {
+        if !timeout.is_number() {
+            return Err("mcp server body 'timeout' 字段必须是 number".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn extract_mcp_server_info(name: &str, body: &str, file_path: &str, scope: &str) -> Option<McpServerInfo> {
+    let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+    let obj = parsed.as_object()?;
+    Some(McpServerInfo {
+        name: name.to_string(),
+        command: obj.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        body: body.to_string(),
+        file_path: file_path.to_string(),
+        scope: scope.to_string(),
+    })
+}
+
+#[tauri::command]
+async fn list_mcp_servers(workspace_path: Option<String>, agent_dir: Option<String>) -> Result<Vec<McpServerInfo>, String> {
+    // 跟 P1-5 list_user_tools 同 pattern: 先 global, 再 workspace (workspace 后写覆盖 global, 用 name 去重)
+    let mut servers: Vec<McpServerInfo> = Vec::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    fn scan_scope_dir(
+        dir: &std::path::Path,
+        scope: &str,
+        servers: &mut Vec<McpServerInfo>,
+        seen_names: &mut std::collections::HashSet<String>,
+        workspace_override: bool,
+    ) -> Result<(), String> {
+        if !dir.exists() { return Ok(()); }
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("read_dir({}): {}", dir.display(), e))?;
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+            let filename = match p.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let body = match std::fs::read_to_string(&p) {
+                Ok(s) => s,
+                Err(e) => {
+                    debug_log(&format!("list_mcp_servers: read {} failed: {}", p.display(), e));
+                    continue;
+                }
+            };
+            if let Some(info) = extract_mcp_server_info(&filename, &body, &p.display().to_string(), scope) {
+                if workspace_override && seen_names.contains(&filename) {
+                    servers.retain(|s| s.name != filename);
+                }
+                seen_names.insert(filename);
+                servers.push(info);
+            }
+        }
+        Ok(())
+    }
+
+    // 1. global scope: <agentDir>/mcp/*.json
+    if let Some(agent_dir_str) = agent_dir.as_ref().filter(|s| !s.is_empty()) {
+        let global_dir = PathBuf::from(agent_dir_str).join("mcp");
+        scan_scope_dir(&global_dir, "global", &mut servers, &mut seen_names, false)?;
+    }
+    // 2. workspace scope: <workspacePath>/.pi/mcp/*.json (覆盖 global 同名)
+    if let Some(ws_str) = workspace_path.as_ref().filter(|s| !s.is_empty()) {
+        let workspace_dir = PathBuf::from(ws_str).join(".pi").join("mcp");
+        scan_scope_dir(&workspace_dir, "workspace", &mut servers, &mut seen_names, true)?;
+    }
+
+    servers.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(servers)
+}
+
+#[tauri::command]
+async fn read_mcp_server(args: ReadDeleteMcpServerArgs) -> Result<String, String> {
+    let dir = resolve_mcp_servers_dir(&args.scope, args.workspace_path, args.agent_dir)?;
+    let path = dir.join(format!("{}.json", args.name));
+    if !path.exists() {
+        return Err(format!("mcp server '{}' (scope={}) 不存在", args.name, args.scope));
+    }
+    std::fs::read_to_string(&path)
+        .map_err(|e| format!("read_to_string({}): {}", path.display(), e))
+}
+
+#[tauri::command]
+async fn write_mcp_server(args: McpServerArgs) -> Result<String, String> {
+    // 1. name 校验
+    let name = parse_mcp_server_name(&args.name)?;
+    // 2. body 校验
+    validate_mcp_server_body(&args.body)?;
+    // 3. 解析路径
+    let dir = resolve_mcp_servers_dir(&args.scope, args.workspace_path, args.agent_dir)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create_dir_all({}): {}", dir.display(), e))?;
+    let path = dir.join(format!("{}.json", name));
+    std::fs::write(&path, args.body.as_bytes())
+        .map_err(|e| format!("write({}): {}", path.display(), e))?;
+    debug_log(&format!("write_mcp_server: wrote {} (scope={})", path.display(), args.scope));
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+async fn delete_mcp_server(args: ReadDeleteMcpServerArgs) -> Result<bool, String> {
+    let dir = resolve_mcp_servers_dir(&args.scope, args.workspace_path, args.agent_dir)?;
+    let path = dir.join(format!("{}.json", args.name));
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path)
+        .map_err(|e| format!("remove_file({}): {}", path.display(), e))?;
+    Ok(true)
+}
+
 // ====== LLM command ======
 
 #[tauri::command]
@@ -2201,6 +2455,14 @@ pub fn run() {
             read_user_tool,
             write_user_tool,
             delete_user_tool,
+            // 2026-08-21 v0.6.3-rc1 P2-1: MCP server 配置 (Model Context Protocol)
+            //   存储: <workspacePath>/.pi/mcp/*.json + <agentDir>/mcp/*.json
+            //   sidecar 启动时 spawn 每个 server, 通过 @modelcontextprotocol/sdk 走 JSON-RPC,
+            //   拉 tools/list 转 Pi SDK ToolDefinition (mcp_<server>_<tool> 前缀防重)
+            list_mcp_servers,
+            read_mcp_server,
+            write_mcp_server,
+            delete_mcp_server,
             // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
             sidecar::send_rpc_command,
         ])
