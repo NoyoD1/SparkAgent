@@ -5,6 +5,8 @@
  * 列出已配置的 MCP server, 跟 Tools tab 同 pattern:
  *   - 列表: 展示所有 MCP server (含 workspace + global 两层 scope)
  *   - 新建: 弹 dialog 填 name / command / args, 保存到 <workspace>/.pi/mcp/<name>.json
+ *   - 导入 JSON (v0.6.3-rc1 P2-1.1): 粘贴 / 选 .json 文件, auto-detect 3 种格式
+ *     (single object / array / Claude Desktop {mcpServers: {...}}), preview 后批量写入
  *   - 编辑: 弹 dialog 编辑 JSON body, 跟 Tools tab 一样 (P1.5.1 不再省略 edit)
  *   - 删除: 确认后删文件
  *
@@ -20,9 +22,14 @@
 import { ref, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import {
-  Plug, Plus, X, Save, Trash2, AlertCircle, Check, Info, Pencil,
+  Plug, Plus, X, Save, Trash2, AlertCircle, Check, Info, Pencil, Upload, FileJson,
 } from 'lucide-vue-next';
 import { useMcpServersStore, type McpServerScope } from '@/stores/mcpServers';
+import {
+  parseMcpImportJson,
+  describeFormat,
+  type ImportParseResult,
+} from '@/lib/mcpImport';
 
 const mcpStore = useMcpServersStore();
 const { servers, loading, error } = storeToRefs(mcpStore);
@@ -40,6 +47,14 @@ const editingScope = ref<McpServerScope>('workspace');
 const editingName = ref('');
 const editingBody = ref('');
 const isSavingEdit = ref(false);
+
+// ====== 导入 JSON dialog state (v0.6.3-rc1 P2-1.1) ======
+const isImporting = ref(false);
+const importJsonText = ref('');             // textarea 内容
+const importScope = ref<McpServerScope>('workspace');  // 整批写入哪个 scope
+const importParseResult = ref<ImportParseResult | null>(null);  // 解析后的 preview
+const importFileInputRef = ref<HTMLInputElement | null>(null);  // file picker ref
+const isImporting_apply = ref(false);       // 跟 isImporting 区分: 前者是 dialog 显示, 后者是正在写盘
 
 // ====== Toast ======
 const toast = ref<{ type: 'ok' | 'fail'; message: string } | null>(null);
@@ -136,6 +151,95 @@ function summarizeArgs(bodyStr: string): string {
   }
 }
 
+// ====== 2026-08-21 v0.6.3-rc1 P2-1.1: 导入 JSON ======
+function startImport() {
+  isImporting.value = true;
+  importJsonText.value = '';
+  importScope.value = 'workspace';
+  importParseResult.value = null;
+}
+
+function cancelImport() {
+  isImporting.value = false;
+  importJsonText.value = '';
+  importParseResult.value = null;
+}
+
+// 点 "解析预览": 走 lib/mcpImport.ts parse, 不写盘
+function parseImportPreview() {
+  if (!importJsonText.value.trim()) {
+    importParseResult.value = null;
+    return;
+  }
+  importParseResult.value = parseMcpImportJson(importJsonText.value);
+}
+
+// 选文件: 读 .json 自动填到 textarea (走 FileReader)
+function onImportFileSelected(ev: Event) {
+  const input = ev.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    importJsonText.value = String(reader.result ?? '');
+    parseImportPreview();  // 选完自动解析, 省 user 一次点击
+  };
+  reader.onerror = () => {
+    toast.value = { type: 'fail', message: `读文件失败: ${reader.error?.message ?? 'unknown'}` };
+  };
+  reader.readAsText(file, 'utf-8');
+  // 清 input.value, 允许重复选同一文件
+  input.value = '';
+}
+
+function triggerImportFilePicker() {
+  importFileInputRef.value?.click();
+}
+
+// 点 "确认导入": 把 preview 里的 servers 写盘
+async function applyImport() {
+  if (isImporting_apply.value) return;
+  const preview = importParseResult.value;
+  if (!preview) {
+    toast.value = { type: 'fail', message: '请先点 "解析预览" 看看哪些 server 会被导入' };
+    return;
+  }
+  if (preview.servers.length === 0) {
+    toast.value = { type: 'fail', message: '没有可导入的 server (全部解析失败或不识别格式)' };
+    return;
+  }
+  isImporting_apply.value = true;
+  toast.value = null;
+  try {
+    const result = await mcpStore.importServers(
+      preview.servers.map((s) => ({ name: s.name, body: s.body })),
+      importScope.value,
+    );
+    // 拼一个汇总消息
+    const lines: string[] = [];
+    if (result.imported.length > 0) {
+      lines.push(`✅ 导入 ${result.imported.length} 个: ${result.imported.join(', ')}`);
+    }
+    if (result.skipped.length > 0) {
+      lines.push(`⏭️  跳过 ${result.skipped.length} 个 (冲突): ${result.skipped.map((s) => s.name).join(', ')}`);
+    }
+    if (result.failed.length > 0) {
+      lines.push(`❌ 失败 ${result.failed.length} 个: ${result.failed.map((f) => `${f.name} (${f.reason})`).join('; ')}`);
+    }
+    toast.value = {
+      type: result.imported.length > 0 ? 'ok' : 'fail',
+      message: lines.join(' / '),
+    };
+    if (result.imported.length > 0) {
+      cancelImport();
+    }
+  } catch (e) {
+    toast.value = { type: 'fail', message: e instanceof Error ? e.message : String(e) };
+  } finally {
+    isImporting_apply.value = false;
+  }
+}
+
 onMounted(() => {
   mcpStore.refresh();
 });
@@ -216,6 +320,153 @@ onMounted(() => {
       </div>
     </div>
 
+    <!-- 2026-08-21 v0.6.3-rc1 P2-1.1: 导入 JSON dialog -->
+    <div v-if="isImporting" class="pad-mcptab__dialog">
+      <div class="pad-mcptab__dialog-head">
+        <Upload :size="14" :stroke-width="1.75" />
+        <span>导入 MCP server JSON</span>
+        <button class="pad-mcptab__toast-close" @click="cancelImport">
+          <X :size="14" :stroke-width="1.75" />
+        </button>
+      </div>
+      <div class="pad-mcptab__form">
+        <!-- 顶部 hint -->
+        <div class="pad-mcptab__form-hint">
+          <Info :size="12" :stroke-width="1.75" />
+          <span>
+            支持 3 种格式 (auto-detect): ① 单个 <code>{name, command, args}</code> ②
+            <code>[{...}, {...}]</code> array ③ Claude Desktop 标准
+            <code>{mcpServers: {name: {...}}}</code>.
+            选完文件后自动解析预览, 跟现有 <code>name</code> 冲突的会跳过.
+          </span>
+        </div>
+
+        <!-- 存储 scope 选择 (整批共用) -->
+        <div class="pad-mcptab__form-row">
+          <label class="pad-mcptab__label">存储 scope <span class="pad-mcptab__hint-inline">(整批写入同一个 scope, workspace 优先覆盖 global 同名)</span></label>
+          <div class="pad-mcptab__radio-group">
+            <label class="pad-mcptab__radio">
+              <input
+                type="radio"
+                value="workspace"
+                v-model="importScope"
+                :disabled="isImporting_apply"
+              />
+              <span>workspace (当前工作区 <code>&lt;ws&gt;/.pi/mcp/*.json</code>)</span>
+            </label>
+            <label class="pad-mcptab__radio">
+              <input
+                type="radio"
+                value="global"
+                v-model="importScope"
+                :disabled="isImporting_apply"
+              />
+              <span>global (跨工作区 <code>&lt;agentDir&gt;/mcp/*.json</code>)</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- 文件选择 + 粘贴 -->
+        <div class="pad-mcptab__form-row">
+          <label class="pad-mcptab__label">JSON 内容</label>
+          <div class="pad-mcptab__file-row">
+            <input
+              ref="importFileInputRef"
+              type="file"
+              accept=".json,application/json"
+              class="pad-mcptab__file-input"
+              @change="onImportFileSelected"
+            />
+            <button
+              type="button"
+              class="pad-mcptab__btn"
+              @click="triggerImportFilePicker"
+              :disabled="isImporting_apply"
+            >
+              <FileJson :size="12" :stroke-width="1.75" />
+              <span>选择 .json 文件</span>
+            </button>
+            <span class="pad-mcptab__hint-inline">或者直接粘贴到下面 textarea</span>
+          </div>
+          <textarea
+            v-model="importJsonText"
+            class="pad-mcptab__textarea pad-mcptab__textarea--mono"
+            rows="10"
+            spellcheck="false"
+            placeholder='例 1: { "name": "filesystem", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:\\path"] }&#10;&#10;例 2: { "mcpServers": { "filesystem": { ... }, "fetch": { ... } } }'
+            :disabled="isImporting_apply"
+            @input="parseImportPreview"
+          />
+        </div>
+
+        <!-- 解析预览 -->
+        <div v-if="importParseResult" class="pad-mcptab__preview">
+          <div v-if="importParseResult.topError" class="pad-mcptab__preview-block is-error">
+            <AlertCircle :size="12" :stroke-width="1.75" />
+            <span>{{ importParseResult.topError }}</span>
+          </div>
+          <div v-else class="pad-mcptab__preview-block is-info">
+            <Check :size="12" :stroke-width="1.75" />
+            <span>检测到格式: <strong>{{ describeFormat(importParseResult.format) }}</strong></span>
+          </div>
+
+          <!-- 解析成功的 servers (含跟现有冲突的标记) -->
+          <div v-if="importParseResult.servers.length > 0" class="pad-mcptab__preview-block">
+            <div class="pad-mcptab__preview-title">
+              ✅ 将导入 {{ importParseResult.servers.length }} 个 server 到 <code>{{ importScope }}</code>:
+            </div>
+            <ul class="pad-mcptab__preview-list">
+              <li v-for="s in importParseResult.servers" :key="s.name" class="pad-mcptab__preview-item">
+                <code class="pad-mcptab__preview-name">{{ s.name }}</code>
+                <code class="pad-mcptab__preview-cmd">{{ s.command }}</code>
+                <span v-if="servers.some((existing) => existing.name === s.name)" class="pad-mcptab__conflict-tag">
+                  冲突 (将跳过)
+                </span>
+              </li>
+            </ul>
+          </div>
+
+          <!-- 解析失败的 -->
+          <div v-if="importParseResult.invalid.length > 0" class="pad-mcptab__preview-block is-warn">
+            <div class="pad-mcptab__preview-title">
+              ⚠️ {{ importParseResult.invalid.length }} 个 entry 解析失败 (不会写入):
+            </div>
+            <ul class="pad-mcptab__preview-list">
+              <li v-for="(item, idx) in importParseResult.invalid" :key="idx" class="pad-mcptab__preview-item">
+                <code class="pad-mcptab__preview-cmd">{{ item.reason }}</code>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- 操作按钮 -->
+        <div class="pad-mcptab__form-actions">
+          <button
+            class="pad-mcptab__btn"
+            @click="cancelImport"
+            :disabled="isImporting_apply"
+          >
+            <X :size="14" :stroke-width="1.75" />
+            <span>取消</span>
+          </button>
+          <button
+            class="pad-mcptab__btn pad-mcptab__btn--primary"
+            :disabled="isImporting_apply || !importParseResult || (importParseResult.servers.length === 0 && (importParseResult.servers.length - importParseResult.invalid.length) === 0) || (importParseResult.servers.length > 0 && importParseResult.servers.every((s) => servers.some((existing) => existing.name === s.name)))"
+            @click="applyImport"
+          >
+            <Upload :size="14" :stroke-width="1.75" />
+            <span>
+              {{
+                isImporting_apply
+                  ? '导入中…'
+                  : `确认导入 ${importParseResult?.servers.filter((s) => !servers.some((existing) => existing.name === s.name)).length ?? 0} 个 server`
+              }}
+            </span>
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- 编辑 dialog -->
     <div v-if="isEditing" class="pad-mcptab__dialog">
       <div class="pad-mcptab__dialog-head">
@@ -264,12 +515,21 @@ onMounted(() => {
         <Plug :size="14" :stroke-width="1.75" />
         <span>MCP Servers ({{ servers.length }})</span>
         <button
-          v-if="!isCreating"
+          v-if="!isCreating && !isImporting"
           class="pad-mcptab__btn pad-mcptab__btn--primary"
           @click="startCreate"
         >
           <Plus :size="12" :stroke-width="1.75" />
           <span>新建</span>
+        </button>
+        <button
+          v-if="!isCreating && !isImporting"
+          class="pad-mcptab__btn"
+          @click="startImport"
+          title="粘贴 / 选 .json 文件批量导入"
+        >
+          <Upload :size="12" :stroke-width="1.75" />
+          <span>导入 JSON</span>
         </button>
         <button
           v-if="!loading && servers.length > 0"
@@ -287,7 +547,7 @@ onMounted(() => {
       <div v-else-if="servers.length === 0" class="pad-mcptab__empty">
         <Plug :size="20" :stroke-width="1.5" />
         <div class="pad-mcptab__empty-title">暂无 MCP server</div>
-        <div class="pad-mcptab__empty-desc">点 "新建" 按钮配置你的第一个 MCP server. 常见例子: filesystem / fetch / github 等.</div>
+        <div class="pad-mcptab__empty-desc">点 "新建" 填表单, 或 "导入 JSON" 粘贴 Claude Desktop / Cursor 的 MCP 配置批量导入. 常见例子: filesystem / fetch / github 等.</div>
       </div>
       <ul v-else class="pad-mcptab__list">
         <li v-for="s in servers" :key="`${s.scope}/${s.name}`" class="pad-mcptab__item">
@@ -649,5 +909,168 @@ onMounted(() => {
   flex-shrink: 0;
   margin-top: 2px;
   color: var(--pad-accent);
+}
+
+/* ====== 2026-08-21 v0.6.3-rc1 P2-1.1: 导入 JSON dialog 专用样式 ====== */
+.pad-mcptab__form-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--pad-accent) 6%, transparent);
+  border-radius: var(--pad-radius-sm);
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-secondary);
+  line-height: 1.5;
+}
+.pad-mcptab__form-hint :deep(svg) {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--pad-accent);
+}
+.pad-mcptab__form-hint code {
+  background: var(--pad-bg-active);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-11, 11px);
+}
+
+.pad-mcptab__radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--pad-popover);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm);
+}
+.pad-mcptab__radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-secondary);
+  cursor: pointer;
+}
+.pad-mcptab__radio input[type="radio"] {
+  margin: 0;
+  cursor: pointer;
+}
+.pad-mcptab__radio:has(input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.pad-mcptab__radio code {
+  background: var(--pad-bg-active);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-11, 11px);
+}
+
+.pad-mcptab__file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.pad-mcptab__file-input {
+  display: none;  /* 隐藏原生 input, 用 button 触发 */
+}
+
+.pad-mcptab__textarea--mono {
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-12, 12px);
+  min-height: 160px;
+}
+
+.pad-mcptab__preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--pad-popover);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm);
+  font-size: var(--pad-fs-12, 12px);
+}
+.pad-mcptab__preview-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pad-mcptab__preview-block.is-info {
+  color: var(--pad-fg-primary);
+}
+.pad-mcptab__preview-block.is-info :deep(svg) {
+  color: var(--pad-success, #16a34a);
+}
+.pad-mcptab__preview-block.is-error {
+  color: var(--pad-danger, #dc2626);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.pad-mcptab__preview-block.is-warn {
+  color: var(--pad-fg-primary);
+}
+.pad-mcptab__preview-block :deep(svg) {
+  flex-shrink: 0;
+}
+.pad-mcptab__preview-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: var(--pad-fw-medium);
+}
+.pad-mcptab__preview-title code {
+  background: var(--pad-muted);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-11, 11px);
+}
+.pad-mcptab__preview-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pad-mcptab__preview-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--pad-bg-input);
+  border-radius: var(--pad-radius-sm);
+  flex-wrap: wrap;
+}
+.pad-mcptab__preview-name {
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-12, 12px);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-primary);
+  background: var(--pad-muted);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.pad-mcptab__preview-cmd {
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-11, 11px);
+  color: var(--pad-fg-secondary);
+}
+.pad-mcptab__conflict-tag {
+  font-size: var(--pad-fs-10, 10px);
+  color: var(--pad-danger, #dc2626);
+  background: color-mix(in srgb, var(--pad-danger, #dc2626) 12%, transparent);
+  padding: 1px 6px;
+  border-radius: var(--pad-radius-sm);
+  font-weight: var(--pad-fw-medium);
+  margin-left: auto;
 }
 </style>

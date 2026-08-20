@@ -97,6 +97,63 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
   }
 
   /**
+   * 2026-08-21 v0.6.3-rc1 P2-1: 批量导入 MCP server (JSON 方式).
+   *   - 解析 + 校验 (走 lib/mcpImport.ts, 支持 3 种格式 auto-detect)
+   *   - 冲突检测: 跟当前列表里 name 撞的默认 SKIP (不覆盖, 保护 user 已有配置)
+   *   - 全部走 store.write, 一次 refresh
+   *
+   * 返回: { imported: name[], skipped: [{name, reason}], failed: [{name, reason}] }
+   *   - imported: 成功写入的 server name 列表
+   *   - skipped: 因为跟现有冲突被跳过的 (name + reason)
+   *   - failed: 写入过程中 Tauri 报错的 (单个 server 失败不影响其它)
+   *
+   * 调用方根据返回值给 user 展示反馈 (toast / dialog summary).
+   */
+  async function importServers(
+    serversToImport: Array<{ name: string; body: string }>,
+    scope: McpServerScope,
+  ): Promise<{
+    imported: string[];
+    skipped: Array<{ name: string; reason: string }>;
+    failed: Array<{ name: string; reason: string }>;
+  }> {
+    // 先 refresh 一次拿到最新列表, 避免 stale data 导致误判冲突
+    await refresh();
+    const existingNames = new Set(servers.value.map((s) => s.name));
+
+    const imported: string[] = [];
+    const skipped: Array<{ name: string; reason: string }> = [];
+    const failed: Array<{ name: string; reason: string }> = [];
+
+    for (const { name, body } of serversToImport) {
+      if (existingNames.has(name)) {
+        skipped.push({
+          name,
+          reason: `已存在 (scope=${servers.value.find((s) => s.name === name)?.scope ?? '?'}), 跳过 — 如需覆盖请先删除旧的`,
+        });
+        continue;
+      }
+      try {
+        await write(scope, name, body);
+        imported.push(name);
+        existingNames.add(name);  // 同一 batch 内的重复也防住
+      } catch (e) {
+        failed.push({
+          name,
+          reason: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
+    // 写完整体 refresh 一次, 让 UI 看到最新列表
+    if (imported.length > 0) {
+      await refresh();
+    }
+
+    return { imported, skipped, failed };
+  }
+
+  /**
    * 构造一个新 MCP server 的默认 JSON body. 给"新建"按钮用:
    *   user 点 "新建" → 弹 dialog 表单填 name / command / args / env
    *   默认 body = { name, command: 'node', args: [], env: {} }
@@ -123,6 +180,7 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
     read,
     write,
     remove,
+    importServers,
     buildDefaultBody,
     // 暴露给 UI
     BUILTIN_TOOL_NAMES_MCP,
