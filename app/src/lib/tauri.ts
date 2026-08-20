@@ -558,11 +558,11 @@ class PiTauriClient {
     workspacePath?: string | null;
     agentDir?: string | null;
   }): Promise<TauriUserToolInfo[]> {
+    // v0.6.3-rc1 P2-1.2 修: Rust 端 fn list_user_tools(workspace_path, agent_dir) 是独立参数,
+    //   跟 list_workspace_tree 同 pattern, 不能包 `args` (之前抄 list_skills 写错了).
     return (await invoke('list_user_tools', {
-      args: {
-        workspacePath: args.workspacePath ?? null,
-        agentDir: args.agentDir ?? null,
-      },
+      workspacePath: args.workspacePath ?? null,
+      agentDir: args.agentDir ?? null,
     })) as TauriUserToolInfo[]
   }
 
@@ -600,15 +600,19 @@ class PiTauriClient {
   //   - global:   <agentDir>/mcp/<name>.json
   // FE UI: Settings → MCP tab (新 tab, 跟 Tools tab 同级)
   // sidecar 启动时 (Batch 2) 加载 + spawn MCP server 子进程, 走 @modelcontextprotocol/sdk
+  //
+  // ⚠️ v0.6.3-rc1 P2-1.2 修: 之前抄 list_skills (struct 参数) 用了 `args: {}` 包装,
+  //   但 list_mcp_servers / list_user_tools 走独立参数 (workspace_path, agent_dir),
+  //   Tauri 2 FE 必须直接平铺 { workspacePath, agentDir }, 不能包 `args`. 错的写法导致
+  //   Rust 端收到 None (因为 args 整个被当第一个参数, 函数拿不到独立值). 修后跟
+  //   list_workspace_tree (D183 已验证) 同 pattern.
   async listMcpServers(args: {
     workspacePath?: string | null;
     agentDir?: string | null;
   }): Promise<TauriMcpServerInfo[]> {
     return (await invoke('list_mcp_servers', {
-      args: {
-        workspacePath: args.workspacePath ?? null,
-        agentDir: args.agentDir ?? null,
-      },
+      workspacePath: args.workspacePath ?? null,
+      agentDir: args.agentDir ?? null,
     })) as TauriMcpServerInfo[]
   }
 
@@ -995,6 +999,9 @@ export interface TauriUserToolInfo {
  *     工具名加 mcp_<server>_<tool> 前缀
  *
  * 存储: <workspace>/.pi/mcp/<name>.json + <agentDir>/mcp/<name>.json
+ *
+ * v0.6.3-rc1 P2-1.3: 加 serverType 字段 (stdio | http | sse), 默认 stdio, 跟 schema 对齐.
+ *   HTTP / SSE 暂时不实现, 但 schema 接受, 留给 P2.3
  */
 export interface TauriMcpServerInfo {
   /** MCP server 名, 跟文件名 sans .json 一致, LLM 看到的 tool 名前缀 mcp_<name>_<tool> */
@@ -1007,6 +1014,8 @@ export interface TauriMcpServerInfo {
   filePath: string;
   /** 'workspace' | 'global' */
   scope: 'workspace' | 'global';
+  /** v0.6.3-rc1 P2-1.3: transport 类型. stdio (默认, 已实现) | http (P2.3) | sse (P2.3) */
+  serverType: 'stdio' | 'http' | 'sse';
 }
 // 模块加载时立即启动 listener (fire-and-forget), 加速首次 sendPrompt
 void piTauri.waitForListener();

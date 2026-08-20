@@ -1416,6 +1416,13 @@ struct McpServerInfo {
     file_path: String,
     /// 'workspace' | 'global'
     scope: String,
+    /// v0.6.3-rc1 P2-1.3: transport 类型 (stdio | http | sse). 跟 P1-5 user tool 区分.
+    ///   - stdio: 子进程走 JSON-RPC over stdio (默认, 唯一已实现)
+    ///   - http: HTTP POST (P2.3 实现)
+    ///   - sse:  Server-Sent Events (P2.3 实现)
+    /// 旧配置没 type 字段时 fallback 到 "stdio" (向后兼容)
+    #[serde(rename = "type")]
+    server_type: String,
 }
 
 fn parse_mcp_server_name(name: &str) -> Result<String, String> {
@@ -1507,15 +1514,36 @@ fn validate_mcp_server_body(body: &str) -> Result<(), String> {
             return Err("mcp server body 'timeout' 字段必须是 number".to_string());
         }
     }
+    // v0.6.3-rc1 P2-1.3: type 字段 (可选, 默认 "stdio")
+    //   - stdio: 子进程 JSON-RPC over stdio (唯一已实现)
+    //   - http/sse: schema 接受, 但 sidecar 暂时不实现 (P2.3)
+    //   旧配置没 type 时默认 stdio, 行为不变 (向后兼容)
+    if let Some(t) = obj.get("type") {
+        let type_str = t.as_str()
+            .ok_or("mcp server body 'type' 字段必须是 string")?;
+        if !matches!(type_str, "stdio" | "http" | "sse") {
+            return Err(format!(
+                "mcp server body 'type' 必须是 'stdio' | 'http' | 'sse', got '{}'",
+                type_str
+            ));
+        }
+    }
     Ok(())
 }
 
 fn extract_mcp_server_info(name: &str, body: &str, file_path: &str, scope: &str) -> Option<McpServerInfo> {
     let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
     let obj = parsed.as_object()?;
+    // v0.6.3-rc1 P2-1.3: 读 type 字段, 默认 "stdio" (向后兼容)
+    let server_type = obj.get("type")
+        .and_then(|v| v.as_str())
+        .filter(|t| matches!(*t, "stdio" | "http" | "sse"))
+        .unwrap_or("stdio")
+        .to_string();
     Some(McpServerInfo {
         name: name.to_string(),
         command: obj.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        server_type,
         body: body.to_string(),
         file_path: file_path.to_string(),
         scope: scope.to_string(),
@@ -1524,6 +1552,7 @@ fn extract_mcp_server_info(name: &str, body: &str, file_path: &str, scope: &str)
 
 #[tauri::command]
 async fn list_mcp_servers(workspace_path: Option<String>, agent_dir: Option<String>) -> Result<Vec<McpServerInfo>, String> {
+    debug_log(&format!("list_mcp_servers: enter workspace_path={:?} agent_dir={:?}", workspace_path, agent_dir));
     // 跟 P1-5 list_user_tools 同 pattern: 先 global, 再 workspace (workspace 后写覆盖 global, 用 name 去重)
     let mut servers: Vec<McpServerInfo> = Vec::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1535,7 +1564,11 @@ async fn list_mcp_servers(workspace_path: Option<String>, agent_dir: Option<Stri
         seen_names: &mut std::collections::HashSet<String>,
         workspace_override: bool,
     ) -> Result<(), String> {
-        if !dir.exists() { return Ok(()); }
+        if !dir.exists() {
+            debug_log(&format!("list_mcp_servers: dir not exist, skip: {}", dir.display()));
+            return Ok(());
+        }
+        debug_log(&format!("list_mcp_servers: scanning dir={} scope={}", dir.display(), scope));
         let entries = std::fs::read_dir(dir)
             .map_err(|e| format!("read_dir({}): {}", dir.display(), e))?;
         for entry in entries.flatten() {

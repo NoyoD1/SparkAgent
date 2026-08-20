@@ -39,13 +39,12 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
    * 跟 Skills/Commands/User tools 同 pattern: 写完/导入后立刻 refresh, 不等 sidecar 重启.
    */
   async function refresh() {
-    const sessionStore = useSessionStore();
-    const ws = sessionStore.activeWorkspace;
+    const wsPath = await ensureActiveWorkspace();
     loading.value = true;
     error.value = null;
     try {
       servers.value = await piTauri.listMcpServers({
-        workspacePath: ws?.path ?? null,
+        workspacePath: wsPath,
         agentDir: null,
       });
     } catch (e) {
@@ -57,13 +56,50 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
   }
 
   /**
+   * 2026-08-21 v0.6.3-rc1 P2-1.2: 确保有 active workspace.
+   *   - 如果 sessionStore.activeWorkspace 有, 用它
+   *   - 没有但 workspaces 列表非空, 用第一个 (跟 sessionStore.activeWorkspace computed 行为一致)
+   *   - 都没有, 调 Tauri ensureDefaultWorkspace 建默认 + addWorkspace
+   *   - 全程 log, 排查 "list 拿 None" 之类的 bug
+   *
+   * 返回: 实际用的 workspace path (永不返回 null, 失败 throw)
+   */
+  async function ensureActiveWorkspace(): Promise<string> {
+    const sessionStore = useSessionStore();
+    let ws = sessionStore.activeWorkspace;
+    if (ws) {
+      console.log('[mcpServers] ensureActiveWorkspace: hit active, path=', ws.path);
+      return ws.path;
+    }
+    if (sessionStore.workspaces.length > 0) {
+      // 没 active 但有 workspaces, 选第一个 (跟 computed activeWorkspace 一致)
+      const first = sessionStore.workspaces[0];
+      sessionStore.activeWorkspaceId = first.id;
+      console.log('[mcpServers] ensureActiveWorkspace: no active, fall back to workspaces[0]=', first.path);
+      return first.path;
+    }
+    // 啥都没, 建默认
+    console.log('[mcpServers] ensureActiveWorkspace: no workspaces, calling Tauri ensureDefaultWorkspace');
+    try {
+      const path = await piTauri.ensureDefaultWorkspace();
+      const newWs = sessionStore.addWorkspace({ path, isDefault: true });
+      sessionStore.activeWorkspaceId = newWs.id;
+      console.log('[mcpServers] ensureActiveWorkspace: created default, path=', path);
+      return path;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`无法创建默认工作区 (MCP 需要工作区才能读写): ${msg}`);
+    }
+  }
+
+  /**
    * 读 MCP server 完整 JSON body. 给编辑 dialog 用 (填默认值).
    */
   async function read(scope: McpServerScope, name: string): Promise<string> {
-    const sessionStore = useSessionStore();
+    const wsPath = await ensureActiveWorkspace();
     return await piTauri.readMcpServer({
       scope,
-      workspacePath: sessionStore.activeWorkspace?.path ?? null,
+      workspacePath: wsPath,
       agentDir: null,
       name,
     });
@@ -76,10 +112,10 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
   async function write(scope: McpServerScope, name: string, body: string): Promise<string> {
     validateName(name);
     validateBody(body);
-    const sessionStore = useSessionStore();
+    const wsPath = await ensureActiveWorkspace();
     return await piTauri.writeMcpServer({
       scope,
-      workspacePath: sessionStore.activeWorkspace?.path ?? null,
+      workspacePath: wsPath,
       agentDir: null,
       name,
       body,
@@ -87,10 +123,10 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
   }
 
   async function remove(scope: McpServerScope, name: string): Promise<boolean> {
-    const sessionStore = useSessionStore();
+    const wsPath = await ensureActiveWorkspace();
     return await piTauri.deleteMcpServer({
       scope,
-      workspacePath: sessionStore.activeWorkspace?.path ?? null,
+      workspacePath: wsPath,
       agentDir: null,
       name,
     });
@@ -161,12 +197,40 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
    */
   function buildDefaultBody(name: string, command: string, args: string[]): string {
     const body = {
+      type: 'stdio',
       name,
       command,
       args,
       env: {},
       timeout: 30000,
     };
+    return JSON.stringify(body, null, 2);
+  }
+
+  /**
+   * v0.6.3-rc1 P2-1.3: 拼装 MCP server body (form 模式用, 接受 type + env).
+   *   - type 必填, 必须是 stdio | http | sse
+   *   - HTTP/SSE 暂时不实现 (sidecar 只接 stdio), 但 UI 允许写 (P2.3 接上)
+   *
+   * @param params 含 type/name/command/args/env/timeout
+   * @returns 完整 JSON body string
+   */
+  function buildBodyFromForm(params: {
+    type: 'stdio' | 'http' | 'sse';
+    name: string;
+    command: string;
+    args: string[];
+    env: Record<string, string>;
+    timeout?: number;
+  }): string {
+    const body: Record<string, unknown> = {
+      type: params.type,
+      name: params.name,
+      command: params.command,
+      args: params.args,
+      env: params.env,
+    };
+    if (params.timeout !== undefined) body.timeout = params.timeout;
     return JSON.stringify(body, null, 2);
   }
 
@@ -182,6 +246,8 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
     remove,
     importServers,
     buildDefaultBody,
+    buildBodyFromForm,  // v0.6.3-rc1 P2-1.3: form 模式拼 body
+    ensureActiveWorkspace,  // v0.6.3-rc1 P2-1.2: UI 用来同步 ws path 显示 + 排查
     // 暴露给 UI
     BUILTIN_TOOL_NAMES_MCP,
   };
@@ -209,7 +275,8 @@ function validateName(name: string) {
 /**
  * FE 端 body 预校验 (跟 Rust 端 validate_mcp_server_body 一致).
  *  必填: name (string) + command (string, 非空)
- *  可选: args (string[]), env (Record<string, string>), cwd (string), timeout (number)
+ *  可选: type (stdio | http | sse, 默认 stdio), args (string[]), env (Record<string, string>),
+ *        cwd (string), timeout (number)
  */
 function validateBody(body: string) {
   let parsed: unknown;
@@ -244,7 +311,7 @@ function validateBody(body: string) {
     }
     for (const [k, v] of Object.entries(obj.env)) {
       if (typeof v !== 'string') {
-        throw new Error(`mcp server body 'env.${k}' 必须是 string`);
+        throw new Error(`mcp server body 'env.${k}'' 必须是 string`);
       }
     }
   }
@@ -253,5 +320,14 @@ function validateBody(body: string) {
   }
   if (obj.timeout !== undefined && typeof obj.timeout !== 'number') {
     throw new Error("mcp server body 'timeout' 字段必须是 number");
+  }
+  // v0.6.3-rc1 P2-1.3: type 校验
+  if (obj.type !== undefined) {
+    if (typeof obj.type !== 'string') {
+      throw new Error("mcp server body 'type' 字段必须是 string");
+    }
+    if (!['stdio', 'http', 'sse'].includes(obj.type)) {
+      throw new Error("mcp server body 'type' 必须是 'stdio' | 'http' | 'sse'");
+    }
   }
 }

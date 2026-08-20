@@ -203,8 +203,19 @@ function tryBuildServerFromObject(
     return { server: null, error: `${where}: timeout 必须是 number` };
   }
 
-  // 构造完整 body (跟用户填的等价, 含 name / command / args / env / cwd / timeout)
+  // 7. type (可选, 默认 stdio) v0.6.3-rc1 P2-1.3
+  if (obj.type !== undefined) {
+    if (typeof obj.type !== 'string') {
+      return { server: null, error: `${where}: type 必须是 string` };
+    }
+    if (!['stdio', 'http', 'sse'].includes(obj.type)) {
+      return { server: null, error: `${where}: type 必须是 'stdio' | 'http' | 'sse', got '${obj.type}'` };
+    }
+  }
+
+  // 构造完整 body (跟用户填的等价, 含 name / type / command / args / env / cwd / timeout)
   const body: Record<string, unknown> = { name, command };
+  if (obj.type !== undefined) body.type = obj.type;  // 不传时 Rust 端默认 stdio
   if (obj.args !== undefined) body.args = obj.args;
   if (obj.env !== undefined) body.env = obj.env;
   if (obj.cwd !== undefined) body.cwd = obj.cwd;
