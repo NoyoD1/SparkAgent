@@ -1,0 +1,625 @@
+<script setup lang="ts">
+/**
+ * 2026-08-20 P1-5: Settings → Tools tab
+ *
+ * 列出 builtin 7 个 tool (read/write/edit/bash/ls/find/grep) + user-defined tool.
+ * 派生流程: 点 builtin 工具的 "派生" 按钮 → 弹 dialog 填 name / description / JSON body
+ *   (预填默认 body) → 保存到 <workspace>/.pi/tools/<name>.json.
+ * sidecar 启动时自动加载 user tool + merge 到 LLM 可见的 tools list (Batch 2 实现的).
+ *
+ * 跟其他 Settings tab 的差异:
+ *   - body 是 JSON (跟 Skills/Commands 的 markdown frontmatter 不同), 用 textarea 直接编辑
+ *   - name 不能跟 builtin 7 个重 (FE 预校验 + Rust 端兜底)
+ *   - 简化版: 暂不支持 edit (只能 delete + 重新派生), 后续 P1.5.1 加
+ *
+ * 存储: <workspacePath>/.pi/tools/<name>.json + <agentDir>/tools/<name>.json
+ *   两层 scope, workspace 优先 (跟 Skills/Commands/CustomInstructions 同 pattern).
+ */
+import { ref, onMounted } from 'vue';
+import { storeToRefs } from 'pinia';
+import {
+  Wrench, Plus, X, Save, Trash2, AlertCircle, Check, Info,
+  FileCode, Edit3, BookOpen, Search, FileText, FileSearch, Terminal,
+} from 'lucide-vue-next';
+import {
+  useUserToolsStore,
+  BUILTIN_TOOL_NAMES,
+  BUILTIN_TOOL_LABEL,
+  type BuiltinToolName,
+} from '@/stores/userTools';
+
+const userToolsStore = useUserToolsStore();
+const { tools, loading, error } = storeToRefs(userToolsStore);
+
+// builtin 工具 → lucide icon 映射 (UI 显示)
+const BUILTIN_TOOL_ICON: Record<BuiltinToolName, any> = {
+  read: FileText,
+  write: Edit3,
+  edit: BookOpen,
+  bash: Terminal,
+  ls: FileSearch,
+  find: Search,
+  grep: FileCode,
+};
+
+// ====== 派生 dialog state ======
+const isDeriving = ref(false);
+const derivingFromBuiltin = ref<BuiltinToolName | null>(null);
+const formName = ref('');
+const formDescription = ref('');
+const formBody = ref('');
+const isSaving = ref(false);
+const toast = ref<{ type: 'ok' | 'fail'; message: string } | null>(null);
+
+function startDerive(basedOn: BuiltinToolName) {
+  isDeriving.value = true;
+  derivingFromBuiltin.value = basedOn;
+  // 预填默认 name (用户改成 my_<name>_<purpose> 这种)
+  formName.value = `my_${basedOn}_`;
+  formDescription.value = BUILTIN_TOOL_LABEL[basedOn];
+  formBody.value = userToolsStore.buildDefaultBody(basedOn, formName.value, formDescription.value);
+}
+
+function cancelDerive() {
+  isDeriving.value = false;
+  derivingFromBuiltin.value = null;
+  formName.value = '';
+  formDescription.value = '';
+  formBody.value = '';
+}
+
+async function saveDerive() {
+  if (isSaving.value) return;
+  isSaving.value = true;
+  toast.value = null;
+  try {
+    // 校验 body 里 name 跟 formName 一致 (跟 Rust 端 write_user_tool 校验一致)
+    const parsed = JSON.parse(formBody.value);
+    parsed.name = formName.value;  // 同步 formName 到 body
+    parsed.description = formDescription.value;  // 同步 description
+    parsed.basedOn = derivingFromBuiltin.value;  // 同步 basedOn
+    const finalBody = JSON.stringify(parsed, null, 2);
+
+    await userToolsStore.write('workspace', formName.value, finalBody);
+    toast.value = { type: 'ok', message: `已创建 ${formName.value}` };
+    cancelDerive();
+    await userToolsStore.refresh();
+  } catch (e) {
+    toast.value = { type: 'fail', message: e instanceof Error ? e.message : String(e) };
+  } finally {
+    isSaving.value = false;
+  }
+}
+
+async function removeTool(scope: 'workspace' | 'global', name: string) {
+  if (!confirm(`确认删除 user tool "${name}" (scope=${scope})?`)) return;
+  try {
+    await userToolsStore.remove(scope, name);
+    toast.value = { type: 'ok', message: `已删除 ${name}` };
+    await userToolsStore.refresh();
+  } catch (e) {
+    toast.value = { type: 'fail', message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// user tool 按 basedOn 分组,显示更清晰
+// (暂时按字母顺序平铺, P1.5.1 加按 basedOn 分组)
+
+onMounted(() => {
+  userToolsStore.refresh();
+});
+</script>
+
+<template>
+  <div class="pad-toolstab">
+    <div class="pad-toolstab__header">
+      <h2 class="pad-toolstab__title">Tools — User 工具模板</h2>
+      <p class="pad-toolstab__subtitle">
+        从 <strong>builtin tool</strong> 派生 user 工具, 预设 args 避免每次重写.
+        存 <code>&lt;workspace&gt;/.pi/tools/*.json</code> + <code>&lt;agentDir&gt;/tools/*.json</code>
+        (workspace 优先). sidecar 启动时自动加载, LLM 调 user tool 时自动 merge preset args.
+      </p>
+    </div>
+
+    <div v-if="toast" class="pad-toolstab__toast" :class="`is-${toast.type}`">
+      <Check v-if="toast.type === 'ok'" :size="14" :stroke-width="1.75" />
+      <AlertCircle v-else :size="14" :stroke-width="1.75" />
+      <span>{{ toast.message }}</span>
+      <button class="pad-toolstab__toast-close" @click="toast = null">×</button>
+    </div>
+
+    <div v-if="error" class="pad-toolstab__toast is-fail">
+      <AlertCircle :size="14" :stroke-width="1.75" />
+      <span>{{ error }}</span>
+    </div>
+
+    <!-- Builtin tools (7 个, 每个有"派生"按钮) -->
+    <div class="pad-toolstab__section">
+      <h3 class="pad-toolstab__section-title">
+        <Wrench :size="14" :stroke-width="1.75" />
+        <span>Builtin Tools (Pi SDK 内置, 不可修改)</span>
+      </h3>
+      <div class="pad-toolstab__builtin-grid">
+        <div
+          v-for="name in BUILTIN_TOOL_NAMES"
+          :key="name"
+          class="pad-toolstab__builtin-card"
+        >
+          <component :is="BUILTIN_TOOL_ICON[name]" :size="18" :stroke-width="1.5" class="pad-toolstab__builtin-icon" />
+          <div class="pad-toolstab__builtin-body">
+            <div class="pad-toolstab__builtin-name">{{ name }}</div>
+            <div class="pad-toolstab__builtin-label">{{ BUILTIN_TOOL_LABEL[name] }}</div>
+          </div>
+          <button
+            class="pad-toolstab__btn pad-toolstab__btn--primary"
+            :disabled="isDeriving"
+            @click="startDerive(name)"
+            title="派生一个 user tool (预设 args 模板)"
+          >
+            <Plus :size="12" :stroke-width="1.75" />
+            <span>派生</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 派生 dialog -->
+    <div v-if="isDeriving" class="pad-toolstab__dialog">
+      <div class="pad-toolstab__dialog-head">
+        <Plus :size="14" :stroke-width="1.75" />
+        <span>派生自 <code>{{ derivingFromBuiltin }}</code></span>
+        <button class="pad-toolstab__toast-close" @click="cancelDerive">
+          <X :size="14" :stroke-width="1.75" />
+        </button>
+      </div>
+      <div class="pad-toolstab__form">
+        <div class="pad-toolstab__form-row">
+          <label class="pad-toolstab__label">name <span class="pad-toolstab__hint-inline">(1-64 char, [A-Za-z0-9._-], 不能跟 builtin 重)</span></label>
+          <input
+            v-model="formName"
+            class="pad-toolstab__input"
+            placeholder="例如 my_grep_todo"
+            spellcheck="false"
+          />
+        </div>
+        <div class="pad-toolstab__form-row">
+          <label class="pad-toolstab__label">description <span class="pad-toolstab__hint-inline">(给 LLM 看的, 告诉 LLM 啥时候该用这个 tool)</span></label>
+          <input
+            v-model="formDescription"
+            class="pad-toolstab__input"
+            placeholder="例如 在 src 下所有 .ts 文件里找 TODO 注释, 排除测试文件"
+            spellcheck="false"
+          />
+        </div>
+        <div class="pad-toolstab__form-row pad-toolstab__form-row--body">
+          <label class="pad-toolstab__label">body (JSON)
+            <span class="pad-toolstab__hint-inline">
+              preset args 填在 "args" 字段. LLM 调时还能 override.
+              <a
+                href="https://github.com/earendil-works/pi-coding-agent/blob/main/src/core/tools/"
+                target="_blank"
+                rel="noopener"
+                class="pad-toolstab__link"
+              >参考 builtin schema</a>
+            </span>
+          </label>
+          <textarea
+            v-model="formBody"
+            class="pad-toolstab__textarea"
+            rows="14"
+            spellcheck="false"
+          />
+        </div>
+        <div class="pad-toolstab__form-actions">
+          <button
+            class="pad-toolstab__btn"
+            @click="cancelDerive"
+            :disabled="isSaving"
+          >
+            <X :size="14" :stroke-width="1.75" />
+            <span>取消</span>
+          </button>
+          <button
+            class="pad-toolstab__btn pad-toolstab__btn--primary"
+            :disabled="isSaving"
+            @click="saveDerive"
+          >
+            <Save :size="14" :stroke-width="1.75" />
+            <span>{{ isSaving ? '保存中…' : '保存到 workspace' }}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- User tools list -->
+    <div class="pad-toolstab__section">
+      <h3 class="pad-toolstab__section-title">
+        <Wrench :size="14" :stroke-width="1.75" />
+        <span>User Tools ({{ tools.length }})</span>
+        <button
+          v-if="!loading && tools.length > 0"
+          class="pad-toolstab__btn"
+          @click="userToolsStore.refresh()"
+          title="刷新列表"
+        >
+          <span>刷新</span>
+        </button>
+      </h3>
+      <div v-if="loading" class="pad-toolstab__empty">
+        <Wrench :size="20" :stroke-width="1.5" />
+        <div>⏳ 加载中…</div>
+      </div>
+      <div v-else-if="tools.length === 0" class="pad-toolstab__empty">
+        <Wrench :size="20" :stroke-width="1.5" />
+        <div class="pad-toolstab__empty-title">暂无 user tool</div>
+        <div class="pad-toolstab__empty-desc">点上面 builtin 工具的 "派生" 按钮创建你的第一个 user tool.</div>
+      </div>
+      <ul v-else class="pad-toolstab__list">
+        <li v-for="t in tools" :key="`${t.scope}/${t.name}`" class="pad-toolstab__item">
+          <div class="pad-toolstab__item-body">
+            <div class="pad-toolstab__item-name">
+              <code>{{ t.name }}</code>
+              <span class="pad-toolstab__scope-tag" :class="`is-${t.scope}`">{{ t.scope }}</span>
+              <span class="pad-toolstab__basedon-tag">基于 {{ t.basedOn }}</span>
+            </div>
+            <div class="pad-toolstab__item-desc">{{ t.description }}</div>
+          </div>
+          <div class="pad-toolstab__item-actions">
+            <button
+              class="pad-toolstab__btn pad-toolstab__btn--danger"
+              title="删除"
+              @click="removeTool(t.scope, t.name)"
+            >
+              <Trash2 :size="13" :stroke-width="1.75" />
+            </button>
+          </div>
+        </li>
+      </ul>
+    </div>
+
+    <div class="pad-toolstab__hint">
+      <Info :size="12" :stroke-width="1.75" />
+      <span>
+        user tool 是 builtin tool 的"args 预设包装" — LLM 调你的 user tool 时,
+        sidecar 自动把 preset args 跟 LLM 调的 args 合并, 调 builtin tool 的 execute.
+        适合"经常跑同一个 command 但不想每次重写 args"的场景.
+      </span>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+/* 跟 SlashTab 视觉一致, 用 pad-toolstab__ 前缀 */
+.pad-toolstab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.pad-toolstab__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pad-toolstab__title {
+  margin: 0;
+  font-size: var(--pad-fs-20, 20px);
+  font-weight: var(--pad-fw-semibold, 600);
+  color: var(--pad-fg-primary);
+}
+.pad-toolstab__subtitle {
+  margin: 0;
+  font-size: var(--pad-fs-13, 13px);
+  color: var(--pad-fg-secondary);
+  line-height: 1.5;
+}
+.pad-toolstab__subtitle code {
+  background: var(--pad-bg-active);
+  padding: 1px 6px;
+  border-radius: var(--pad-radius-sm);
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-12);
+}
+.pad-toolstab__toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--pad-radius-md);
+  font-size: var(--pad-fs-13);
+}
+.pad-toolstab__toast.is-ok {
+  background: color-mix(in srgb, var(--pad-success, #16a34a) 12%, transparent);
+  color: var(--pad-success, #16a34a);
+}
+.pad-toolstab__toast.is-fail {
+  background: color-mix(in srgb, var(--pad-danger, #dc2626) 12%, transparent);
+  color: var(--pad-danger, #dc2626);
+}
+.pad-toolstab__toast-close {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: var(--pad-fs-16);
+  line-height: 1;
+  opacity: 0.7;
+  padding: 0 4px;
+}
+.pad-toolstab__toast-close:hover { opacity: 1; }
+
+.pad-toolstab__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pad-toolstab__section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--pad-fs-14, 14px);
+  font-weight: var(--pad-fw-semibold, 600);
+  color: var(--pad-fg-primary);
+}
+
+.pad-toolstab__builtin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+.pad-toolstab__builtin-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--pad-bg-input);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md);
+}
+.pad-toolstab__builtin-icon {
+  color: var(--pad-fg-secondary);
+  flex-shrink: 0;
+}
+.pad-toolstab__builtin-body {
+  flex: 1;
+  min-width: 0;
+}
+.pad-toolstab__builtin-name {
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-13);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-primary);
+}
+.pad-toolstab__builtin-label {
+  font-size: var(--pad-fs-11, 11px);
+  color: var(--pad-fg-tertiary);
+}
+
+.pad-toolstab__dialog {
+  background: var(--pad-bg-input);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md);
+  overflow: hidden;
+}
+.pad-toolstab__dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--pad-divider);
+  background: var(--pad-bg-active);
+  font-size: var(--pad-fs-13);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-primary);
+}
+.pad-toolstab__dialog-head code {
+  font-family: var(--pad-font-mono);
+  background: var(--pad-muted);
+  padding: 1px 6px;
+  border-radius: var(--pad-radius-sm);
+  font-size: var(--pad-fs-12);
+}
+.pad-toolstab__form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+.pad-toolstab__form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pad-toolstab__label {
+  font-size: var(--pad-fs-12, 12px);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-secondary);
+}
+.pad-toolstab__hint-inline {
+  font-weight: var(--pad-fw-regular, 400);
+  color: var(--pad-fg-tertiary);
+  font-size: var(--pad-fs-11, 11px);
+  margin-left: 4px;
+}
+.pad-toolstab__link {
+  color: var(--pad-accent);
+  text-decoration: none;
+  margin-left: 4px;
+}
+.pad-toolstab__link:hover { text-decoration: underline; }
+.pad-toolstab__input {
+  padding: 6px 10px;
+  background: var(--pad-popover);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm);
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-13);
+  color: var(--pad-fg-primary);
+}
+.pad-toolstab__input:focus {
+  outline: none;
+  border-color: var(--pad-accent);
+}
+.pad-toolstab__textarea {
+  padding: 8px 10px;
+  background: var(--pad-popover);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm);
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-primary);
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 200px;
+}
+.pad-toolstab__textarea:focus {
+  outline: none;
+  border-color: var(--pad-accent);
+}
+.pad-toolstab__form-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.pad-toolstab__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 12px;
+  background: transparent;
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm);
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-secondary);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--pad-dur-fast) ease;
+}
+.pad-toolstab__btn:hover:not(:disabled) {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
+}
+.pad-toolstab__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.pad-toolstab__btn--primary {
+  background: var(--pad-primary);
+  color: var(--pad-fg-inverse);
+  border-color: var(--pad-primary);
+}
+.pad-toolstab__btn--primary:hover:not(:disabled) {
+  background: var(--pad-accent-hover);
+  border-color: var(--pad-accent-hover);
+}
+.pad-toolstab__btn--danger:hover:not(:disabled) {
+  color: var(--pad-danger, #dc2626);
+  border-color: var(--pad-danger, #dc2626);
+}
+
+.pad-toolstab__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  background: var(--pad-bg-input);
+  border: 1px dashed var(--pad-border);
+  border-radius: var(--pad-radius-md);
+  color: var(--pad-fg-tertiary);
+  gap: 6px;
+}
+.pad-toolstab__empty-title {
+  font-size: var(--pad-fs-13, 13px);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-secondary);
+}
+.pad-toolstab__empty-desc {
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-tertiary);
+}
+
+.pad-toolstab__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pad-toolstab__item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--pad-bg-input);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md);
+}
+.pad-toolstab__item-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pad-toolstab__item-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.pad-toolstab__item-name code {
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-13, 13px);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-primary);
+}
+.pad-toolstab__scope-tag {
+  font-size: var(--pad-fs-10, 10px);
+  padding: 1px 6px;
+  border-radius: var(--pad-radius-sm);
+  font-weight: var(--pad-fw-medium);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.pad-toolstab__scope-tag.is-workspace {
+  background: color-mix(in srgb, var(--pad-accent) 14%, transparent);
+  color: var(--pad-accent);
+}
+.pad-toolstab__scope-tag.is-global {
+  background: var(--pad-muted);
+  color: var(--pad-fg-secondary);
+}
+.pad-toolstab__basedon-tag {
+  font-size: var(--pad-fs-10, 10px);
+  color: var(--pad-fg-tertiary);
+}
+.pad-toolstab__item-desc {
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-secondary);
+  line-height: 1.4;
+}
+.pad-toolstab__item-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.pad-toolstab__hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--pad-bg-input);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md);
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-tertiary);
+  line-height: 1.5;
+}
+</style>

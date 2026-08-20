@@ -549,6 +549,51 @@ class PiTauriClient {
     return (await invoke('delete_command', { args })) as boolean
   }
 
+  // ====== 2026-08-20 P1-5: User tools (从 builtin tool 派生的 args 预设模板) ======
+  // 跟 Skills / Commands 同 pattern: 两层 scope (workspace + global, workspace 优先).
+  //   - workspace: <workspacePath>/.pi/tools/<name>.json
+  //   - global:   <agentDir>/tools/<name>.json
+  // FE UI: Settings → Tools tab (新 tab, 跟 Skills/Commands/CustomInstructions 同级)
+  async listUserTools(args: {
+    workspacePath?: string | null;
+    agentDir?: string | null;
+  }): Promise<TauriUserToolInfo[]> {
+    return (await invoke('list_user_tools', {
+      args: {
+        workspacePath: args.workspacePath ?? null,
+        agentDir: args.agentDir ?? null,
+      },
+    })) as TauriUserToolInfo[]
+  }
+
+  async readUserTool(args: {
+    scope: 'workspace' | 'global';
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+  }): Promise<string> {
+    return (await invoke('read_user_tool', { args })) as string
+  }
+
+  async writeUserTool(args: {
+    scope: 'workspace' | 'global';
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+    body: string;
+  }): Promise<string> {
+    return (await invoke('write_user_tool', { args })) as string
+  }
+
+  async deleteUserTool(args: {
+    scope: 'workspace' | 'global';
+    workspacePath?: string | null;
+    agentDir?: string | null;
+    name: string;
+  }): Promise<boolean> {
+    return (await invoke('delete_user_tool', { args })) as boolean
+  }
+
   // ====== v0.4.6 Project rules / 自定义指令 (跟 Claude 桌面端 "自定义指令" 模式) ======
   // 持久化到 <workspace>/AGENTS.md (per-workspace) + <agentDir>/AGENTS.md (global).
   // Pi SDK 0.84.2 DefaultResourceLoader 自动 load AGENTS.md (resource-loader.ts:71),
@@ -867,6 +912,31 @@ export interface TauriCommandInfo {
 }
 
 export const piTauri = new PiTauriClient();
+
+/**
+ * 2026-08-20 P1-5: Tauri 端 list_user_tools 返回的单个 user-defined tool
+ *   (从 builtin tool 派生的 args 预设模板).
+ *
+ * 跟 builtin tool 的区别:
+ *   - builtin: Pi SDK 内置, 不存文件
+ *   - user tool: 存 <workspace>/.pi/tools/<name>.json 或 <agentDir>/tools/<name>.json
+ *     sidecar 启动时加载, wrap builtin 的 ToolDefinition (复用 parameters zod schema)
+ *     + 自定义 description 引导 LLM 啥时候用, + preset args 自动 merge
+ */
+export interface TauriUserToolInfo {
+  /** user tool 名字, 跟文件名 sans .json 一致 */
+  name: string;
+  /** 给 LLM 看的描述, 告诉 LLM 啥时候该用这个 tool */
+  description: string;
+  /** builtin tool name (read / write / edit / bash / ls / find / grep) */
+  basedOn: string;
+  /** 完整 JSON body (跟 file 内容一致, 方便 FE 不重复读) */
+  body: string;
+  /** 绝对文件路径, FE 用于 debug / 显示 */
+  filePath: string;
+  /** 'workspace' | 'global' */
+  scope: 'workspace' | 'global';
+}
 // 模块加载时立即启动 listener (fire-and-forget), 加速首次 sendPrompt
 void piTauri.waitForListener();
 

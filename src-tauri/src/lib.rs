@@ -1106,6 +1106,264 @@ async fn delete_command(args: CommandArgs) -> Result<bool, String> {
     Ok(true)
 }
 
+// ====== 2026-08-20 P1-5: User tools (从 builtin tool 派生的"args 预设"模板) ======
+// 跟 Skills / Commands / CustomInstructions 同 pattern, 但:
+//   - 文件扩展名是 .json (Skills/Commands 是 .md, frontmatter + body; user tool 是完整 JSON)
+//   - 两层 scope (workspace + global, workspace 优先 — 跟 Skills/Commands 一致)
+//   - name 校验: 1-64 char, [a-zA-Z0-9._-], 不能是 '.' / '..' 防 path traversal
+//   - 额外校验: name 不能跟 builtin 7 个 tool 重 (read / write / edit / bash / ls / find / grep)
+//
+// JSON schema (跟 ADR 衍生 user tool 一致):
+//   {
+//     "name": "my_grep_todo",
+//     "description": "在 src/**/*.ts 里找 TODO 注释, 排除测试文件",
+//     "basedOn": "grep",
+//     "args": { "pattern": "TODO", "path": "src", "include": "*.ts", "exclude": "*.test.ts" }
+//   }
+// 其中:
+//   - name: 必填, 跟文件名一致 (sans .json 后缀)
+//   - description: 必填, LLM 看的 (告诉 LLM 啥时候该用这个 tool)
+//   - basedOn: 必填, 必须是 builtin 7 个 tool 之一
+//   - args: 必填, JSON object (传给 builtin tool 时的预设 args, LLM 调时还能 override)
+//
+// user tool 真的接进 LLM 可见 tools list 在 sidecar 启动时实现 (Batch 2), 这里只做 CRUD.
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserToolArgs {
+    /// "workspace" 写到 <workspacePath>/.pi/tools/<name>.json
+    /// "global"   写到 <agentDir>/tools/<name>.json (跟 Skills/Commands global scope 一致)
+    scope: String,
+    /// user tool 名字, 跟文件名 sans .json 一致, 1-64 char, [a-zA-Z0-9._-]
+    name: String,
+    /// 完整 JSON 字符串 (含 name / description / basedOn / args)
+    body: String,
+    /// workspace scope 必填
+    workspace_path: Option<String>,
+    /// global scope 必填
+    agent_dir: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadDeleteUserToolArgs {
+    scope: String,
+    name: String,
+    workspace_path: Option<String>,
+    agent_dir: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UserToolInfo {
+    name: String,
+    description: String,
+    /// builtin tool name (read / write / edit / bash / ls / find / grep)
+    based_on: String,
+    /// JSON 字符串, 跟 file body 一致 (方便 FE 不重复读)
+    body: String,
+    file_path: String,
+    /// "workspace" | "global"
+    scope: String,
+}
+
+/// 跟 builtin 7 个 tool 重名 → 拒绝 (user tool 会跟 builtin 在同一个 LLM 可见 tools list, 重名会冲突)
+const BUILTIN_TOOL_NAMES: &[&str] = &["read", "write", "edit", "bash", "ls", "find", "grep"];
+
+fn parse_user_tool_name(name: &str) -> Result<String, String> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(format!("user tool name 长度必须 1-64, got {}", name.len()));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        return Err(format!("user tool name 只能含 [a-zA-Z0-9._-], got '{}'", name));
+    }
+    if name == "." || name == ".." {
+        return Err("user tool name 不能是 '.' 或 '..'".to_string());
+    }
+    if BUILTIN_TOOL_NAMES.contains(&name) {
+        return Err(format!("user tool name '{}' 跟 builtin tool 重名, 拒绝保存. 加个前缀 (e.g. my_{})", name, name));
+    }
+    Ok(name.to_string())
+}
+
+fn resolve_user_tools_dir(scope: &str, workspace_path: Option<String>, agent_dir: Option<String>) -> Result<PathBuf, String> {
+    match scope {
+        "workspace" => {
+            let ws = workspace_path.as_ref().filter(|s| !s.is_empty())
+                .ok_or("workspace scope 需要 workspacePath")?;
+            Ok(PathBuf::from(ws).join(".pi").join("tools"))
+        }
+        "global" => {
+            let dir = agent_dir.as_ref().filter(|s| !s.is_empty())
+                .ok_or("global scope 需要 agentDir")?;
+            Ok(PathBuf::from(dir).join("tools"))
+        }
+        other => Err(format!("scope 必须是 'workspace' 或 'global', got '{}'", other)),
+    }
+}
+
+/// 解析 user tool JSON body, 校验 basedOn 是不是 builtin 7 个之一.
+/// 解析失败或 basedOn 不合法 → 拒绝保存 (避免 sidecar 启动加载时崩).
+fn validate_user_tool_body(body: &str) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("user tool body 不是合法 JSON: {}", e))?;
+    let obj = parsed.as_object()
+        .ok_or("user tool body 必须是 JSON object")?;
+    let name = obj.get("name").and_then(|v| v.as_str())
+        .ok_or("user tool body 缺 'name' 字段")?;
+    if name.is_empty() {
+        return Err("user tool body 'name' 字段不能为空".to_string());
+    }
+    let based_on = obj.get("basedOn").and_then(|v| v.as_str())
+        .ok_or("user tool body 缺 'basedOn' 字段")?;
+    if !BUILTIN_TOOL_NAMES.contains(&based_on) {
+        return Err(format!(
+            "user tool basedOn '{}' 不是 builtin tool, 必须是 [{}] 之一",
+            based_on,
+            BUILTIN_TOOL_NAMES.join(", ")
+        ));
+    }
+    let args = obj.get("args");
+    if args.is_none() {
+        return Err("user tool body 缺 'args' 字段".to_string());
+    }
+    if !args.unwrap().is_object() {
+        return Err("user tool body 'args' 字段必须是 JSON object".to_string());
+    }
+    let description = obj.get("description").and_then(|v| v.as_str())
+        .ok_or("user tool body 缺 'description' 字段")?;
+    if description.is_empty() {
+        return Err("user tool body 'description' 字段不能为空".to_string());
+    }
+    Ok(())
+}
+
+/// 从 JSON body 抽出 UserToolInfo 字段 (parse + extract, 不做校验, 校验由 validate_user_tool_body 完成)
+fn extract_user_tool_info(name: &str, body: &str, file_path: &str, scope: &str) -> Option<UserToolInfo> {
+    let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+    let obj = parsed.as_object()?;
+    Some(UserToolInfo {
+        name: name.to_string(),
+        description: obj.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        based_on: obj.get("basedOn").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        body: body.to_string(),
+        file_path: file_path.to_string(),
+        scope: scope.to_string(),
+    })
+}
+
+#[tauri::command]
+async fn list_user_tools(workspace_path: Option<String>, agent_dir: Option<String>) -> Result<Vec<UserToolInfo>, String> {
+    // 两层 scope 扫描: workspace 优先 (同名时 workspace 覆盖 global)
+    // 抽成 closure (不用 `?` + `continue` 跨 await point, Rust async 限制)
+    // 顺序: 先 global, 再 workspace (workspace 后写覆盖 global, 用 name 去重)
+    let mut tools: Vec<UserToolInfo> = Vec::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // 闭包: 扫一个目录, 返回该 scope 找到的 tools + 看到的所有 name
+    // closure 不能直接 mutate outer 状态 (闭包捕获 + send), 用 mut ref 参数
+    fn scan_scope_dir<'a>(
+        dir: &std::path::Path,
+        scope: &'a str,
+        tools: &'a mut Vec<UserToolInfo>,
+        seen_names: &'a mut std::collections::HashSet<String>,
+        workspace_override: bool,
+    ) -> Result<(), String> {
+        if !dir.exists() { return Ok(()); }
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("read_dir({}): {}", dir.display(), e))?;
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+            let filename = match p.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let body = match std::fs::read_to_string(&p) {
+                Ok(s) => s,
+                Err(e) => {
+                    debug_log(&format!("list_user_tools: read {} failed: {}", p.display(), e));
+                    continue;
+                }
+            };
+            if let Some(info) = extract_user_tool_info(&filename, &body, &p.display().to_string(), scope) {
+                if workspace_override && seen_names.contains(&filename) {
+                    // workspace 覆盖 global: 删掉 global 那条
+                    tools.retain(|t| t.name != filename);
+                }
+                seen_names.insert(filename);
+                tools.push(info);
+            }
+        }
+        Ok(())
+    }
+
+    // 1. global scope: <agentDir>/tools/*.json
+    if let Some(agent_dir_str) = agent_dir.as_ref().filter(|s| !s.is_empty()) {
+        let global_dir = PathBuf::from(agent_dir_str).join("tools");
+        scan_scope_dir(&global_dir, "global", &mut tools, &mut seen_names, false)?;
+    }
+    // 2. workspace scope: <workspacePath>/.pi/tools/*.json (覆盖 global 同名)
+    if let Some(ws_str) = workspace_path.as_ref().filter(|s| !s.is_empty()) {
+        let workspace_dir = PathBuf::from(ws_str).join(".pi").join("tools");
+        scan_scope_dir(&workspace_dir, "workspace", &mut tools, &mut seen_names, true)?;
+    }
+
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tools)
+}
+
+#[tauri::command]
+async fn read_user_tool(args: ReadDeleteUserToolArgs) -> Result<String, String> {
+    let dir = resolve_user_tools_dir(&args.scope, args.workspace_path, args.agent_dir)?;
+    let path = dir.join(format!("{}.json", args.name));
+    if !path.exists() {
+        return Err(format!("user tool '{}' (scope={}) 不存在", args.name, args.scope));
+    }
+    std::fs::read_to_string(&path)
+        .map_err(|e| format!("read_to_string({}): {}", path.display(), e))
+}
+
+#[tauri::command]
+async fn write_user_tool(args: UserToolArgs) -> Result<String, String> {
+    // 1. name 校验
+    let name = parse_user_tool_name(&args.name)?;
+    // 2. body 校验: 合法 JSON + 必填字段 + basedOn 合法
+    validate_user_tool_body(&args.body)?;
+    // 3. body 里的 name 跟文件名一致 (防止"用 A 名字存 B 内容" 这种脏数据)
+    let parsed: serde_json::Value = serde_json::from_str(&args.body)
+        .map_err(|e| format!("internal: body re-parse failed: {}", e))?;
+    let body_name = parsed.get("name").and_then(|v| v.as_str())
+        .ok_or("body 缺 name 字段")?;
+    if body_name != name {
+        return Err(format!(
+            "body 里的 name '{}' 跟文件名 '{}' 不一致, 拒绝保存",
+            body_name, name
+        ));
+    }
+    // 4. 解析路径
+    let dir = resolve_user_tools_dir(&args.scope, args.workspace_path, args.agent_dir)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create_dir_all({}): {}", dir.display(), e))?;
+    let path = dir.join(format!("{}.json", name));
+    std::fs::write(&path, args.body.as_bytes())
+        .map_err(|e| format!("write({}): {}", path.display(), e))?;
+    debug_log(&format!("write_user_tool: wrote {} (scope={})", path.display(), args.scope));
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+async fn delete_user_tool(args: ReadDeleteUserToolArgs) -> Result<bool, String> {
+    let dir = resolve_user_tools_dir(&args.scope, args.workspace_path, args.agent_dir)?;
+    let path = dir.join(format!("{}.json", args.name));
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path)
+        .map_err(|e| format!("remove_file({}): {}", path.display(), e))?;
+    Ok(true)
+}
+
 // ====== LLM command ======
 
 #[tauri::command]
@@ -1935,6 +2193,14 @@ pub fn run() {
             read_command,
             write_command,
             delete_command,
+            // 2026-08-20 P1-5: User tools (从 builtin tool 派生的 args 预设模板)
+            //   存储: <workspacePath>/.pi/tools/*.json + <agentDir>/tools/*.json
+            //   两层 scope, workspace 优先 (list 时同名覆盖 global)
+            //   sidecar 启动时 (Batch 2) 加载 + merge 到 Pi SDK tools list
+            list_user_tools,
+            read_user_tool,
+            write_user_tool,
+            delete_user_tool,
             // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
             sidecar::send_rpc_command,
         ])

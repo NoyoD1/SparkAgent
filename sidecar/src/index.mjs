@@ -35,6 +35,13 @@ import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
+  createBashToolDefinition,
+  createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
   DefaultResourceLoader,
   getAgentDir,
   runRpcMode,
@@ -453,7 +460,15 @@ intent across the session is still part of the conversation.
   // 4) tools: 7 内置 (read/bash/edit/write/grep/find/ls), 跟 v0.4.2 step 1 一致
   const tools = config.tools ?? ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'];
 
-  console.error(`[sidecar] creating agent session: model=${model.provider}/${model.id} thinking=${config.thinkingLevel ?? 'medium'} tools=${tools.join(',')} permissionMode=${config.permissionMode ?? 'ask'}`);
+  // 2026-08-20 P1-5: 加载 user-defined tools (从 builtin 派生的 args 预设模板).
+  //   跟 builtin 7 个一起 merge 到 Pi SDK customTools, LLM 可见的 tools list = builtin + user.
+  //   cwd 走 workspacePath (跟 builtin tool 自己定位 relative path 一致)
+  const userTools = loadUserTools(workspacePath, agentDir);
+  if (userTools.length > 0) {
+    console.error(`[sidecar] P1-5: loaded ${userTools.length} user tool(s): [${userTools.map((t) => t.name).join(', ')}]`);
+  }
+
+  console.error(`[sidecar] creating agent session: model=${model.provider}/${model.id} thinking=${config.thinkingLevel ?? 'medium'} tools=${tools.join(',')} userTools=${userTools.length} permissionMode=${config.permissionMode ?? 'ask'}`);
 
   return createAgentSessionFromServices({
     services,
@@ -461,6 +476,7 @@ intent across the session is still part of the conversation.
     model,
     thinkingLevel: config.thinkingLevel,
     tools,
+    customTools: userTools.length > 0 ? userTools : undefined,
   });
 };
 
@@ -488,6 +504,157 @@ intent across the session is still part of the conversation.
  *   (每个 tool call 都查一次) 用 O(1) 命中.
  */
 const READ_ONLY_TOOLS = new Set(['read', 'ls', 'find', 'grep']);
+
+/**
+ * 2026-08-20 P1-5: 加载 user-defined tools (从 builtin 派生的"args 预设"模板)
+ *
+ * 文件位置 (跟 Skills / Commands 同 pattern, workspace 优先):
+ *   - <workspacePath>/.pi/tools/*.json
+ *   - <agentDir>/tools/*.json
+ *
+ * JSON schema (跟 Rust 端 parse_user_tool_name + validate_user_tool_body 一致):
+ *   {
+ *     "name": "my_grep_todo",
+ *     "description": "在 src 下所有 .ts 文件里找 TODO 注释, 排除测试文件",
+ *     "basedOn": "grep",
+ *     "args": { "pattern": "TODO", "path": "src", "include": "*.ts", "exclude": "*.test.ts" }
+ *   }
+ *
+ * 实现: 对每个 user tool 拿 builtin tool 的 ToolDefinition (parameters zod schema),
+ *   包装 execute 闭包 (merge preset args + LLM 传的 args, 调 builtin execute).
+ *   这样 LLM 把 user tool 跟 builtin 看成同一种东西, 但 user tool 的 description 引导
+ *   LLM 啥时候用、args 预填省事.
+ *
+ * 错误处理: 文件格式错 / basedOn 不合法 / etc, **log warn + 跳过**, 不让一个坏文件拖垮整个
+ *   session. 跟 Skills 扫描同 pattern.
+ */
+const BUILTIN_TOOL_NAMES_P1_5 = new Set(['read', 'write', 'edit', 'bash', 'ls', 'find', 'grep']);
+
+function loadUserTools(cwd, agentDir) {
+  if (!cwd && !agentDir) return [];
+  // 拿 builtin tool definitions (parameters zod schema + execute 闭包)
+  // cwd 给 builtin tool 让它定位 relative path (跟 builtin 自己跑命令时一致)
+  // Pi SDK 0.84.2 顶层 index.ts 没 export createAllToolDefinitions, 只 export 各个 createXxxToolDefinition,
+  //   走 createAgentSessionFromServices 时它内部也是按名字查 ToolName union 创建.
+  //   这里我们自己组装一个 dict, 跟 createAllToolDefinitions 等价.
+  const cwdResolved = cwd || process.cwd();
+  const builtinToolDefs = {
+    read: createReadToolDefinition(cwdResolved),
+    write: createWriteToolDefinition(cwdResolved),
+    edit: createEditToolDefinition(cwdResolved),
+    bash: createBashToolDefinition(cwdResolved),
+    ls: createLsToolDefinition(cwdResolved),
+    find: createFindToolDefinition(cwdResolved),
+    grep: createGrepToolDefinition(cwdResolved),
+  };
+
+  const customTools = [];
+  // 顺序: 先 global, 后 workspace, 同名时 workspace 覆盖 global (跟 Rust 端 list_user_tools 一致)
+  const seen = new Set();
+  const seenGlobal = new Set();  // 跟踪 global 哪些名字被加进去了, workspace 出现时删 global 那条
+
+  // 1. global scope: <agentDir>/tools/*.json
+  if (agentDir) {
+    const globalDir = join(agentDir, 'tools');
+    if (existsSync(globalDir)) {
+      try {
+        for (const entry of readdirSync(globalDir)) {
+          if (!entry.endsWith('.json')) continue;
+          const fullPath = join(globalDir, entry);
+          const def = tryParseUserToolJson(fullPath, builtinToolDefs);
+          if (def) {
+            seen.add(def.name);
+            seenGlobal.add(def.name);
+            customTools.push(def);
+          }
+        }
+      } catch (e) {
+        console.error(`[sidecar] P1-5: scan global tools/ failed:`, e instanceof Error ? e.message : String(e));
+      }
+    }
+  }
+  // 2. workspace scope: <workspacePath>/.pi/tools/*.json (同名覆盖 global)
+  if (cwd) {
+    const workspaceDir = join(cwd, '.pi', 'tools');
+    if (existsSync(workspaceDir)) {
+      try {
+        for (const entry of readdirSync(workspaceDir)) {
+          if (!entry.endsWith('.json')) continue;
+          const fullPath = join(workspaceDir, entry);
+          const def = tryParseUserToolJson(fullPath, builtinToolDefs);
+          if (def) {
+            if (seen.has(def.name)) {
+              // workspace 覆盖: 删掉 global 那条
+              const idx = customTools.findIndex((t) => t.name === def.name);
+              if (idx >= 0) customTools.splice(idx, 1);
+            }
+            seen.add(def.name);
+            customTools.push(def);
+          }
+        }
+      } catch (e) {
+        console.error(`[sidecar] P1-5: scan workspace tools/ failed:`, e instanceof Error ? e.message : String(e));
+      }
+    }
+  }
+  return customTools;
+}
+
+function tryParseUserToolJson(filePath, builtinToolDefs) {
+  let body;
+  try {
+    body = readFileSync(filePath, 'utf-8');
+  } catch (e) {
+    console.error(`[sidecar] P1-5: read ${filePath} failed:`, e instanceof Error ? e.message : String(e));
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch (e) {
+    console.error(`[sidecar] P1-5: parse ${filePath} failed (not valid JSON):`, e instanceof Error ? e.message : String(e));
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    console.error(`[sidecar] P1-5: ${filePath} body 必须是 JSON object, 跳过`);
+    return null;
+  }
+  const { name, description, basedOn, args } = parsed;
+  if (!name || typeof name !== 'string') {
+    console.error(`[sidecar] P1-5: ${filePath} 缺 'name' 字段, 跳过`);
+    return null;
+  }
+  if (!description || typeof description !== 'string') {
+    console.error(`[sidecar] P1-5: ${filePath} 缺 'description' 字段, 跳过`);
+    return null;
+  }
+  if (!basedOn || typeof basedOn !== 'string' || !BUILTIN_TOOL_NAMES_P1_5.has(basedOn)) {
+    console.error(`[sidecar] P1-5: ${filePath} basedOn='${basedOn}' 不合法 (必须是 [read,write,edit,bash,ls,find,grep] 之一), 跳过`);
+    return null;
+  }
+  if (!args || typeof args !== 'object') {
+    console.error(`[sidecar] P1-5: ${filePath} 'args' 字段必须是 object, 跳过`);
+    return null;
+  }
+  const builtinDef = builtinToolDefs[basedOn];
+  if (!builtinDef) {
+    // 理论上不会到这里 (basedOn 校验过了), 兜底
+    console.error(`[sidecar] P1-5: ${filePath} builtin tool '${basedOn}' 不存在, 跳过`);
+    return null;
+  }
+  // 包装 execute: merge preset args + LLM 调的 args, 调 builtin tool 的 execute
+  const presetArgs = args;
+  return {
+    ...builtinDef,
+    name,
+    label: name,
+    description,
+    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+      const merged = { ...presetArgs, ...(params || {}) };
+      return builtinDef.execute(toolCallId, merged, signal, onUpdate, ctx);
+    },
+  };
+}
 
 /**
  * 2026-08-20 P1-4: bash 命令分类.

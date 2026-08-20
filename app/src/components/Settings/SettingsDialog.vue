@@ -21,6 +21,7 @@ import {
   Sparkles,         // Skills (v0.4.4)
   Terminal,         // Slash (v0.4.5.2 恢复, D184 v9 ❷)
   FileText,         // Custom Instructions (v0.5.0-v0.1 回归 v0.4.6 单 AGENTS.md 编辑)
+  Wrench,           // Tools (2026-08-20 P1-5: user tool 派生)
   Info,             // 关于
   ArrowLeft,        // 关闭
   RotateCcw,        // 重置
@@ -35,6 +36,7 @@ import ExtensionsTab from './tabs/ExtensionsTab.vue';
 import SkillsTab from './tabs/SkillsTab.vue';
 import SlashTab from './tabs/SlashTab.vue';  // v0.4.5.2 恢复 (D184 v9 ❷)
 import CustomInstructionsTab from './tabs/CustomInstructionsTab.vue';  // v0.5.0-v0.1: 回归单 AGENTS.md 编辑 (取代 v0.4.6.1 Agents tab)
+import ToolsTab from './tabs/ToolsTab.vue';  // 2026-08-20 P1-5: user tool 派生
 import AboutTab from './tabs/AboutTab.vue';
 
 interface TabDef {
@@ -55,6 +57,7 @@ const TABS: TabDef[] = [
   { id: 'skills',     label: 'Skills',  icon: markRaw(Sparkles),   component: markRaw(SkillsTab),     group: 'Agent 能力', implemented: true  },
   { id: 'slash',      label: 'Slash',   icon: markRaw(Terminal),   component: markRaw(SlashTab),      group: 'Agent 能力', implemented: true  },  // v0.4.5.2 恢复 (D184 v9 ❷)
   { id: 'instructions', label: 'Custom Instructions', icon: markRaw(FileText), component: markRaw(CustomInstructionsTab), group: 'Agent 能力', implemented: true  },  // v0.5.0-v0.1: 回归 v0.4.6 单 AGENTS.md 编辑 (取代 v0.4.6.1 multi-persona Agents tab)
+  { id: 'tools',      label: 'Tools',   icon: markRaw(Wrench),     component: markRaw(ToolsTab),       group: 'Agent 能力', implemented: true  },  // 2026-08-20 P1-5: user tool 派生 (从 builtin tool 派生的 args 预设模板)
   { id: 'about',      label: '关于',     icon: markRaw(Info),       component: markRaw(AboutTab),      group: '数据与统计', implemented: true  },
 ];
 
