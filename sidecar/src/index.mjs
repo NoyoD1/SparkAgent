@@ -489,6 +489,96 @@ intent across the session is still part of the conversation.
  */
 const READ_ONLY_TOOLS = new Set(['read', 'ls', 'find', 'grep']);
 
+/**
+ * 2026-08-20 P1-4: bash 命令分类.
+ *   bash 工具的"破坏性 / 跨目录"风险之前只能靠 user 看 string 决定,体验差 + 容易看漏.
+ *   改成 3 类:
+ *     - read-only (白名单): grep / rg / ag / find / ls / cat / head / tail / less / wc / tree
+ *       静默放行, 跟 P0-1 smart 模式对 read-only 工具的策略一致
+ *     - destructive (黑名单): rm / mv / cp / chmod / chown / curl / wget / ssh
+ *       / powershell / cmd / reg / dd / mkfs / fdisk / shutdown
+ *       弹窗文案加 ⚠ 警告 (跟普通命令弹窗视觉区分)
+ *     - 其它 (开发工具链): npm / git / node / tsc / python / cargo / make
+ *       普通 confirm 弹窗, 现状
+ *
+ * 链式命令解析: 用 ; / && / || / | 拆, 每个 command 拿 first word 作为命令名.
+ *   边缘情况 (e.g. `echo "rm -rf /"` 里 "rm" 是字符串) 接受误判, 弹窗视觉上 user 能看清.
+ *   不做 AST 级别的解析, 得不偿失.
+ */
+const BASH_READ_ONLY_COMMANDS = new Set([
+  'grep', 'rg', 'ag',  // search content
+  'find', 'ls', 'tree',  // list files
+  'cat', 'head', 'tail', 'less', 'more', 'wc',  // read file content
+  'echo', 'printf',  // output (纯显示, 不影响文件)
+  'pwd', 'whoami', 'date', 'env', 'set', 'type', 'which',  // environment info
+  'git',  // git status / log / diff 都是 read, 写操作后面会有 destructive 拦截
+  'npm', 'pnpm', 'yarn',  // install / test / run 都是开发流程, 不动 workspace 外
+  'node', 'python', 'python3', 'ruby', 'go', 'rustc', 'cargo', 'make',
+  'tsc', 'eslint', 'prettier',
+  'file', 'stat', 'diff', 'md5sum', 'sha256sum',  // inspect
+]);
+const BASH_DESTRUCTIVE_COMMANDS = new Set([
+  'rm', 'mv', 'cp',  // file ops
+  'chmod', 'chown', 'chgrp',  // permission
+  'curl', 'wget', 'fetch',  // network
+  'ssh', 'scp', 'rsync', 'nc',  // remote
+  'powershell', 'pwsh', 'cmd', 'cmd.exe',  // Windows shell
+  'reg', 'regini',  // Windows registry
+  'dd', 'mkfs', 'fdisk', 'format', 'diskpart',  // disk ops
+  'shutdown', 'reboot', 'poweroff', 'init',  // system
+  'kill', 'killall', 'taskkill',  // process
+  'iptables', 'netsh', 'firewall',  // network config
+  'sudo', 'su', 'runas',  // privilege escalation
+  'eval', 'exec', 'source',  // arbitrary code execution
+]);
+
+/**
+ * 解析 bash command string, 拆出命令名 (first word of each segment).
+ * 简化: 按 shell 操作符 (; / && / || / |) 拆, trim, 拿每段第一个非空白 token.
+ * 不处理嵌套引号 / 重定向 / 变量 — 边缘情况接受误判, 弹窗文案兜底.
+ *
+ * @returns {{ segments: string[], allReadOnly: boolean, anyDestructive: boolean, names: string[] }}
+ *   - segments: 拆出的命令片段 (trim 后, 过滤空)
+ *   - allReadOnly: 全部片段的第一个命令名都在 BASH_READ_ONLY_COMMANDS 里
+ *   - anyDestructive: 任一片段的第一个命令名在 BASH_DESTRUCTIVE_COMMANDS 里
+ *   - names: 所有抽出的命令名 (去重), 给弹窗文案用
+ */
+function parseBashCommand(commandString) {
+  if (typeof commandString !== 'string' || !commandString.trim()) {
+    return { segments: [], allReadOnly: false, anyDestructive: false, names: [] };
+  }
+  // 拆: ; / && / || / | (在 shell 里都是 command separator)
+  // 不用 regex 全拆 — 简单 split, 接受 false positive
+  const segments = commandString
+    .split(/[;&|]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const names = new Set();
+  let allReadOnly = true;
+  let anyDestructive = false;
+  for (const seg of segments) {
+    // first word: 切到第一个空白 (空格 / tab)
+    const firstWordMatch = seg.match(/^(\S+)/);
+    if (!firstWordMatch) continue;
+    const cmdName = firstWordMatch[1];
+    // 去掉路径前缀 (e.g. /usr/bin/rm → rm, .\rm.cmd → rm.cmd)
+    const baseName = cmdName.replace(/^.*[\\\/]/, '').toLowerCase();
+    names.add(baseName);
+    if (!BASH_READ_ONLY_COMMANDS.has(baseName)) {
+      allReadOnly = false;
+    }
+    if (BASH_DESTRUCTIVE_COMMANDS.has(baseName)) {
+      anyDestructive = true;
+    }
+  }
+  return {
+    segments,
+    allReadOnly: segments.length > 0 && allReadOnly,
+    anyDestructive,
+    names: Array.from(names),
+  };
+}
+
 function createPermissionExtension(permissionMode) {
   return (pi) => {
     pi.on('tool_call', async (event, ctx) => {
@@ -528,6 +618,24 @@ function createPermissionExtension(permissionMode) {
         return undefined;
       }
 
+      // 2026-08-20 P1-4: bash 命令分类 — 跟 P0-1 同样的 read-only 静默放行策略,
+      //   但覆盖 bash 工具内部命令 (不仅限 builtin 工具名).
+      //   - 全部是 read-only 命令 (grep / find / cat 等) → 静默放行, 不弹窗
+      //   - 任一含破坏性命令 (rm / curl 等) → 弹窗文案加 ⚠ 警告 (跟 P1-1 弹窗链路无缝衔接)
+      //   - 其它 → 普通 confirm 弹窗 (跟 ask 模式现状一致)
+      // 适用于所有 permission mode (ask / smart / allow 兜底) — bash 分类是工具层策略,
+      //   跟 mode 解耦. 但 mode=deny 早 return 不会到这里.
+      if (toolName === 'bash') {
+        const parsed = parseBashCommand(toolArgs.command || '');
+        if (parsed.allReadOnly) {
+          console.error(`[perm] P1-4: bash read-only auto-allow commands=[${parsed.names.join(', ')}] args=${argsPreview}`);
+          return undefined;
+        }
+        if (parsed.anyDestructive) {
+          console.error(`[perm] P1-4: bash has destructive commands=[${parsed.names.join(', ')}] args=${argsPreview}`);
+        }
+      }
+
       if (permissionMode === 'allow') {
         // 理论上不会到这里 (mode=allow 不传 extensionFactories), 兜底
         console.error(`[perm] allow ${toolName} (mode=allow fallback)`);
@@ -535,6 +643,18 @@ function createPermissionExtension(permissionMode) {
       }
 
       // mode = 'ask' / 'smart'+ 写类工具 / 其他未知: 弹 confirm 弹窗
+      // 2026-08-20 P1-4: bash 含破坏性命令时, 弹窗文案加 ⚠ 警告前缀, user 一眼识别高风险
+      let confirmTitle = `Allow tool: ${toolName}`;
+      let confirmMessage = JSON.stringify(toolArgs, null, 2);
+      if (toolName === 'bash') {
+        const parsed = parseBashCommand(toolArgs.command || '');
+        if (parsed.anyDestructive) {
+          confirmTitle = `⚠ Allow tool: ${toolName} (含破坏性命令)`;
+          confirmMessage = `⚠ 检测到破坏性命令: [${parsed.names.join(', ')}]\n\n` +
+            `完整命令:\n${JSON.stringify(toolArgs, null, 2)}\n\n` +
+            `确认前请检查: 路径是否在 workspace 内 / 不会误删文件 / 不会调用外部网络`;
+        }
+      }
       console.error(`[perm] ask ${toolName} (mode=${permissionMode}) args=${argsPreview}`);
       // 2026-08-20 P1-1: confirm 链路埋点 — 排查 "弹窗 lost" 根因 (ADR 0008 / 0014 已知问题)
       //   4 个时点都 log: confirm 调用前 / resolved / rejected / throw
@@ -545,8 +665,8 @@ function createPermissionExtension(permissionMode) {
       const permMark = `PERM-LOST: ${toolName} ${event.toolCallId.slice(0, 8)}`;
       try {
         const allowed = await ctx.ui.confirm(
-          `Allow tool: ${toolName}`,
-          JSON.stringify(toolArgs, null, 2),
+          confirmTitle,
+          confirmMessage,
         );
         const elapsed = Date.now() - permStart;
         if (allowed) {
