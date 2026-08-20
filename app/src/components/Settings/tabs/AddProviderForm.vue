@@ -9,7 +9,7 @@
  */
 import { ref, computed } from 'vue';
 import { Plus, Server, Globe, Sparkles, AlertCircle, Loader2, Check, ArrowLeft, KeyRound } from 'lucide-vue-next';
-import { useConfigStore, PROVIDER_OPTIONS, type ProviderType } from '@/stores/config';
+import { useConfigStore, PROVIDER_OPTIONS, BUILTIN_MODELS, type ProviderType } from '@/stores/config';
 import { fetchProviderModels } from '@/lib/providers-api';
 import { piTauri } from '@/lib/tauri';
 import PadSelect, { type PadSelectOption } from '@/components/ui/PadSelect.vue';
@@ -73,22 +73,45 @@ async function submit() {
     });
     // 2. 存 API key 到 keychain
     await piTauri.saveApiKey(provider.id, apiKey.value.trim());
-    // 3. 拉取模型
-    const result = await fetchProviderModels({
-      type: type.value,
-      providerId: provider.id,
-      baseUrl: needsBaseUrl.value ? baseUrl.value.trim() : undefined,
-    });
-    if (result.ok && result.models) {
-      config.setProviderModels(provider.id, result.models);
-      submitState.value = 'ok';
-      submitMessage.value = `已创建, key 已存 keychain, 拉到 ${result.models.length} 个模型`;
-      setTimeout(() => emit('added', provider.id), 700);
+    // 3. 拉取/初始化模型 — 分两条路径:
+    //   - openai-compatible: 走 fetchProviderModels (Rust 真打 /models + 启发式 parse metadata)
+    //   - 内置 provider: 走 BUILTIN_MODELS (硬编码) + applyCatalog (静态 catalog 自动填 metadata)
+    //     内置 provider 没 list API (Anthropic) 或 list 不返 metadata (OpenAI), 必须 catalog
+    if (type.value === 'openai-compatible') {
+      const result = await fetchProviderModels({
+        type: type.value,
+        providerId: provider.id,
+        baseUrl: baseUrl.value.trim(),
+      });
+      if (result.ok && result.models) {
+        config.setProviderModels(provider.id, result.models);
+        const autoFilled = result.models.filter((m) => m.autoSource).length;
+        submitState.value = 'ok';
+        submitMessage.value = autoFilled > 0
+          ? `已创建, key 已存 keychain, 拉到 ${result.models.length} 个 model (${autoFilled} 个自动填充 metadata)`
+          : `已创建, key 已存 keychain, 拉到 ${result.models.length} 个模型`;
+        setTimeout(() => emit('added', provider.id), 700);
+      } else {
+        submitState.value = 'ok';
+        submitMessage.value = `已创建, key 已存 keychain. 拉模型失败: ${result.error ?? '未知错误'} — 手动加 model id`;
+        setTimeout(() => emit('added', provider.id), 1500);
+      }
     } else {
-      // provider 已建 + key 已存, 只是 fetch 失败 (让用户手动加 model)
-      submitState.value = 'ok';
-      submitMessage.value = `已创建, key 已存 keychain. 拉模型失败: ${result.error ?? '未知错误'} — 手动加 model id`;
-      setTimeout(() => emit('added', provider.id), 1500);
+      // 内置 provider: 用 BUILTIN_MODELS 硬编码列表, applyCatalog 拉静态 metadata
+      const builtinModels = BUILTIN_MODELS[type.value as Exclude<ProviderType, 'openai-compatible'>];
+      if (builtinModels?.length) {
+        config.setProviderModels(provider.id, builtinModels.map((id) => ({ id, enabled: true })));
+        const { applied } = await config.applyCatalog(provider.id, type.value);
+        submitState.value = 'ok';
+        submitMessage.value = applied > 0
+          ? `已创建, key 已存 keychain, 预填 ${builtinModels.length} 个 model (${applied} 个自动填充 metadata)`
+          : `已创建, key 已存 keychain, 预填 ${builtinModels.length} 个 model`;
+        setTimeout(() => emit('added', provider.id), 700);
+      } else {
+        submitState.value = 'ok';
+        submitMessage.value = '已创建, key 已存 keychain. (无预设 model, 请手动加)';
+        setTimeout(() => emit('added', provider.id), 1500);
+      }
     }
   } catch (e) {
     submitState.value = 'fail';

@@ -49,6 +49,14 @@ export interface ModelInfo {
   maxOutput?: number;
   maxRounds?: number;
   reasoning?: boolean;
+  /**
+   * v0.5.0-D D213: 元数据自动填充来源.
+   *   - "catalog": 来自 Rust 静态 catalog (内置 provider 主流 model)
+   *   - "openai-compatible": 来自 openai-compatible /models 响应 parse
+   *   - undefined: 都没匹配到, 用户手填的
+   * UI 用这个加 ✨ 角标
+   */
+  autoSource?: 'catalog' | 'openai-compatible';
 }
 
 export interface ProviderOption {
@@ -340,16 +348,79 @@ export const useConfigStore = defineStore('config', () => {
   function setProviderModels(id: string, models: ModelInfo[]) {
     const p = providers.value.find((x) => x.id === id);
     if (!p) return;
-    p.models = models.map((m) => ({
-      ...m,
-      enabled: m.enabled !== false, // 默认为启用, 只在显式 false 时停用
-      fetchedAt: new Date().toISOString(),
-    }));
+    p.models = models.map((m) => {
+      // v0.5.0-D D213 fix: 同 id 的 model 保留用户已经手动设过的 metadata.
+      //   之前 setProviderModels 直接 spread incoming, 用户改过的 contextWindow/vision
+      //   会被"拉取"操作覆盖回去. 现在: 已有 model 保留本地 metadata, 只更新 enabled/label/fetchedAt
+      const existing = p.models.find((e) => e.id === m.id);
+      const merged: ModelInfo = existing
+        ? {
+            ...existing,
+            label: m.label ?? existing.label,
+            enabled: m.enabled !== false,
+            fetchedAt: new Date().toISOString(),
+            // v0.5.0-D D213: incoming 来了新 autoSource 就用新的 (新拉的总是新的来源);
+            //   incoming 没给 (新加的 model) 沿用旧的
+            autoSource: m.autoSource ?? existing.autoSource,
+          }
+        : {
+            ...m,
+            enabled: m.enabled !== false,
+            fetchedAt: new Date().toISOString(),
+          };
+      return merged;
+    });
     // 如果 activeModelId 不在新 list 里, 重置
     if (p.activeModelId && !models.find((m) => m.id === p.activeModelId)) {
       p.activeModelId = undefined;
     }
     p.updatedAt = new Date().toISOString();
+  }
+
+  /**
+   * v0.5.0-D D213: 拉静态 catalog 并 apply 到现有 model 上.
+   * 用法: 配完内置 provider 后, 自动给 BUILTIN_MODELS 那几个 model 填 metadata.
+   *   用户后续手动改的不会被覆盖 (已有字段保留, 只填缺失的).
+   *
+   * 返回: 实际填充了多少个 model 的字段.
+   */
+  async function applyCatalog(providerId: string, providerType: string): Promise<{ applied: number }> {
+    if (providerType === 'openai-compatible') return { applied: 0 };  // openai-compatible 走 fetchProviderModels parse
+    try {
+      const catalog = await piTauri.getModelCatalog(providerType);
+      const p = providers.value.find((x) => x.id === providerId);
+      if (!p) return { applied: 0 };
+      let applied = 0;
+      p.models = p.models.map((m) => {
+        const entry = catalog[m.id];
+        if (!entry) return m;
+        // 已有 metadata 不覆盖 (用户手动改的优先), 只填 undefined 字段
+        // 注意: store 里字段叫 'type', Tauri 返的字段叫 'modelType', 映射一下
+        const filled: ModelInfo = {
+          ...m,
+          contextWindow: m.contextWindow ?? entry.contextWindow ?? undefined,
+          maxOutput: m.maxOutput ?? entry.maxOutput ?? undefined,
+          vision: m.vision ?? entry.vision ?? undefined,
+          reasoning: m.reasoning ?? entry.reasoning ?? undefined,
+          type: m.type ?? (entry.modelType as ModelInfo['type']) ?? undefined,
+          // v0.5.0-D D213: 标记自动来源 (UI 加 ✨ 角标)
+          autoSource: m.autoSource ?? 'catalog',
+        };
+        if (filled.contextWindow !== m.contextWindow
+          || filled.maxOutput !== m.maxOutput
+          || filled.vision !== m.vision
+          || filled.reasoning !== m.reasoning
+          || filled.type !== m.type) {
+          applied++;
+        }
+        return filled;
+      });
+      p.updatedAt = new Date().toISOString();
+      return { applied };
+    } catch (e) {
+      console.warn('[config] applyCatalog failed', e);
+      return { applied: 0 };
+    }
   }
 
   function toggleModelEnabled(providerId: string, modelId: string) {
@@ -527,6 +598,7 @@ export const useConfigStore = defineStore('config', () => {
     updateProvider,
     removeProvider,
     setProviderModels,
+    applyCatalog,  // v0.5.0-D D213: 静态 catalog 自动填充 metadata
     toggleModelEnabled,
     updateModelMetadata,
     setActiveModel,

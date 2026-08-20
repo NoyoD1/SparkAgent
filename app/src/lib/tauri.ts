@@ -606,13 +606,66 @@ class PiTauriClient {
     };
   }
 
+  /**
+   * v0.5.0-D D213: 拉 model 列表 + 自动 metadata.
+   * - openai-compatible: 真实 HTTP /models + 启发式 parse context_length 等
+   * - 内置 provider: 走 Rust 静态 catalog (anthropic/openai/etc)
+   * - 没匹配到: metadata 全 null, FE 让用户手填
+   *
+   * 返回的 autoSource 标记数据来源 ("catalog" / "openai-compatible" / null), UI 加 ✨ 角标
+   */
   async fetchProviderModels(
     providerId: string,
+    providerType: string,
     baseUrl: string,
-  ): Promise<Array<{ id: string; label: string | null }>> {
-    return (await invoke('fetch_provider_models', { providerId, baseUrl })) as Array<{
+  ): Promise<Array<{
+    id: string;
+    label: string | null;
+    contextWindow: number | null;
+    maxOutput: number | null;
+    vision: boolean | null;
+    reasoning: boolean | null;
+    modelType: string | null;
+    autoSource: 'catalog' | 'openai-compatible' | null;
+  }>> {
+    return (await invoke('fetch_provider_models', {
+      providerId,
+      providerType,
+      baseUrl,
+    })) as Array<{
       id: string;
       label: string | null;
+      contextWindow: number | null;
+      maxOutput: number | null;
+      vision: boolean | null;
+      reasoning: boolean | null;
+      /** Tauri 端叫 modelType, FE 映射成 type 跟 store 对齐 */
+      modelType: 'chat' | 'image' | 'video' | 'audio' | 'embedding' | null;
+      /** null = 没匹配到, FE 当 undefined 处理 */
+      autoSource: 'catalog' | 'openai-compatible' | null;
+    }>;
+  }
+
+  /**
+   * v0.5.0-D D213: 拉内置 provider 的静态 catalog.
+   * 用户在 "添加 model" 时如果想查所有已知 model, 可以调这个.
+   * openai-compatible 返空 (走 best-effort parse).
+   */
+  async getModelCatalog(
+    providerType: string,
+  ): Promise<Record<string, {
+    contextWindow: number | null;
+    maxOutput: number | null;
+    vision: boolean | null;
+    reasoning: boolean | null;
+    modelType: string | null;
+  }>> {
+    return (await invoke('get_model_catalog', { providerType })) as Record<string, {
+      contextWindow: number | null;
+      maxOutput: number | null;
+      vision: boolean | null;
+      reasoning: boolean | null;
+      modelType: string | null;
     }>;
   }
 

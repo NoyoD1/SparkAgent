@@ -313,10 +313,16 @@ async function configureBuiltin() {
     builtinKeyMsg.value = '';
     // 5. 切到详情面板
     selection.value = { kind: 'provider', id: provider.id };
-    // 6. 自动选第一个 model (内置 provider 用硬编码 catalog)
+    // 6. 自动选第一个 model (内置 provider 用硬编码 catalog) + 应用静态 metadata catalog
     const builtinModels = BUILTIN_MODELS[t as Exclude<ProviderType, 'openai-compatible'>];
     if (builtinModels?.length) {
       config.setProviderModels(provider.id, builtinModels.map((id) => ({ id, enabled: true })));
+      // v0.5.0-D D213: 拉静态 catalog 自动填 metadata (contextWindow/maxOutput/vision/reasoning 等)
+      const { applied } = await config.applyCatalog(provider.id, t);
+      if (applied > 0) {
+        builtinKeyMsg.value = `已自动填充 ${applied} 个 model 的 metadata (来源: 静态 catalog)`;
+        setTimeout(() => { builtinKeyMsg.value = ''; }, 3000);
+      }
       config.setActiveModel(provider.id, builtinModels[0]);
     }
   } catch (e) {
@@ -886,13 +892,24 @@ function onProviderAdded(id: string) {
                     <div class="pad-provider-detail__model-id">{{ m.id }}</div>
                     <div v-if="m.label" class="pad-provider-detail__model-label">{{ m.label }}</div>
                     <!-- v0.4.4.6: metadata 摘要 (type / vision / ctx / maxOut / maxRounds / reasoning 已设的项) -->
+                    <!-- v0.5.0-D D213: autoSource 有值时加 ✨ 角标, 让用户知道哪些字段是自动填的 -->
                     <div v-if="m.type || m.vision || m.contextWindow || m.maxOutput || m.maxRounds || m.reasoning" class="pad-provider-detail__model-meta">
-                      <span v-if="m.type" class="pad-provider-detail__model-meta-tag">{{ m.type }}</span>
-                      <span v-if="m.vision" class="pad-provider-detail__model-meta-tag">vision</span>
-                      <span v-if="m.contextWindow" class="pad-provider-detail__model-meta-tag">{{ Math.round(m.contextWindow / 1000) }}K ctx</span>
-                      <span v-if="m.maxOutput" class="pad-provider-detail__model-meta-tag">{{ Math.round(m.maxOutput / 1000) }}K out</span>
+                      <span v-if="m.type" class="pad-provider-detail__model-meta-tag" :class="{ 'is-auto': m.autoSource }">
+                        <template v-if="m.autoSource">✨ </template>{{ m.type }}
+                      </span>
+                      <span v-if="m.vision" class="pad-provider-detail__model-meta-tag" :class="{ 'is-auto': m.autoSource }">
+                        <template v-if="m.autoSource">✨ </template>vision
+                      </span>
+                      <span v-if="m.contextWindow" class="pad-provider-detail__model-meta-tag" :class="{ 'is-auto': m.autoSource }">
+                        <template v-if="m.autoSource">✨ </template>{{ Math.round(m.contextWindow / 1000) }}K ctx
+                      </span>
+                      <span v-if="m.maxOutput" class="pad-provider-detail__model-meta-tag" :class="{ 'is-auto': m.autoSource }">
+                        <template v-if="m.autoSource">✨ </template>{{ Math.round(m.maxOutput / 1000) }}K out
+                      </span>
                       <span v-if="m.maxRounds" class="pad-provider-detail__model-meta-tag">rounds≤{{ m.maxRounds }}</span>
-                      <span v-if="m.reasoning" class="pad-provider-detail__model-meta-tag">reasoning</span>
+                      <span v-if="m.reasoning" class="pad-provider-detail__model-meta-tag" :class="{ 'is-auto': m.autoSource }">
+                        <template v-if="m.autoSource">✨ </template>reasoning
+                      </span>
                     </div>
                   </div>
                   <!-- v0.5.0-PR2: current 标识 (只读, 跟 input box 同步 — 全局 activeProviderId + activeModelId 决定的) -->
@@ -965,6 +982,14 @@ function onProviderAdded(id: string) {
                     style="margin-top: 6px;"
                   >
                     {{ metadataFormError }}
+                  </p>
+                  <!-- v0.5.0-D D213: 提示该 model 的 metadata 是自动填的 (来源 catalog / openai-compatible) -->
+                  <p
+                    v-else-if="m.autoSource"
+                    class="pad-provider-detail__hint"
+                    style="margin-top: 6px; color: var(--pad-accent, #3b82f6);"
+                  >
+                    ✨ 这些值是自动填充的 (来源: {{ m.autoSource === 'catalog' ? '静态 model catalog' : 'openai-compatible 响应' }}), 改了就视为手动覆盖
                   </p>
                   <div class="pad-provider-detail__form-actions">
                     <button class="pad-provider-detail__btn pad-provider-detail__btn--ghost" type="button" @click="cancelMetadataForm">取消</button>
@@ -1404,6 +1429,12 @@ function onProviderAdded(id: string) {
   background: var(--pad-bg-input);
   color: var(--pad-fg-secondary);
   border: 1px solid var(--pad-border);
+}
+/* v0.5.0-D D213: 自动填充 (catalog / openai-compatible parse) 的 metadata tag 加柔和高亮 */
+.pad-provider-detail__model-meta-tag.is-auto {
+  background: var(--pad-accent-soft, rgba(99, 102, 241, 0.1));
+  color: var(--pad-accent, #3b82f6);
+  border-color: transparent;
 }
 /* v0.4.4.6: 配置 metadata 按钮 (跟删除按钮同 pattern: hover 才显) */
 .pad-provider-detail__model-config {

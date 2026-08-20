@@ -8,12 +8,14 @@
 mod config_store;
 mod index_file;
 mod keyring;
+mod model_catalog;  // v0.5.0-D D213: 静态 model metadata catalog
 mod sidecar;
 
 use serde::Deserialize;
 use crate::sidecar::kill_sidecar;  // v0.4.6: register tauri command (force kill sidecar on abort)
 use tauri::{AppHandle, Manager};
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 // v0.4.4.6: ClientConfig 用 sidecar::SkillsConfig / sidecar::ModelMetadataConfig
 use sidecar::{SkillsConfig, ModelMetadataConfig};
 
@@ -1277,9 +1279,21 @@ pub struct MigrationResult {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelInfoDto {
     pub id: String,
     pub label: Option<String>,
+    /// 自动填充的 metadata (来自 catalog 或 openai-compatible 响应 parse)
+    /// 都 Option — 没匹配到就让 FE 留空让用户填
+    pub context_window: Option<u32>,
+    pub max_output: Option<u32>,
+    pub vision: Option<bool>,
+    pub reasoning: Option<bool>,
+    /// "chat" | "image" | "embedding" | "video" | "audio"
+    pub model_type: Option<String>,
+    /// 自动来源: "catalog" (内置静态) | "openai-compatible" (运行时 parse)
+    /// | null (没匹配到, 用户手填)
+    pub auto_source: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1297,9 +1311,19 @@ pub struct VerifyConnectionResult {
     pub detail: Option<String>,
 }
 
+/// v0.5.0-D D213: 拉 model 列表 + 自动 metadata 填充.
+///
+/// 输入: provider_id (keychain 取 key), provider_type (走 catalog), base_url (openai-compatible 用)
+/// 输出: Vec<ModelInfoDto>, 每条带自动填充的 metadata (catalog 或 openai-compatible 响应 parse)
+///
+/// 自动填充优先级:
+///   1. openai-compatible 响应里有 context_length → 用响应里的
+///   2. 内置 provider 走 model_catalog (静态)
+///   3. 都没匹配 → 字段全 None, FE 让用户手填
 #[tauri::command]
 async fn fetch_provider_models(
     provider_id: String,
+    provider_type: String,
     base_url: String,
 ) -> Result<Vec<ModelInfoDto>, String> {
     let api_key = keyring::get(&provider_id)?
@@ -1310,29 +1334,150 @@ async fn fetch_provider_models(
     // ureq 是同步 HTTP, 用 spawn_blocking 避免阻塞 Tauri runtime
     let url_clone = url.clone();
     let api_key_clone = api_key.clone();
-    let models: Vec<ModelInfoDto> = tokio::task::spawn_blocking(move || -> Result<Vec<ModelInfoDto>, String> {
-        let resp = ureq::get(&url_clone)
-            .set("Authorization", &format!("Bearer {api_key_clone}"))
-            .timeout(std::time::Duration::from_secs(15))
-            .call()
-            .map_err(|e| format!("fetch {url_clone}: {e}"))?;
-        let body: serde_json::Value = resp
-            .into_json()
-            .map_err(|e| format!("parse {url_clone}: {e}"))?;
-        let arr = body
-            .get("data")
-            .and_then(|d| d.as_array())
-            .ok_or_else(|| "no .data array in response".to_string())?;
-        Ok(arr
-            .iter()
-            .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
-            .map(|id| ModelInfoDto { id, label: None })
-            .collect())
-    })
-    .await
-    .map_err(|e| format!("join: {e}"))??;
+    // raw models: (id, label, raw_json). raw_json 留着用 best-effort parse
+    let raw_models: Vec<(String, Option<String>, Option<serde_json::Value>)> =
+        tokio::task::spawn_blocking(move || -> Result<Vec<(String, Option<String>, Option<serde_json::Value>)>, String> {
+            let resp = ureq::get(&url_clone)
+                .set("Authorization", &format!("Bearer {api_key_clone}"))
+                .timeout(std::time::Duration::from_secs(15))
+                .call()
+                .map_err(|e| format!("fetch {url_clone}: {e}"))?;
+            let body: serde_json::Value = resp
+                .into_json()
+                .map_err(|e| format!("parse {url_clone}: {e}"))?;
+            let arr = body
+                .get("data")
+                .and_then(|d| d.as_array())
+                .ok_or_else(|| "no .data array in response".to_string())?;
+            Ok(arr.iter().filter_map(|m| {
+                let id = m.get("id").and_then(|i| i.as_str())?.to_string();
+                let label = m.get("name").and_then(|n| n.as_str()).map(|s| s.to_string());
+                Some((id, label, Some(m.clone())))
+            }).collect())
+        })
+        .await
+        .map_err(|e| format!("join: {e}"))??;
 
-    Ok(models)
+    // 静态 catalog lookup
+    let catalog = model_catalog::get_catalog_for(&provider_type);
+
+    // merge: openai-compatible parse 优先, 然后 catalog fallback
+    let result: Vec<ModelInfoDto> = raw_models
+        .into_iter()
+        .map(|(id, label, raw)| {
+            // 1) openai-compatible 启发式 parse
+            let parsed = raw.as_ref().and_then(|v| parse_openai_compatible_meta(v));
+            // 2) catalog fallback
+            let from_catalog = catalog.get(&id);
+            // 决定每个字段: 优先 parsed, 然后 catalog
+            let pick = |parsed_v: Option<u32>, catalog_v: Option<u32>| -> Option<u32> {
+                parsed_v.or(catalog_v)
+            };
+            let pick_bool = |parsed_v: Option<bool>, catalog_v: Option<bool>| -> Option<bool> {
+                parsed_v.or(catalog_v)
+            };
+            let pick_str = |parsed_v: Option<String>, catalog_v: Option<String>| -> Option<String> {
+                parsed_v.or(catalog_v)
+            };
+            let (cw, mo, vi, rs, mt) = match parsed.as_ref() {
+                Some(p) => (
+                    pick(p.context_window, from_catalog.and_then(|c| c.context_window)),
+                    pick(p.max_output, from_catalog.and_then(|c| c.max_output)),
+                    pick_bool(p.vision, from_catalog.and_then(|c| c.vision)),
+                    pick_bool(p.reasoning, from_catalog.and_then(|c| c.reasoning)),
+                    pick_str(p.model_type.clone(), from_catalog.and_then(|c| c.model_type.clone())),
+                ),
+                None => (
+                    from_catalog.and_then(|c| c.context_window),
+                    from_catalog.and_then(|c| c.max_output),
+                    from_catalog.and_then(|c| c.vision),
+                    from_catalog.and_then(|c| c.reasoning),
+                    from_catalog.and_then(|c| c.model_type.clone()),
+                ),
+            };
+            let auto_source = if parsed.is_some() {
+                Some("openai-compatible".to_string())
+            } else if from_catalog.is_some() {
+                Some("catalog".to_string())
+            } else {
+                None
+            };
+            ModelInfoDto {
+                id,
+                label,
+                context_window: cw,
+                max_output: mo,
+                vision: vi,
+                reasoning: rs,
+                model_type: mt,
+                auto_source,
+            }
+        })
+        .collect();
+    Ok(result)
+}
+
+/// v0.5.0-D D213: best-effort parse openai-compatible 响应里的 metadata.
+/// 不是所有 provider 都有, 解析失败 (字段缺失/类型错) 就返 None (FE 走 catalog fallback).
+///
+/// 已知字段约定 (各自 vendor 不一样, 这里尽量覆盖主流):
+///   - context_length: u32 (OpenRouter / Together)
+///   - max_completion_tokens / max_tokens: u32 (OpenRouter top_provider)
+///   - modality / input_modalities: ["text", "image"] → vision
+///   - input_modalities 包含 "image" → vision=true
+///
+/// 不动 catalog. openai-compatible parse 走 best-effort, 解析失败一律 None.
+fn parse_openai_compatible_meta(m: &serde_json::Value) -> Option<model_catalog::ModelMetadata> {
+    let context_window = m.get("context_length")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .or_else(|| {
+            m.get("max_context_length")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32)
+        });
+    let max_output = m.get("max_completion_tokens")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .or_else(|| {
+            m.get("max_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32)
+        })
+        .or_else(|| {
+            // OpenRouter style: top_provider.max_completion_tokens
+            m.get("top_provider")
+                .and_then(|tp| tp.get("max_completion_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32)
+        });
+    // vision: input_modalities / modality
+    let vision = m.get("input_modalities")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().any(|x| x.as_str() == Some("image")))
+        .or_else(|| {
+            m.get("modality")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_lowercase().contains("vision") || s.contains("image"))
+        });
+    // model_type: 看名字启发式 (image gen / embedding)
+    let model_type: Option<String> = None;  // 暂不启发式, 都归 chat
+    if context_window.is_none() && max_output.is_none() && vision.is_none() {
+        return None;  // 一个字段都没 parse 到, 返 None 走 catalog fallback
+    }
+    Some(model_catalog::ModelMetadata {
+        context_window,
+        max_output,
+        vision,
+        reasoning: None,  // openai-compatible 响应里通常没 reasoning 字段
+        model_type,
+    })
+}
+
+/// v0.5.0-D D213: FE 主动拉 catalog (例如内置 provider 配完后想查所有已知 model).
+#[tauri::command]
+async fn get_model_catalog(provider_type: String) -> Result<HashMap<String, model_catalog::ModelMetadata>, String> {
+    Ok(model_catalog::get_catalog_for(&provider_type))
 }
 
 /// P0 #1 fix: "测试连接" 按钮. 区分 provider 类型:
@@ -1599,6 +1744,7 @@ pub fn run() {
             kill_sidecar,  // v0.4.6 修 (2026-08-18): abort 兜底时 force kill 旧 sidecar
             fetch_provider_models,
             verify_provider_connection,  // P0 #1: 测试连接按钮
+            get_model_catalog,  // v0.5.0-D D213: 静态 catalog
             migrate_from_env,
             ensure_default_workspace,
             load_app_config,

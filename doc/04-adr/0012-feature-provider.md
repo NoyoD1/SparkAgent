@@ -31,6 +31,7 @@
 | Provider CRUD | ✅ | `configStore.addProvider` / `removeProvider` / `updateProvider` | 增删改都 work |
 | Active 切换 | ✅ | `configStore.activeProviderId` | 切换, 跑 1 轮对话 |
 | Model metadata 6 字段 | ✅ (v0.4.4.6) | `ProviderTab.vue` ⚙️ inline form | 改字段, 跑端到端 |
+| **Model metadata 自动填充** (v0.5.0-D D213) | ✅ | `src-tauri/src/model_catalog.rs` 静态 catalog + `parse_openai_compatible_meta` 启发式 parse | 加内置 provider 自动填 4 个字段 (contextWindow/maxOutput/vision/reasoning); UI 加 ✨ 角标 |
 | API key 走 keychain | ✅ | `keyring` crate | `ls %APPDATA%\com.piagent.desktop\` 看不到 key |
 | config.json 持久化 | ✅ | `config_store.rs` atomic write | 改 config, kill app, 重开, config 还在 |
 | Thinking level 实时同步 | ✅ (v0.5.0+ P0 #2) | `ProviderTab.vue` `setThinking` + `sendRpcCommand({ type: 'set_thinking_level', level })` | 切 low/medium/high, 正在 streaming 的对话也立即用新值 |
