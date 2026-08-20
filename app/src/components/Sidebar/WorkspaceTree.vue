@@ -15,26 +15,26 @@
  * v0.6.0 Phase 1: session store +6 fields / +8 actions / +4 getters; 新建 ConfirmDialog
  *   (Common) + SessionContextMenu (Sidebar) 通用组件.
  *
- * v0.6.0 Phase 2: rename inline (dblclick) + right-click kebab menu + Pin to top section
- *   (📌 Pinned) 在每个 workspace 树顶部. 不破坏现有 active section 渲染逻辑.
+ * v0.6.0 Phase 2: rename inline (dblclick) + right-click kebab menu + 置顶 section
+ *   (📍 置顶) 在每个 workspace 树顶部. 不破坏现有"进行中" section 渲染逻辑.
  *
  * v0.6.0 Phase 3: 归档/恢复/永久删除流.
- *   - active session 顶右 inline 按钮: ❌删 → 📦Archive (走 ConfirmDialog → archiveSession)
+ *   - active session 顶右 inline 按钮: ❌删 → 📦归档 (走 ConfirmDialog → archiveSession)
  *   - sidebar 顶层 🗄 归档 section (workspace 列表外, 同滚动区底部, 不嵌套到任何 ws)
  *   - 归档项显示 [from A] 源工作区角标
- *   - archive 列表右键 → Restore / Delete permanently (后者走 danger ConfirmDialog)
+ *   - archive 列表右键 → 恢复 / 永久删除 (后者走 danger ConfirmDialog)
  *   - 旧 store.removeSession 保留 (其他 code path 可能用), UI 入口全部走 archive 流
  *
  * v0.6.0 Phase 4: Tag chip 显示 + add-tag 接通.
  *   - session item 标题下加第二行 tag chip row (小字, sub-color, 仅当 tags.length > 0 才显示)
  *   - chip 点击直接 removeTag (轻量操作, 不走 confirm)
- *   - 右键菜单 'Add tag...' 已由 SessionContextMenu 内部变 input (Phase 4 wired)
+ *   - 右键菜单 "添加标签" 已由 SessionContextMenu 内部变 input (Phase 4 wired)
  *   - onContextMenuAction.add-tag → sessionStore.addTag
  *
  * v0.6.0 Phase 5: 顶层 search bar (跨 workspace + 跨 archive).
  *   - sidebar 顶部 🔍 input, v-model searchQuery
  *   - searchQuery 非空时: 替换整个 workspace tree + archive section 为结果列表
- *   - 结果: 复用 session item + 加 [from X] workspace 角标 + match hint
+ *   - 结果: 复用 session item + 加 [from X] workspace 角标 + 命中 hint
  *   - 点结果: selectSession + 清空 search
  *   - Esc (input 上): 有 query 时清空, 无 query 时 blur
  *   - × 按钮: 清空 search
@@ -43,6 +43,14 @@
  * v0.6.0 Phase 6: 显示 s.autoTitle (LLM 自动生成) > s.title (user 手动) > '新任务'.
  *   - 3 处 session item 标题 + hover preview 标题 + Archive/Delete confirm message
  *   - 触发在 chat.ts sendPrompt first message 检测, 跟本组件无关
+ *
+ * Phase 7 UI 优化: emoji 换 lucide icon, 英文换中文 (后续才做 i18n)
+ *   - 📌 Pinned → Pin icon + "置顶"
+ *   - Active → "进行中"
+ *   - 🗄 归档 section header → Archive icon + "归档"
+ *   - session item 内联 📌 → Pin icon component
+ *   - SessionContextMenu: 全部 emoji 换 lucide, 全部英文换中文
+ *   - search placeholder / matchHint / "没有匹配" 全部中文
  */
 import { ref, computed, nextTick } from 'vue';
 import { storeToRefs } from 'pinia';
@@ -55,6 +63,7 @@ import {
   MessageCircle,
   Search,
   X,
+  Pin,
 } from 'lucide-vue-next';
 import { useSessionStore } from '@/stores/session';
 import { useChatStore } from '@/stores/chat';
@@ -389,9 +398,9 @@ function onSelectFromSearch(id: string) {
 }
 
 function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
-  if (match === 'title') return '匹配标题';
-  if (match === 'autoTitle') return '匹配自动标题';
-  return `匹配 tag: ${match.slice(4)}`;
+  if (match === 'title') return '命中标题';
+  if (match === 'autoTitle') return '命中自动标题';
+  return `命中标签 ${match.slice(4)}`;
 }
 </script>
 
@@ -405,7 +414,7 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
         v-model="searchQuery"
         type="text"
         class="pad-wstree__search-input"
-        placeholder="搜索 session (跨工作区 + 归档)..."
+        placeholder="搜索会话 (跨工作区 + 归档)..."
         @keydown.escape="onSearchEsc"
       />
       <button
@@ -470,8 +479,8 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
         </div>
         <div v-if="searchResults.length === 0" class="pad-wstree__search-empty">
           <Search :size="20" :stroke-width="1.5" />
-          <p>没有匹配 "{{ searchQuery }}"</p>
-          <p class="pad-wstree__empty-hint">试试其他关键词 (标题 / 自动标题 / tag)</p>
+          <p>未找到匹配 "{{ searchQuery }}"</p>
+          <p class="pad-wstree__empty-hint">试试其他关键词 (标题 / 自动标题 / 标签)</p>
         </div>
       </div>
     </template>
@@ -539,10 +548,13 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
         <!-- sessions 列表 (Phase 2: pinned section + active section + inline rename + context menu) -->
         <Transition name="pad-wsexpand">
           <div v-if="expandedWorkspaceIds.has(ws.id)" class="pad-wstree__sessions">
-            <!-- 📌 Pinned section (Phase 2) -->
+            <!-- 📍 置顶 section (Phase 2 + Phase 7) -->
             <template v-if="sessionStore.pinnedSessionsByWorkspace(ws.id).length > 0">
               <div class="pad-wstree__sub-label">
-                <span>📌 Pinned</span>
+                <span class="pad-wstree__sub-label-icon">
+                  <Pin :size="11" :stroke-width="1.75" />
+                  置顶
+                </span>
                 <span class="pad-wstree__count">{{ sessionStore.pinnedSessionsByWorkspace(ws.id).length }}</span>
               </div>
               <div
@@ -577,7 +589,7 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
                     @contextmenu.stop
                   />
                   <span v-else class="pad-wstree__session-title">
-                    <span v-if="s.pinned" class="pad-wstree__session-pin">📌</span>
+                    <Pin v-if="s.pinned" :size="10" :stroke-width="2" class="pad-wstree__session-pin" />
                     {{ s.autoTitle || s.title || '新任务' }}
                   </span>
                   <!-- Phase 4: tag chip row (仅当有 tag 且不在 rename 才显示) -->
@@ -590,7 +602,7 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
                       :key="t"
                       type="button"
                       class="pad-wstree__session-tag"
-                      :title="`删除 tag: ${t}`"
+                      :title="`删除标签: ${t}`"
                       @click.stop="sessionStore.removeTag(s.id, t)"
                     >#{{ t }}</button>
                   </div>
@@ -606,10 +618,10 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
               </div>
             </template>
 
-            <!-- Active section (Phase 2) -->
+            <!-- 进行中 section (Phase 2 + Phase 7) -->
             <template v-if="activeNonPinned(ws.id).length > 0">
               <div class="pad-wstree__sub-label">
-                <span>Active</span>
+                <span>进行中</span>
                 <span class="pad-wstree__count">{{ activeNonPinned(ws.id).length }}</span>
               </div>
             </template>
@@ -654,7 +666,7 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
                     :key="t"
                     type="button"
                     class="pad-wstree__session-tag"
-                    :title="`删除 tag: ${t}`"
+                    :title="`删除标签: ${t}`"
                     @click.stop="sessionStore.removeTag(s.id, t)"
                   >#{{ t }}</button>
                 </div>
@@ -673,7 +685,7 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
               class="pad-wstree__session-empty"
               disabled
             >
-              暂无 session
+              暂无会话
             </button>
           </div>
         </Transition>
@@ -721,7 +733,7 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
                 :key="t"
                 type="button"
                 class="pad-wstree__session-tag"
-                :title="`删除 tag: ${t}`"
+                :title="`删除标签: ${t}`"
                 @click.stop="sessionStore.removeTag(s.id, t)"
               >#{{ t }}</button>
             </div>
@@ -1136,11 +1148,12 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
   gap: 4px;
 }
 
-/* Phase 2: Pin emoji 前缀 */
+/* Phase 2 + Phase 7: Pin icon 前缀 (从 📌 emoji 换 lucide Pin) */
 .pad-wstree__session-pin {
-  margin-right: 2px;
-  font-size: 10px;
-  vertical-align: 1px;
+  margin-right: 3px;
+  color: var(--pad-fg-tertiary, #888);
+  flex-shrink: 0;
+  vertical-align: -1px;
 }
 
 /* Phase 4: session item 内部 body (title + tag chips 垂直堆叠) */

@@ -8,6 +8,10 @@
  *  - onAddTagCancel → addingTag = false (菜单保持开)
  *  - document keydown Esc 在 addingTag 时不再 close 菜单 (让 input 自己的 handler 处理)
  *
+ * Phase 7 UI 优化: 全部 emoji 换 lucide icon, 英文换中文 (后续才做多语言)
+ *  - 菜单项: 置顶/取消置顶 / 重命名 / 添加标签 / 归档 / 恢复 / 永久删除
+ *  - icon: Pin / Pencil / Tag / Archive / RotateCcw / Trash2
+ *
  * 用法:
  *   <SessionContextMenu
  *     v-if="menuSession"
@@ -28,6 +32,7 @@
  *   - 'delete-permanently' (archived session 才显示, 红色)
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { Pin, Pencil, Tag as TagIcon, Archive, RotateCcw, Trash2 } from 'lucide-vue-next';
 import type { Session } from '@/stores/session';
 
 interface Props {
@@ -148,24 +153,24 @@ function emitAction(type: string, payload?: any) {
     @contextmenu.prevent
   >
     <button class="pad-contextmenu-item" @click="emitAction(isPinned ? 'unpin' : 'pin')">
-      <span class="pad-contextmenu-item__icon">📌</span>
-      <span>{{ isPinned ? 'Unpin' : 'Pin to top' }}</span>
+      <Pin :size="13" :stroke-width="1.75" class="pad-contextmenu-item__icon" />
+      <span>{{ isPinned ? '取消置顶' : '置顶' }}</span>
     </button>
 
     <button class="pad-contextmenu-item" @click="emitAction('rename')">
-      <span class="pad-contextmenu-item__icon">✏️</span>
-      <span>Rename</span>
+      <Pencil :size="13" :stroke-width="1.75" class="pad-contextmenu-item__icon" />
+      <span>重命名</span>
     </button>
 
     <!-- Phase 4: 'Add tag...' 原地变 input (Enter 提交, Esc 取消回菜单) -->
     <div v-if="addingTag" class="pad-contextmenu-addtag">
-      <span class="pad-contextmenu-item__icon">🏷</span>
+      <TagIcon :size="13" :stroke-width="1.75" class="pad-contextmenu-item__icon" />
       <input
         ref="tagInputEl"
         v-model="tagInputValue"
         type="text"
         class="pad-contextmenu-addtag-input"
-        placeholder="输入 tag 名..."
+        placeholder="输入标签名..."
         maxlength="32"
         @keydown.enter.prevent="onAddTagConfirm"
         @keydown.escape.prevent="onAddTagCancel"
@@ -173,8 +178,8 @@ function emitAction(type: string, payload?: any) {
       />
     </div>
     <button v-else class="pad-contextmenu-item" @click="onAddTagClick">
-      <span class="pad-contextmenu-item__icon">🏷</span>
-      <span>Add tag...</span>
+      <TagIcon :size="13" :stroke-width="1.75" class="pad-contextmenu-item__icon" />
+      <span>添加标签</span>
     </button>
 
     <div v-if="tags.length" class="pad-contextmenu-tags">
@@ -183,7 +188,7 @@ function emitAction(type: string, payload?: any) {
         :key="tag"
         type="button"
         class="pad-contextmenu-tag"
-        :title="`点击删除 tag: ${tag}`"
+        :title="`点击删除标签: ${tag}`"
         @click="emitAction('remove-tag', { tag })"
       >
         {{ tag }} <span class="pad-contextmenu-tag__close">×</span>
@@ -193,12 +198,12 @@ function emitAction(type: string, payload?: any) {
     <div class="pad-contextmenu-divider" />
 
     <button v-if="!isArchived" class="pad-contextmenu-item" @click="emitAction('archive')">
-      <span class="pad-contextmenu-item__icon">📦</span>
-      <span>Archive</span>
+      <Archive :size="13" :stroke-width="1.75" class="pad-contextmenu-item__icon" />
+      <span>归档</span>
     </button>
     <button v-else class="pad-contextmenu-item" @click="emitAction('restore')">
-      <span class="pad-contextmenu-item__icon">↩️</span>
-      <span>Restore</span>
+      <RotateCcw :size="13" :stroke-width="1.75" class="pad-contextmenu-item__icon" />
+      <span>恢复</span>
     </button>
 
     <button
@@ -206,8 +211,8 @@ function emitAction(type: string, payload?: any) {
       class="pad-contextmenu-item pad-contextmenu-item--danger"
       @click="emitAction('delete-permanently')"
     >
-      <span class="pad-contextmenu-item__icon">🗑</span>
-      <span>Delete permanently</span>
+      <Trash2 :size="13" :stroke-width="1.75" class="pad-contextmenu-item__icon" />
+      <span>永久删除</span>
     </button>
   </div>
 </template>
@@ -254,10 +259,15 @@ function emitAction(type: string, payload?: any) {
 }
 
 .pad-contextmenu-item__icon {
-  font-size: var(--pad-fs-13, 13px);
-  width: 16px;
-  text-align: center;
+  /* Phase 7: 从 emoji 换 lucide icon, font-size 改成 color (svg 不用 font-size) */
+  color: var(--pad-fg-secondary, #4a4a4a);
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.pad-contextmenu-item--danger .pad-contextmenu-item__icon {
+  color: var(--pad-danger, #ef4444);
 }
 
 .pad-contextmenu-divider {
