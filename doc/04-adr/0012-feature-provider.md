@@ -1,7 +1,7 @@
 # ADR-0012: Provider / Model / BYOK 模块
 
-- **状态**: Accepted (v0.6 Phase 8 暗色模式适配完成, 2026-08-20)
-- **日期**: 2026-08-19 (initial) / 2026-08-20 (Phase 8 暗色 + 按钮配色修)
+- **状态**: Accepted
+- **日期**: 2026-08-19 (initial) / 2026-08-20 (P0/P1/P2 全面修 + D213 自动填充 + Phase 8 暗色)
 - **Type**: Functional
 - **Module**: Provider
 - **决策者**: user
@@ -10,31 +10,47 @@
 ## 功能定义 (应该做什么)
 
 - ✅ 8 内置 provider 支持: anthropic / openai / deepseek / moonshotai / google / groq / minimax / openai-compatible
-- ✅ 任意 openai-compatible 自定义 (商汤 / 自建 / etc)
+- ✅ 任意 openai-compatible 自定义 (商汤 / 自建 / OpenRouter / Together / etc)
 - ✅ Provider 增删改
 - ✅ Active provider 切换
 - ✅ Active model 切换 (在 provider 内)
 - ✅ API key 走 OS keychain (Windows Credential Manager / macOS Keychain / Linux libsecret)
 - ✅ Provider config 持久化 (Rust `config_store.rs` `config.json`)
 - ✅ Model metadata 6 字段: type / vision / contextWindow / maxOutput / maxRounds / reasoning
-- ✅ Thinking level 切换: off / low / medium / high (运行时同步走 `set_thinking_level` RpcCommand, v0.5.0+ 修)
+- ✅ **Model metadata 自动填充** (v0.5.0-D D213) — 内置走静态 catalog, openai-compatible 启发式 parse
+- ✅ Thinking level 切换: off / low / medium / high (运行时同步走 `set_thinking_level` RpcCommand)
+- ✅ Provider 增删二次确认 + 删 active fallback 保护 (ConfirmDialog + fallback 校验)
+- ✅ 测试连接按钮 (verify_provider_connection: openai-compatible 真打 /models, 内置验 keychain)
 - ❌ Provider 分享 / 导出
 - ❌ Team 共享 config
 - ❌ Cloud 同步
+- ❌ Provider marketplace
 
-## 已实现 (v0.5.9+)
+## 已实现 (v0.5.0+)
 
 | 功能 | 状态 | 实现位置 | 核验方法 |
 |---|---|---|---|
 | 8 内置 provider | ✅ | `app/src/stores/config.ts` 内置工厂 | 列表里看到 8 个 |
-| 自定义 openai-compatible | ✅ | `Settings → Provider → + Add` 填 baseUrl | 加商汤 (e.g. `https://api.sensenova.cn/v1`), 跑通 |
+| 自定义 openai-compatible | ✅ | `Settings → Provider → + Add` 填 baseUrl | 加商汤 / OpenRouter / 自建, 跑通 |
 | Provider CRUD | ✅ | `configStore.addProvider` / `removeProvider` / `updateProvider` | 增删改都 work |
 | Active 切换 | ✅ | `configStore.activeProviderId` | 切换, 跑 1 轮对话 |
 | Model metadata 6 字段 | ✅ (v0.4.4.6) | `ProviderTab.vue` ⚙️ inline form | 改字段, 跑端到端 |
-| **Model metadata 自动填充** (v0.5.0-D D213) | ✅ | `src-tauri/src/model_catalog.rs` 静态 catalog + `parse_openai_compatible_meta` 启发式 parse | 加内置 provider 自动填 4 个字段 (contextWindow/maxOutput/vision/reasoning); UI 加 ✨ 角标 |
+| **Model metadata 自动填充** (v0.5.0-D D213) | ✅ | `src-tauri/src/model_catalog.rs` 静态 catalog (44 个 model) + `parse_openai_compatible_meta` 启发式 parse (`context_length` / `max_completion_tokens` / `input_modalities`) | 加内置 provider 自动填 4 字段, UI 加 ✨ 角标 |
 | API key 走 keychain | ✅ | `keyring` crate | `ls %APPDATA%\com.piagent.desktop\` 看不到 key |
-| config.json 持久化 | ✅ | `config_store.rs` atomic write | 改 config, kill app, 重开, config 还在 |
-| Thinking level 实时同步 | ✅ (v0.5.0+ P0 #2) | `ProviderTab.vue` `setThinking` + `sendRpcCommand({ type: 'set_thinking_level', level })` | 切 low/medium/high, 正在 streaming 的对话也立即用新值 |
+| config.json 持久化 | ✅ | `config_store.rs` atomic write (`.tmp` + rename) | 改 config, kill app, 重开, config 还在 |
+| Thinking level 实时同步 | ✅ (P0 #2) | `ProviderTab.vue` `setThinking` + `sendRpcCommand({ type: 'set_thinking_level', level })` | 切 low/medium/high, 正在 streaming 的对话也立即用新值 |
+| **测试连接按钮** | ✅ (P0 #1) | Tauri `verify_provider_connection` (openai-compatible 真实 HTTP /models) + `AddProviderForm` / `ProviderTab` 按钮 | 加 provider 后点一下, 立即知道 baseUrl + key 是否配对 |
+| **删 active provider fallback 保护** | ✅ (P0 #4) | `ProviderTab.removeProvider` 删前算 fallback, 不可用阻止 | 配 2 个 provider, 删 active 时 fallback 不可用 → 弹"无法删除" |
+| **Provider 增删 confirmDialog 升级** | ✅ (P1 #1) | `ProviderTab.vue` 用 `ConfirmDialog.vue` 替换 `window.confirm/alert` | 跟 Session 二次确认风格统一 |
+| **Model metadata 校验** | ✅ (P1 #2) | `ProviderTab.vue` `validateMetadataForm` (contextWindow > 0, ≥ maxOutput, maxRounds 1-100, 范围 sanity) | 填错值时红字提示, 不让保存 |
+| **debounce saveAppConfig 500ms** | ✅ (P1 #4) | `config.ts` `schedulePersist` | 改 metadata form 不再狂写盘 |
+| **maxRounds 真正 enforce** | ✅ (P1 #5) | `sidecar/src/index.mjs` `createMaxRoundsExtension` (turn_start 重置 + tool_call 计数 + 超限 block) | 设 maxRounds=2, 第三次 tool call 被拦 |
+| **删 keychain 失败 rollback** | ✅ (P1 #6) | `ProviderTab.removeProvider` 先 keychain 再 config, 失败回滚 | keychain 删失败弹错, config 不动 |
+| **`apiKeyEnv` dead code 清理** | ✅ (P2 #1) | `config.ts` / `tauri.ts` / `api-types.ts` / `config_store.rs` 全删 | grep 不到 `apiKeyEnv` 引用 |
+| **重复 type provider 拒绝** | ✅ (P2 #2) | `config.ts` `addProvider` 内置 type 配过就抛错 | 加第 2 个 anthropic 报错 |
+| **`addCustomModel` 重复 id 提示** | ✅ (P2 #3) | `ProviderTab.vue` 重复 id 给错误提示 | 不再静默吞 |
+| **`genId()` 强约束** | ✅ (P2 #4) | `config.ts` 无 `crypto.randomUUID` 直接抛错 | 移除 fallback 弱熵方案 |
+| **FE/Sidecar contextWindow 默认值统一 200K** | ✅ (P2 #5) | `sidecar/src/index.mjs` 改 128K → 200K, `chat.ts` 加注释对齐 | Composer 显示的 ctx 跟 Pi SDK 内部用的一致 |
 
 ## 已实现 (v0.6 Phase 8 暗色模式适配 — 2026-08-20)
 
@@ -60,15 +76,31 @@
 3. Windows 凭据管理器找 `pi-agent:apiKey:<providerId>`, 看到 key
 4. kill app, 重开, 配置还在, key 仍能调通
 
-### Model metadata
-1. 进 Provider tab ⚙️, 改某 model 的 contextWindow (e.g. 200K → 8K)
-2. 跑长对话, 看 Composer context indicator 用新值 (8K)
-3. 改 maxOutput, 跑长生成, 看是否被截断
+### Model metadata (手动 + 自动)
+1. 加一个 **anthropic** provider → 7 个 model 全部带 ✨ contextWindow=200K + maxOutput=8K + vision ✓
+2. 加一个 **openai-compatible** (OpenRouter 风格, 返 `context_length`) → 拉到的 model 也会带 ✨ 自动填字段
+3. 进 Provider tab ⚙️, 改某 model 的 contextWindow (e.g. 200K → 8K), 保存 → ✨ 消失 (改了就视为手动覆盖)
+4. 跑长对话, 看 Composer context indicator 用新值 (8K)
+5. 改 maxOutput, 跑长生成, 看是否被截断
 
-### Thinking level
-1. 切 low → medium → high → off
-2. 看 sidecar stderr 4 段 system prompt log 包含新 thinking level
-3. 跑同 prompt, 看 token 消耗差异
+### 测试连接 (P0 #1)
+1. 加 provider, 填 baseUrl + key, 点 "测试连接"
+2. openai-compatible: 实际 ping `/v1/models`, 返回 "✓ 通了, 拿到 N 个 model (HTTP 200, Xms)" 或 "✗ 401 Unauthorized"
+3. 内置 provider: 验 keychain 里有 key, 返回 "Key 已存 (N 字符), 首次对话时验证"
+
+### Thinking level 实时同步 (P0 #2)
+1. 发条消息让 LLM 正在 streaming
+2. 切 low → high (中途切)
+3. 看 sidecar stderr 应该有 4 段 system prompt log 包含新 level, **当前那条**也要照新 level 走
+
+### 删 active provider fallback 保护 (P0 #4)
+1. 配 2 个 provider, 把第二个设成 active
+2. 删第一个 → 走漂亮 ConfirmDialog, 确认后 fallback 成功
+3. 反过来: active 的 provider 删, **fallback 不可用** (没 key 或没 model) → 弹"无法删除"阻止你
+
+### maxRounds enforce (P1 #5)
+1. 配一个 model 设 `maxRounds: 2`
+2. 发"列一下当前 workspace 所有文件然后总结" → 第 3 次 tool call 应该被拦, sidecar stderr 看到 `[maxRounds] BLOCK tool call #3`
 
 ### 暗色模式 (Phase 8 验证)
 1. 切到深色模式 (Settings → 外观 → 深色)
@@ -80,39 +112,52 @@
 ## 已知问题 / 技术债
 
 - 🟡 **Provider 详情面板**: v0.5.0-PR2 改完, current 标识走 input box, 但 enable/disable UI 还有边角
-- 🟡 **Model metadata form**: 6 字段 inline edit, 校验不严 (P1 #2 修)
-- ✅ **Provider 增删没确认**: 修 (v0.5.0+ P0 #4) — 用 confirm/alert 弹窗 + fallback 不可用阻止; 后续 P1 #1 升级到 `ConfirmDialog.vue` 统一风格
-- 🟡 **没有 provider 测试按钮**: 加完不知道配对不对, 要跑去对话才知道 (P0 #1 修)
+- ✅ **Model metadata form 校验不严**: 修 (P1 #2)
+- ✅ **Provider 增删没确认**: 修 (P0 #4) + 升级到 ConfirmDialog (P1 #1)
+- ✅ **没有 provider 测试按钮**: 修 (P0 #1)
 - 🟡 **ProviderTab 大量 `var(--pad-bg-muted)` 等未定义变量**: Phase 8 已修, 但还有个别 hardcoded `rgba(0,0,0,0.04)` 等, 需复查
+- 🟡 **静态 catalog 维护**: 厂商出新 model 时需要手动加进 `model_catalog.rs`. 后续可加 community-shared catalog / 自动从厂商文档爬 (D213 phase 2)
 
 ## 后续规划
 
-### ✅ P0 (v0.6) — 已完成
-- ✅ Thinking level 运行时同步 (v0.5.0+ 修, `set_thinking_level` RpcCommand)
-- ✅ Provider 增删 confirm (v0.5.0+ 修, fallback 不可用时阻止)
-- ✅ Phase 8: 暗色模式按钮撞色 (ProviderTab primary 按钮 + tokens.css light 模式 `--pad-accent-foreground`)
-- ✅ Phase 8: 全局滚动条 dark 适配
+### ✅ P0 (v0.6) — 全部完成
+- ✅ Thinking level 运行时同步 (P0 #2)
+- ✅ Provider 增删 confirm + fallback 保护 (P0 #4)
+- ✅ 测试连接按钮 (P0 #1)
+- ✅ Phase 8 暗色模式适配
 
-### 二阶段 P0 (下个 sprint, 必做)
-- **"测试连接" 按钮**: 加 provider 时点一下, 走轻量 `/models` 拉取验证, 立即反馈 baseUrl + key 是否配对
-  - 实现: FE 调一个 LLM 客户端最小调用 (e.g. `GET /v1/models`), Rust 端 `test_provider` Tauri command 调 sidecar 转发
-  - 场景: 用户加商汤 / 自建 provider, 不用跑去对话才知道
-- **Provider 增删 confirmDialog 升级**: 跟 Session 8 features 同步, 用通用 `ConfirmDialog.vue` 替换 native `confirm/alert` (统一风格, 支持 danger 标识)
-- **Model metadata 校验加严**: 6 字段 inline edit 加类型校验 (contextWindow 必须是正整数, maxOutput ≤ contextWindow, type 必须在 enum 里, maxRounds ≥ 0 等), 错误状态红框 + tooltip
+### ✅ P1 (v0.6 - v0.6.x) — 全部完成
+- ✅ Provider 增删 confirmDialog 升级 (P1 #1)
+- ✅ Model metadata 校验加严 (P1 #2)
+- ✅ debounce saveAppConfig (P1 #4)
+- ✅ maxRounds 真正 enforce (P1 #5)
+- ✅ 删 keychain 失败 rollback (P1 #6)
 
-### 二阶段 P1
-- **debounce saveAppConfig**: 改 metadata form 频繁写盘, 加 500ms debounce 合并连续输入
-- **maxRounds 真正 enforce**: sidecar Extension 层拦截, 超过 maxRounds 强制 stop (目前只统计, 没拦)
-- **删 keychain 失败时 rollback config**: 删 provider 时如果 keychain 删失败 (e.g. Windows 凭据管理器锁), config 已删但 key 残留 → 下次同 id provider 复用旧 key 风险
-- **Provider 详情面板 enable/disable UI polish**: v0.5.0-PR2 改完的边角, enable toggle 加 disable fallback 提示
-- **复查 hardcoded rgba**: Phase 8 扫过一批 `--pad-bg-muted` 等未定义变量, 但还有 `rgba(0,0,0,0.04)` `rgba(0,0,0,0.06)` 等 hardcoded 浅色值, 切到 dark 模式可能不可见. 全量扫一遍
+### ✅ P2 (v0.7+) — 全部完成
+- ✅ `apiKeyEnv` dead code 清理 (P2 #1)
+- ✅ 重复 type provider 拒绝 (P2 #2)
+- ✅ `addCustomModel` 重复 id 提示 (P2 #3)
+- ✅ `genId()` 强约束 (P2 #4)
+- ✅ FE/Sidecar contextWindow 默认值统一 200K (P2 #5)
 
-### 二阶段 P2 (后续)
-- 清理 `apiKeyEnv` dead code (要么 UI 暴露要么删字段)
-- 重复 type provider 拒绝 (addProvider 防重复)
-- `addCustomModel` 重复 id 提示 (不再静默吞)
-- `genId()` 强约束 (无 crypto.randomUUID 就抛错)
-- FE/Sidecar contextWindow 默认值统一 (200K vs 128K)
+### ✅ 额外 (D213) — 已完成
+- ✅ Model metadata 自动填充 (静态 catalog 44 个 model + openai-compatible 启发式 parse)
+
+### ❌ 暂缓 / 后续版本
+- ~~Provider 导出 / 导入 (用户备份)~~ — 暂缓
+- ~~迁移备份 (config.json migrateFromLocalStorage 备份)~~ — 暂缓
+
+### ❌ P3 / 长期 (v0.7+)
 - Team 共享 (云端 sync config.json)
 - Provider marketplace
 - Provider 分享 / 导出 (单条 provider 配置导出给其他用户导入)
+- Gemini live API 解析 (`/v1beta/models` 真 metadata) — 当前 google 走静态 catalog
+- 静态 catalog 自动更新机制 (从厂商 changelog 拉)
+- Community-shared catalog (用户共享自己维护的 catalog)
+- 全量扫 hardcoded `rgba(0,0,0,0.0X)` 改 token
+- `migrateFromLocalStorage` 加备份 (防旧数据脏了污染新 config)
+
+## 提交历史
+
+- `585c23a` — feat(provider): ADR-0012 P0+P1+P2 全面修复 (测试连接/实时同步/校验/二次确认/maxRounds/debounce/清理)
+- `10428e2` — feat(provider): D213 model metadata 自动填充 (静态 catalog + openai-compatible 启发式 parse)
