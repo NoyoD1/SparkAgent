@@ -57,6 +57,7 @@ import { storeToRefs } from 'pinia';
 import {
   ChevronRight,
   Folder,
+  FolderOpen,
   Plus,
   Trash2,
   Archive,
@@ -64,18 +65,56 @@ import {
   Search,
   X,
   Pin,
+  Home,
+  Loader2,
 } from 'lucide-vue-next';
 import { useSessionStore } from '@/stores/session';
 import { useChatStore } from '@/stores/chat';
 import { pickFolder } from '@/lib/dialog';
+import { piTauri } from '@/lib/tauri';
 import SessionContextMenu from './SessionContextMenu.vue';
 import ConfirmDialog from '@/components/Common/ConfirmDialog.vue';
+import WorkspaceFileTree from './WorkspaceFileTree.vue';
+import WorkspaceTemplateMenu from './WorkspaceTemplateMenu.vue';
 
 const sessionStore = useSessionStore();
 const chatStore = useChatStore();
 const { workspaces, expandedWorkspaceIds, activeSessionId } = storeToRefs(sessionStore);
 
 const pickingFolder = ref(false);
+
+// v0.6+: 二级页面模式 — 文件树全屏占 sidebar, 隐藏 session 列表.
+//   点 workspace head 的 "文件" 按钮触发, 再点 "返回" 复原.
+//   null = 正常模式, 字符串 = 当前显示的 workspace id.
+const fileTreeModeWorkspaceId = ref<string | null>(null);
+const fileTreeModeWorkspace = computed(() => {
+  if (!fileTreeModeWorkspaceId.value) return null;
+  return sessionStore.workspaces.find((w) => w.id === fileTreeModeWorkspaceId.value) ?? null;
+});
+
+function openFileTree(workspaceId: string) {
+  fileTreeModeWorkspaceId.value = workspaceId;
+  // 同时把这个 ws 设为 active, 让 WorkspaceFileTree 切到的就是它
+  if (sessionStore.activeWorkspaceId !== workspaceId) {
+    sessionStore.selectWorkspace(workspaceId);
+  }
+}
+function closeFileTree() {
+  fileTreeModeWorkspaceId.value = null;
+}
+
+/** v0.6+: 文件树点文件 → 引用到当前 active session 的 composer. */
+function onReferenceFile(payload: { path: string; name: string }) {
+  const sid = sessionStore.activeSessionId;
+  if (!sid) {
+    // 没 active session 时, 用一个临时 key 存, 等用户新建 session 后再合并
+    // (简化: 直接 console.warn, 让用户先建 session)
+    console.warn('[WorkspaceTree] onReferenceFile: no active session, file ref dropped:', payload.path);
+    return;
+  }
+  chatStore.addFileRef(sid, payload);
+  console.log('[WorkspaceTree] onReferenceFile: added', payload.path, '→ session', sid.slice(0, 8));
+}
 
 // ===== session hover 预览 popover =====
 const hoverSessionId = ref<string | null>(null);
@@ -174,6 +213,7 @@ function positionPopover(target: HTMLElement | null) {
 }
 
 async function addWorkspace() {
+  // 2.2: "选择已有文件夹" 模板. 弹系统 picker 选本地目录.
   if (pickingFolder.value) return;
   pickingFolder.value = true;
   try {
@@ -183,6 +223,84 @@ async function addWorkspace() {
     }
   } finally {
     pickingFolder.value = false;
+  }
+}
+
+// 2.2: 空目录模板. 弹一个 prompt-style 弹窗让用户填名字, 然后调 Tauri 创建.
+const creatingEmpty = ref(false);
+const emptyDirDialogOpen = ref(false);
+const emptyDirName = ref('');
+const emptyDirError = ref('');
+async function onCreateEmptyDir() {
+  if (creatingEmpty.value) return;
+  emptyDirError.value = '';
+  emptyDirName.value = '';
+  emptyDirDialogOpen.value = true;
+}
+async function confirmCreateEmptyDir() {
+  const name = emptyDirName.value.trim();
+  if (!name) {
+    emptyDirError.value = '名字不能为空';
+    return;
+  }
+  // 简单名字校验: 不含路径分隔符
+  if (/[\\/:*?"<>|]/.test(name)) {
+    emptyDirError.value = '名字不能含路径分隔符或特殊字符';
+    return;
+  }
+  creatingEmpty.value = true;
+  try {
+    // parent dir 让用户选 (走 picker); 创建完跳到该 workspace
+    const parent = await pickFolder('选一个父目录, 新工作区将建在它下面');
+    if (!parent) {
+      creatingEmpty.value = false;
+      return;
+    }
+    const created = await piTauri.createEmptyDir(parent, name);
+    const ws = sessionStore.addWorkspace({ path: created });
+    sessionStore.selectWorkspace(ws.id);
+    emptyDirDialogOpen.value = false;
+  } catch (e: any) {
+    emptyDirError.value = `创建失败: ${e?.message ?? e}`;
+  } finally {
+    creatingEmpty.value = false;
+  }
+}
+
+// 2.2: Git clone 模板. 弹 prompt-style 弹窗, 用户填 URL + parent dir.
+const gitCloning = ref(false);
+const gitCloneDialogOpen = ref(false);
+const gitUrl = ref('');
+const gitError = ref('');
+async function onGitClone() {
+  if (gitCloning.value) return;
+  gitError.value = '';
+  gitUrl.value = '';
+  gitCloneDialogOpen.value = true;
+}
+async function confirmGitClone() {
+  const url = gitUrl.value.trim();
+  if (!url) {
+    gitError.value = 'URL 不能为空';
+    return;
+  }
+  if (!/^https?:\/\/|git@|ssh:\/\//.test(url)) {
+    gitError.value = 'URL 格式不对 (需要 http(s) / git@ / ssh://)';
+    return;
+  }
+  const parent = await pickFolder('选一个父目录, clone 出来的 repo 会建在它下面');
+  if (!parent) return;
+  gitCloning.value = true;
+  gitError.value = '';
+  try {
+    const created = await piTauri.gitClone(url, parent);
+    const ws = sessionStore.addWorkspace({ path: created });
+    sessionStore.selectWorkspace(ws.id);
+    gitCloneDialogOpen.value = false;
+  } catch (e: any) {
+    gitError.value = `Clone 失败: ${e?.message ?? e}`;
+  } finally {
+    gitCloning.value = false;
   }
 }
 
@@ -196,8 +314,26 @@ function toggle(id: string) {
   sessionStore.toggleWorkspaceExpanded(id);
 }
 function removeWorkspace(id: string) {
-  if (!confirm('删除这个工作区? 所有 session 一并删.')) return;
-  sessionStore.removeWorkspace(id);
+  // 0.1 + 0.4: 走 in-app ConfirmDialog, 跟 archive / delete-permanently 流一致.
+  //   - 列出该 ws 下的 session 数量 (用户清楚影响范围)
+  //   - 如果是默认 workspace, 弹窗文案升级: 删了下次自动重建, Pi SDK jsonl 不清理
+  //   - 1.2: 文案跟 deleteSessionPermanently 对齐: "Pi SDK 的对话历史仍保留在本地 jsonl 文件中, 但前端不再可见"
+  const ws = sessionStore.getWorkspace(id);
+  if (!ws) return;
+  const sessCount = sessionStore.sessions.filter((s) => s.workspaceId === id).length;
+  const sessText = sessCount === 0 ? '没有 session' : `将一并删除 ${sessCount} 个 session`;
+  const defaultWarn = ws.isDefault
+    ? '\n\n这是默认工作区 (<home>/PiAgent). 删除后下次发送消息会自动重建一个新的默认工作区 (旧 id 不再被引用).'
+    : '';
+  showConfirm({
+    title: '删除这个工作区?',
+    message: `「${ws.name}」\n\n${sessText}. 此操作不可撤销.\n\nPi SDK 的对话历史仍保留在本地 jsonl 文件中, 但前端不再可见.${defaultWarn}`,
+    confirmLabel: '删除工作区',
+    danger: true,
+    onConfirm: () => {
+      sessionStore.removeWorkspace(id);
+    },
+  });
 }
 
 // ====== Phase 2: Rename inline + 右键菜单 state ======
@@ -406,6 +542,20 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
 
 <template>
   <div class="pad-wstree">
+    <!-- ====== v0.6+: 二级页面 — 文件树模式 (隐藏 search + session + archive) ====== -->
+    <template v-if="fileTreeModeWorkspace">
+      <WorkspaceFileTree
+        :key="fileTreeModeWorkspace.id + ':' + fileTreeModeWorkspace.path"
+        :workspace-path="fileTreeModeWorkspace.path"
+        :workspace-name="fileTreeModeWorkspace.name"
+        show-back-header
+        @back="closeFileTree"
+        @reference-file="onReferenceFile"
+      />
+    </template>
+
+    <!-- ====== 正常模式: search bar + workspaces + sessions + archive ====== -->
+    <template v-else>
     <!-- ====== Phase 5: 顶部 search bar (跨 workspace + 跨 archive, 始终可见) ====== -->
     <div class="pad-wstree__search">
       <Search :size="12" :stroke-width="1.75" class="pad-wstree__search-icon" />
@@ -487,20 +637,18 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
 
     <!-- ====== 正常 view (searchQuery 空时) ====== -->
     <template v-else>
-    <!-- ====== 顶部: 任务列表 section label + 加 workspace 按钮 ====== -->
+    <!-- ====== 顶部: 任务列表 section label + 加 workspace 按钮 (2.2: 模板菜单) ====== -->
     <div class="pad-wstree__head">
       <span class="pad-wstree__section-label">
         <Folder :size="12" :stroke-width="1.75" />
         <span>项目</span>
       </span>
-      <button
-        class="pad-wstree__head-add"
+      <WorkspaceTemplateMenu
         :disabled="pickingFolder"
-        :title="pickingFolder ? '打开文件夹选择...' : '加工作区'"
-        @click="addWorkspace"
-      >
-        <Plus :size="12" :stroke-width="2" />
-      </button>
+        @pick-folder="addWorkspace"
+        @empty-dir="onCreateEmptyDir"
+        @git-clone="onGitClone"
+      />
     </div>
 
     <!-- ====== 项目 / workspace 列表 ====== -->
@@ -526,8 +674,21 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
           />
           <Folder :size="13" :stroke-width="1.75" class="pad-wstree__ws-icon" />
           <span class="pad-wstree__ws-name" :title="ws.path">{{ ws.name }}</span>
+          <!-- 0.4: 默认 workspace 徽标, 让用户一眼认出, 避免误删 -->
+          <span v-if="ws.isDefault" class="pad-wstree__ws-default-badge" title="默认工作区 (<home>/PiAgent)">
+            <Home :size="10" :stroke-width="2" />
+            <span>默认</span>
+          </span>
           <!-- v0.3.8.12: inline actions 替代二级 popover, 鼠标进入 ws-head 时显示 -->
           <div class="pad-wstree__ws-actions">
+            <!-- v0.6+: 文件树按钮 → 触发二级页面, session 隐退 -->
+            <button
+              class="pad-wstree__ws-action"
+              title="查看文件树 (会进入二级页面, 隐藏 session)"
+              @click.stop="openFileTree(ws.id)"
+            >
+              <FolderOpen :size="12" :stroke-width="1.75" />
+            </button>
             <button
               class="pad-wstree__ws-action"
               title="新建 session"
@@ -548,6 +709,15 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
         <!-- sessions 列表 (Phase 2: pinned section + active section + inline rename + context menu) -->
         <Transition name="pad-wsexpand">
           <div v-if="expandedWorkspaceIds.has(ws.id)" class="pad-wstree__sessions">
+            <!-- v0.6+: 文件树不再 inline 渲染, 改成二级页面 (顶部 head 有 FolderOpen 按钮触发) -->
+            <!-- 0.3: 切 workspace in-flight 期间, session 列表上方显示 loading 条 -->
+            <div
+              v-if="sessionStore.isSwitchingWorkspace && sessionStore.activeWorkspaceId === ws.id"
+              class="pad-wstree__switching-bar"
+            >
+              <Loader2 :size="11" :stroke-width="2" class="pad-wstree__switching-spinner" />
+              <span>切换中,稍候...</span>
+            </div>
             <!-- 📍 置顶 section (Phase 2 + Phase 7) -->
             <template v-if="sessionStore.pinnedSessionsByWorkspace(ws.id).length > 0">
               <div class="pad-wstree__sub-label">
@@ -743,6 +913,8 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
     </div>
     </template>
     <!-- /v-else 正常 view -->
+    </template>
+    <!-- /v-else 正常模式 (file tree mode 时隐藏上面整块) -->
 
     <!-- v0.5.0-v0.1: 删底部 "Agent 团队" group (回滚 multi-agent persona) -->
 
@@ -801,6 +973,56 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
           </div>
         </div>
       </Transition>
+    </Teleport>
+
+    <!-- ====== 2.2: 空目录创建 dialog (简化版 prompt-style, 走 Teleport) ====== -->
+    <Teleport to="body">
+      <div v-if="emptyDirDialogOpen" class="pad-template-dialog" @click.self="emptyDirDialogOpen = false">
+        <div class="pad-template-dialog__panel">
+          <h3>新建空工作区</h3>
+          <p class="pad-template-dialog__hint">给新文件夹起个名字, 然后选父目录.</p>
+          <input
+            v-model="emptyDirName"
+            class="pad-template-dialog__input"
+            placeholder="例如: my-new-project"
+            :disabled="creatingEmpty"
+            @keydown.enter="confirmCreateEmptyDir"
+            @keydown.escape="emptyDirDialogOpen = false"
+          />
+          <p v-if="emptyDirError" class="pad-template-dialog__error">{{ emptyDirError }}</p>
+          <div class="pad-template-dialog__actions">
+            <button class="pad-template-dialog__btn" @click="emptyDirDialogOpen = false" :disabled="creatingEmpty">取消</button>
+            <button class="pad-template-dialog__btn is-primary" @click="confirmCreateEmptyDir" :disabled="creatingEmpty">
+              {{ creatingEmpty ? '创建中...' : '选父目录并创建' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ====== 2.2: Git clone dialog ====== -->
+    <Teleport to="body">
+      <div v-if="gitCloneDialogOpen" class="pad-template-dialog" @click.self="gitCloneDialogOpen = false">
+        <div class="pad-template-dialog__panel">
+          <h3>从 Git 克隆</h3>
+          <p class="pad-template-dialog__hint">粘贴 repo URL, 然后选父目录 (clone 会建在该目录下).</p>
+          <input
+            v-model="gitUrl"
+            class="pad-template-dialog__input"
+            placeholder="https://github.com/user/repo.git"
+            :disabled="gitCloning"
+            @keydown.enter="confirmGitClone"
+            @keydown.escape="gitCloneDialogOpen = false"
+          />
+          <p v-if="gitError" class="pad-template-dialog__error">{{ gitError }}</p>
+          <div class="pad-template-dialog__actions">
+            <button class="pad-template-dialog__btn" @click="gitCloneDialogOpen = false" :disabled="gitCloning">取消</button>
+            <button class="pad-template-dialog__btn is-primary" @click="confirmGitClone" :disabled="gitCloning">
+              {{ gitCloning ? '克隆中...' : '选父目录并克隆' }}
+            </button>
+          </div>
+        </div>
+      </div>
     </Teleport>
   </div>
 </template>
@@ -991,6 +1213,126 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
 .pad-wstree__ws-action.is-danger:hover {
   background: var(--pad-danger-subtle);
   color: var(--pad-danger-text);
+}
+
+/* 0.4: 默认 workspace 徽标, 让用户一眼认出 (避免误删) */
+.pad-wstree__ws-default-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: var(--pad-accent-subtle, var(--pad-bg-hover));
+  color: var(--pad-fg-secondary);
+  font-size: 10px;
+  font-weight: var(--pad-fw-medium, 500);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+/* 0.3: 切 workspace 期间, session 列表上方显示 loading 条 */
+.pad-wstree__switching-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px var(--pad-sp-2);
+  margin: 2px 0;
+  border-radius: 4px;
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-secondary);
+  font-size: 10px;
+  user-select: none;
+}
+.pad-wstree__switching-spinner {
+  animation: pad-wstree-spin 0.8s linear infinite;
+}
+@keyframes pad-wstree-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 2.2: template dialog (空目录 / git clone) */
+.pad-template-dialog {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+}
+.pad-template-dialog__panel {
+  background: var(--pad-bg-elevated);
+  border: 1px solid var(--pad-border-subtle, var(--pad-bg-hover));
+  border-radius: 8px;
+  padding: 20px 24px;
+  min-width: 360px;
+  max-width: 480px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+.pad-template-dialog__panel h3 {
+  margin: 0 0 6px 0;
+  font-size: 14px;
+  font-weight: var(--pad-fw-semibold, 600);
+  color: var(--pad-fg-primary);
+}
+.pad-template-dialog__hint {
+  margin: 0 0 12px 0;
+  font-size: 11px;
+  color: var(--pad-fg-tertiary);
+  line-height: 1.5;
+}
+.pad-template-dialog__input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--pad-border-subtle, var(--pad-bg-hover));
+  border-radius: 4px;
+  background: var(--pad-bg-base);
+  color: var(--pad-fg-primary);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  box-sizing: border-box;
+}
+.pad-template-dialog__input:focus {
+  border-color: var(--pad-accent, #4a9eff);
+}
+.pad-template-dialog__error {
+  margin: 6px 0 0 0;
+  font-size: 11px;
+  color: var(--pad-danger-text, #ff6b6b);
+}
+.pad-template-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+.pad-template-dialog__btn {
+  padding: 4px 12px;
+  border: 1px solid var(--pad-border-subtle, var(--pad-bg-hover));
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pad-fg-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--pad-dur-fast) ease;
+}
+.pad-template-dialog__btn:hover:not(:disabled) {
+  background: var(--pad-bg-hover);
+}
+.pad-template-dialog__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.pad-template-dialog__btn.is-primary {
+  background: var(--pad-accent, #4a9eff);
+  border-color: var(--pad-accent, #4a9eff);
+  color: white;
+}
+.pad-template-dialog__btn.is-primary:hover:not(:disabled) {
+  filter: brightness(1.1);
 }
 
 /* ====== session 行 ====== */

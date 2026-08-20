@@ -15,7 +15,14 @@ export interface Workspace {
   id: string;
   name: string;        // 显示名, 默认 = 文件夹 basename
   path: string;        // 绝对路径
+  /** 归一化后的路径 (Windows: 小写 + 正斜杠; macOS/Linux: 原样). 用于 dedup 比对. */
+  pathNormalized: string;
   createdAt: string;
+  /**
+   * v0.6+: 是否默认 workspace (<home>/PiAgent). UI 用徽标提示, 删时弹窗升级文案.
+   * 旧数据无此字段 → undefined → falsy (历史 ws 不算默认).
+   */
+  isDefault?: boolean;
 }
 
 export interface Session {
@@ -58,8 +65,16 @@ function loadFromStorage(): {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaultState();
     const parsed = JSON.parse(raw);
+    const wsList: Workspace[] = Array.isArray(parsed.workspaces) ? parsed.workspaces : [];
+    // 0.2 兼容: 旧 localStorage 没 pathNormalized, 这里 lazy 补; 不补 saveToStorage,
+    // 由后续 watch 自动持久化.
+    for (const w of wsList) {
+      if (!w.pathNormalized) {
+        w.pathNormalized = normalizePathForCompare(w.path);
+      }
+    }
     return {
-      workspaces: Array.isArray(parsed.workspaces) ? parsed.workspaces : [],
+      workspaces: wsList,
       sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
       activeWorkspaceId: parsed.activeWorkspaceId ?? null,
       activeSessionId: parsed.activeSessionId ?? null,
@@ -104,6 +119,55 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+/**
+ * 归一化路径用于 dedup 比对.
+ * - Windows: 统一正斜杠 + 小写 (大小写不敏感), 跟 isPathWithinWorkspace 行为一致.
+ * - macOS/Linux: 原样 (大小写敏感, 不动 unicode, 见 ADR-0013 已知风险).
+ *
+ * 平台检测: 走 Tauri 2 的 `window.__TAURI_INTERNALS__` (同步拿到 platform 字符串).
+ *   不用 navigator.userAgent (可能 UA 字符串不可靠) / 不用 process (浏览器没).
+ *   拿不到时 (非 Tauri 环境, 例如 vite dev / unit test) 退化为: 路径含反斜杠或
+ *   Windows 盘符 (^[A-Z]:) 视为 Windows, 否则 POSIX.
+ *
+ * 旧 path 不归一化 (避免历史 data 误判), 仅 addWorkspace 时算.
+ */
+function detectWindowsPath(p: string): boolean {
+  // Windows 特征: 路径含反斜杠, 或以盘符开头 (e.g. C: D:)
+  return p.includes('\\') || /^[A-Z]:/i.test(p);
+}
+
+function normalizePathForCompare(p: string): string {
+  let isWin: boolean;
+  try {
+    const t = (typeof window !== 'undefined' ? (window as any).__TAURI_INTERNALS__ : null);
+    if (t && typeof t.platform === 'string') {
+      isWin = t.platform === 'windows';
+    } else {
+      isWin = detectWindowsPath(p);
+    }
+  } catch {
+    isWin = detectWindowsPath(p);
+  }
+  if (isWin) {
+    return p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  }
+  return p.replace(/\/+$/, '');
+}
+
+/**
+ * 检查 candidatePath 是否 === basePath, 或 candidatePath 是 basePath 的祖先, 或 basePath 是 candidatePath 的祖先.
+ * 用于 addWorkspace dedup: 拒绝同路径 / 父子嵌套.
+ * @returns 'exact' | 'ancestor' | 'descendant' | null
+ */
+function pathRelation(candidate: string, base: string): 'exact' | 'ancestor' | 'descendant' | null {
+  if (candidate === base) return 'exact';
+  const cWithSlash = candidate.endsWith('/') ? candidate : candidate + '/';
+  const bWithSlash = base.endsWith('/') ? base : base + '/';
+  if (cWithSlash.startsWith(bWithSlash)) return 'descendant';  // candidate 在 base 之下
+  if (bWithSlash.startsWith(cWithSlash)) return 'ancestor';   // candidate 是 base 的祖先
+  return null;
+}
+
 export const useSessionStore = defineStore('session', () => {
   const initial = loadFromStorage();
 
@@ -112,6 +176,15 @@ export const useSessionStore = defineStore('session', () => {
   const activeWorkspaceId = ref<string | null>(initial.activeWorkspaceId);
   const activeSessionId = ref<string | null>(initial.activeSessionId);
   const expandedWorkspaceIds = ref<Set<string>>(new Set(initial.expandedWorkspaceIds));
+  /**
+   * v0.6+: 切 workspace in-flight flag. selectWorkspace 期间为 true,
+   * sendPrompt 看到 true 拒绝发送 (避免 sidecar 还没就绪时写到错的 workspace).
+   * UI 用来显示 skeleton.
+   * sidecar 切换完成信号还没明确, 先用 chat store 发出的 session_ready 事件清零;
+   * 见 chat.ts sendPrompt 入口的 "切换中" 兜底.
+   */
+  const isSwitchingWorkspace = ref(false);
+  let switchingSafetyTimer: number | null = null;
 
   // 持久化: 任何 state 变化都写 localStorage
   watch(
@@ -237,12 +310,27 @@ export const useSessionStore = defineStore('session', () => {
 
   // ===== Actions =====
 
-  function addWorkspace(input: { name?: string; path: string }): Workspace {
+  function addWorkspace(input: { name?: string; path: string; isDefault?: boolean }): Workspace {
+    const normalized = normalizePathForCompare(input.path);
+    // 0.2: dedup — 拒同路径 / 父子嵌套. 父子嵌套会造成同 session 在两个 ws 都看到
+    //       + sandbox 行为不一致 (sub 写父区会被 block), 见 ADR-0013.
+    for (const existing of workspaces.value) {
+      const rel = pathRelation(normalized, existing.pathNormalized);
+      if (rel) {
+        console.warn(
+          `[session] addWorkspace rejected: ${rel} match with existing "${existing.name}" (${existing.pathNormalized})`,
+        );
+        // 复用已有 ws (UX: 用户点完 picker 看到的就是已有的, 不会"消失")
+        return existing;
+      }
+    }
     const ws: Workspace = {
       id: genId('ws'),
       name: input.name?.trim() || basename(input.path),
       path: input.path,
+      pathNormalized: normalized,
       createdAt: new Date().toISOString(),
+      isDefault: input.isDefault,
     };
     workspaces.value = [...workspaces.value, ws];
     // 自动展开
@@ -255,12 +343,18 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   function removeWorkspace(id: string) {
+    const target = workspaces.value.find((w) => w.id === id);
+    if (!target) return;
+    // 0.4: 如果是默认 workspace, 清 isDefault 标记 (新建的同名会重新标记, 旧幽灵 id 不再被认)
+    //       store 行为不变, UI 弹窗里已经说明这点.
     workspaces.value = workspaces.value.filter((w) => w.id !== id);
     // 删所有 session
     sessions.value = sessions.value.filter((s) => s.workspaceId !== id);
     // 清 active
     if (activeWorkspaceId.value === id) {
       activeWorkspaceId.value = workspaces.value[0]?.id ?? null;
+      // 切到了别的 workspace, 标记 in-flight 等 sidecar 跟上
+      isSwitchingWorkspace.value = true;
     }
     if (activeSessionId.value && !sessions.value.find((s) => s.id === activeSessionId.value)) {
       activeSessionId.value = null;
@@ -404,7 +498,30 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   function selectWorkspace(id: string) {
+    if (activeWorkspaceId.value === id) return;  // no-op
     activeWorkspaceId.value = id;
+    // 0.3: 切 ws 标记 in-flight. sidecar 还在切 (重启 + setSessionFile) 时,
+    // sendPrompt 会被 chat store 拒绝, 避免写到错的 workspace.
+    // 完成信号: sidecar 第一次 'message_start' (chat store 收到) 时由 chat store 清零;
+    // 没 active session 的情况下, 用一个短 timeout 兜底 (~1.5s 通常 sidecar 已就绪).
+    isSwitchingWorkspace.value = true;
+    if (switchingSafetyTimer) window.clearTimeout(switchingSafetyTimer);
+    switchingSafetyTimer = window.setTimeout(() => {
+      isSwitchingWorkspace.value = false;
+      switchingSafetyTimer = null;
+    }, 1500);
+  }
+
+  /**
+   * 0.3 配套: 切 workspace 完成时由 chat store 显式调, 取消 in-flight flag 早于 timeout.
+   * 没有这个调用, 1.5s 兜底 timer 也会兜住; 但显式调能让 active session 立即可用.
+   */
+  function finishWorkspaceSwitch() {
+    if (switchingSafetyTimer) {
+      window.clearTimeout(switchingSafetyTimer);
+      switchingSafetyTimer = null;
+    }
+    isSwitchingWorkspace.value = false;
   }
 
   // ===== Phase 1: 新 actions (sidebar 改造用) =====
@@ -505,6 +622,7 @@ export const useSessionStore = defineStore('session', () => {
     activeWorkspaceId,
     activeSessionId,
     expandedWorkspaceIds,
+    isSwitchingWorkspace,  // 0.3: 切 ws in-flight flag
     // computed
     activeSession,
     activeWorkspace,
@@ -528,6 +646,7 @@ export const useSessionStore = defineStore('session', () => {
     selectSession,
     clearActiveSession,
     selectWorkspace,
+    finishWorkspaceSwitch,  // 0.3: sidecar 切完时由 chat store 调
     ensurePiSessionId,  // Bug #1 修 (2026-08-18): per-session 独立 piSessionId
     migrateOldSessionIds,  // Bug #1 修 (2026-08-18): 启动时迁移旧 per-workspace id
     // Phase 1: 新 actions

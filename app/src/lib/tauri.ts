@@ -22,6 +22,14 @@ import { listen } from '@tauri-apps/api/event';
 
 console.log('[pi-tauri] module loaded, tauri-internals=', typeof (window as any).__TAURI_INTERNALS__);
 
+// ====== 2.1: WorkspaceTreeNode (list_workspace_tree 返回) ======
+export interface WorkspaceTreeNode {
+  name: string;
+  path: string;
+  isDir: boolean;
+  children: WorkspaceTreeNode[] | null;  // 文件 = null, 目录 = array (可能空)
+}
+
 // ====== Event types (v0.5.0: Pi SDK 0.84.2 RpcEvent schema 透传) ======
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
 
@@ -710,6 +718,22 @@ class PiTauriClient {
    */
   async ensureDefaultWorkspace(): Promise<string> {
     return (await invoke('ensure_default_workspace')) as string;
+  }
+
+  // ====== 2.1: 文件树浏览器 ======
+  //   读 workspace 目录树, UI 用. 不走 sidecar, 走 Tauri 直 invoke.
+  async listWorkspaceTree(path: string, maxDepth = 2): Promise<WorkspaceTreeNode[]> {
+    return (await invoke('list_workspace_tree', { path, maxDepth: maxDepth })) as WorkspaceTreeNode[];
+  }
+
+  // ====== 2.2: workspace 模板 - 空目录创建 ======
+  async createEmptyDir(parent: string, name: string): Promise<string> {
+    return (await invoke('create_empty_dir', { parent, name })) as string;
+  }
+
+  // ====== 2.2: workspace 模板 - Git clone ======
+  async gitClone(url: string, parent: string): Promise<string> {
+    return (await invoke('git_clone', { url, parent })) as string;
   }
 
   // ====== v0.4.4 Skills: 写自定义 SKILL.md (scope: 'workspace' | 'global') ======

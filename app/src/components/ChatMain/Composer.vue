@@ -103,6 +103,20 @@ function clearQuote() {
   chatStore.clearQuote(sid);
 }
 
+// v0.6+ 文件引用 (file reference) — sidebar 文件树点文件 → composer chip
+//   per-session (切 session 不丢, 跟 quote 一致), sendPrompt 后清空.
+//   渲染成 chip: 文件名 + 删除按钮, hover 看完整路径.
+const currentFileRefs = computed(() => {
+  const sid = sessionStore.activeSessionId;
+  if (!sid) return [];
+  return chatStore.fileRefsBySession[sid] ?? [];
+});
+function removeFileRef(path: string) {
+  const sid = sessionStore.activeSessionId;
+  if (!sid) return;
+  chatStore.removeFileRef(sid, path);
+}
+
 function removeSkillRef(name: string) {
   // 从 inputText 删所有 [[skill:<name>]] marker
   const re = new RegExp(`\\[\\[skill:${name}\\]\\]`, 'g');
@@ -500,6 +514,23 @@ onMounted(() => nextTick(autoResize));
       </button>
     </div>
 
+    <!-- v0.6+: 文件引用 (file reference) — sidebar 文件树点文件收集的 chip -->
+    <div v-if="currentFileRefs.length > 0" class="pad-composer__file-refs">
+      <FileText :size="11" :stroke-width="1.75" class="pad-composer__file-refs-icon" />
+      <span class="pad-composer__file-refs-label">已引用文件:</span>
+      <span
+        v-for="ref in currentFileRefs"
+        :key="ref.path"
+        class="pad-composer__file-ref"
+        :title="`完整路径: ${ref.path}\n点击移除引用`"
+        @click="removeFileRef(ref.path)"
+      >
+        <FileText :size="9" :stroke-width="2" class="pad-composer__file-ref-icon" />
+        <span class="pad-composer__file-ref-name">{{ ref.name }}</span>
+        <X :size="9" :stroke-width="2" class="pad-composer__file-ref-x" />
+      </span>
+    </div>
+
     <!-- v0.4.7a: Composer / popover 3 类 (skill / agent / mcp, 不含 builtin 22) -->
     <div v-if="showSlashPopover" ref="slashPopoverRef" class="pad-composer__slash-popover">
       <div v-if="filteredSlashItems.length === 0" class="pad-composer__slash-empty">
@@ -717,6 +748,63 @@ onMounted(() => nextTick(autoResize));
 .pad-composer__input::placeholder {
   color: var(--pad-fg-tertiary);
 }
+/* v0.6+: 文件引用 (file reference) chip — 跟 skill ref 类似的 chip 风格, 蓝色 (FileText icon) */
+.pad-composer__file-refs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 10px 2px 10px;
+  font-size: 11px;
+  color: var(--pad-fg-secondary);
+}
+.pad-composer__file-refs-icon {
+  color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
+}
+.pad-composer__file-refs-label {
+  font-size: 10px;
+  color: var(--pad-fg-tertiary);
+  margin-right: 2px;
+}
+.pad-composer__file-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px 2px 5px;
+  background: var(--pad-bg-hover);
+  border: 1px solid var(--pad-border-subtle, transparent);
+  border-radius: 3px;
+  font-size: 10px;
+  font-family: var(--pad-ff-mono, monospace);
+  color: var(--pad-fg-primary);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--pad-dur-fast) ease;
+}
+.pad-composer__file-ref:hover {
+  background: var(--pad-bg-active, var(--pad-bg-hover));
+  filter: brightness(1.05);
+}
+.pad-composer__file-ref-icon {
+  color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
+}
+.pad-composer__file-ref-name {
+  max-width: 140px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pad-composer__file-ref-x {
+  color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
+  margin-left: 1px;
+}
+.pad-composer__file-ref:hover .pad-composer__file-ref-x {
+  color: var(--pad-danger-text, #ff6b6b);
+}
+
 /* v0.4.7b: 已选 skill 引用 preview (D184 v9 ❹ user 14:30: "灰底skill的引用") */
 .pad-composer__skill-refs {
   display: flex;

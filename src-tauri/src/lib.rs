@@ -1689,6 +1689,165 @@ async fn ensure_default_workspace(app: AppHandle) -> Result<String, String> {
     Ok(default_path.to_string_lossy().to_string())
 }
 
+// ====== 2.1: 文件树浏览器 ======
+//   读 workspace 目录树, 给 sidebar UI 用. 不走 sidecar (UI-only, 不需要 LLM 介入).
+//   - 限制 max_depth (默认 2 层, 防 node_modules 把 UI 撑爆)
+//   - 跳过常见大目录 (.git, node_modules, target, dist, .next, .venv, __pycache__)
+//   - 不跟 symlink (防 sandbox 之外的"穿透"风险, 见 ADR-0013 已知风险)
+//   - 错误用 Result 返回, 不 panic; UI 自己显示 "加载失败" / "无权限"
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceTreeNode {
+    name: String,
+    path: String,
+    is_dir: bool,
+    children: Option<Vec<WorkspaceTreeNode>>,
+}
+
+fn read_tree_recursive(path: &Path, current_depth: u32, max_depth: u32) -> Result<Vec<WorkspaceTreeNode>, String> {
+    if current_depth >= max_depth {
+        return Ok(vec![]);
+    }
+    let entries = std::fs::read_dir(path)
+        .map_err(|e| format!("read_dir({}): {e}", path.display()))?;
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        // 跳常见大目录 (front-end 友好)
+        if matches!(name.as_str(),
+            ".git" | "node_modules" | "target" | "dist" | ".next" | ".venv" | "__pycache__"
+            | ".DS_Store" | "Thumbs.db" | "build" | ".cache" | ".parcel-cache" | ".turbo"
+        ) {
+            continue;
+        }
+        // 不跟 symlink (用 symlink_metadata 而不是 metadata, 防 symlink 逃逸)
+        let meta = match std::fs::symlink_metadata(&entry_path) {
+            Ok(m) => m,
+            Err(_) => continue,  // 跳过无权限的 entry
+        };
+        let is_dir = meta.is_dir();
+        // 文件在最后一层不再展开; 目录递归
+        let children = if is_dir {
+            Some(read_tree_recursive(&entry_path, current_depth + 1, max_depth)?)
+        } else {
+            None
+        };
+        out.push(WorkspaceTreeNode {
+            name,
+            path: entry_path.to_string_lossy().to_string(),
+            is_dir,
+            children,
+        });
+    }
+    // 排序: 目录在前, 字母序
+    out.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir)  // true > false → dir first
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(out)
+}
+
+#[tauri::command]
+async fn list_workspace_tree(path: String, max_depth: Option<u32>) -> Result<Vec<WorkspaceTreeNode>, String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("path not found: {path}"));
+    }
+    // 同步 read_dir 在 tokio task 跑, 防止大目录 block UI thread
+    let depth = max_depth.unwrap_or(2).min(5);  // 硬上限 5 层
+    tokio::task::spawn_blocking(move || {
+        read_tree_recursive(&p, 0, depth)
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+// ====== 2.2: workspace 模板 - 空目录创建 ======
+//   走 std::fs::create_dir 一次性建好. name 校验防 path traversal.
+
+#[tauri::command]
+async fn create_empty_dir(parent: String, name: String) -> Result<String, String> {
+    // name 校验: 1-128 字符, 不含路径分隔符 / ..  / NUL
+    if name.is_empty() || name.len() > 128 {
+        return Err("name 长度必须 1-128".to_string());
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') || name == "." || name == ".." {
+        return Err("name 含非法字符 (路径分隔符 / NUL / . / ..)".to_string());
+    }
+    let parent_path = PathBuf::from(&parent);
+    if !parent_path.is_dir() {
+        return Err(format!("parent 不是目录: {parent}"));
+    }
+    let target = parent_path.join(&name);
+    if target.exists() {
+        return Err(format!("目标已存在: {}", target.display()));
+    }
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir(&target)
+            .map_err(|e| format!("create_dir({}): {e}", target.display()))?;
+        Ok(target.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+// ====== 2.2: workspace 模板 - Git clone ======
+//   走 std::process::Command 调系统 git. 不走 Tauri shell plugin (避免再加一个 capability).
+//   假设用户装了 git (Windows: git for windows / macOS: xcode-select / Linux: apt).
+//   错误带 stderr 给 UI 显示.
+
+#[tauri::command]
+async fn git_clone(url: String, parent: String) -> Result<String, String> {
+    let parent_path = PathBuf::from(&parent);
+    if !parent_path.is_dir() {
+        return Err(format!("parent 不是目录: {parent}"));
+    }
+    // url 简单校验 (跟前端 dialog 重复一下, 防直 invoke 调用绕过)
+    if !url.starts_with("https://") && !url.starts_with("http://") && !url.starts_with("git@") && !url.starts_with("ssh://") {
+        return Err("URL 格式不对 (需要 http(s) / git@ / ssh://)".to_string());
+    }
+    let url_clone = url.clone();
+    let parent_clone = parent_path.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .arg("clone")
+            .arg(&url_clone)
+            .arg(&parent_clone)
+            .output()
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+    .map_err(|e| format!("spawn git: {e} (确认系统装了 git 并在 PATH)"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "git clone 失败 (exit={:?}): {}{}",
+            output.status.code(),
+            stderr.trim(),
+            if !stdout.trim().is_empty() { format!("\n{stdout}") } else { String::new() }
+        ));
+    }
+    // 解析出 clone 出来的目录名 (URL 最后一段去掉 .git)
+    // 例: https://github.com/user/repo.git -> repo
+    //     https://github.com/user/repo -> repo
+    //     git@github.com:user/repo.git -> repo
+    let seg = url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .or_else(|| url.rsplit(':').next())
+        .unwrap_or("repo");
+    let dir_name = seg.trim_end_matches(".git");
+    let cloned_path = parent_path.join(dir_name);
+    if !cloned_path.exists() {
+        return Err(format!("clone 完找不到目录: {}", cloned_path.display()));
+    }
+    Ok(cloned_path.to_string_lossy().to_string())
+}
+
 // ====== App config (provider list, active, thinking level) ======
 // v0.3.8+ 持久化到 <app_data_dir>/config.json, 替代 WebView2 localStorage.
 // 原因: 清 WebView2 缓存时 localStorage 也被擦, provider 配置就丢了.
@@ -1747,6 +1906,11 @@ pub fn run() {
             get_model_catalog,  // v0.5.0-D D213: 静态 catalog
             migrate_from_env,
             ensure_default_workspace,
+            // 2.1: 文件树浏览器 (UI-only, 不走 sidecar)
+            list_workspace_tree,
+            // 2.2: workspace 模板 (空目录 / git clone)
+            create_empty_dir,
+            git_clone,
             load_app_config,
             save_app_config,
             // v0.4.4 Skills: 写自定义 SKILL.md 到 workspace 或 global agentDir

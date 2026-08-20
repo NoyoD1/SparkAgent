@@ -305,24 +305,50 @@ export const useChatStore = defineStore('chat', () => {
       console.log(`[chat] D212: skip error divider (already pushed: ${lastMsg.errorMarker.errorMessage.slice(0, 60)})`);
       return;
     }
+    // v0.6.1: 把 raw 429 / TPM 错误转成中文友好提示
+    const friendly = friendlyErrorMessage(errorMessage);
     d.messages.push({
       id: `sys-error-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       role: 'system',
       content: '__LLM_ERROR_DIVIDER__',
       createdAt: new Date().toISOString(),
       errorMarker: {
-        errorMessage,
+        errorMessage: friendly,
         reason,
         at: Date.now(),
         hasPartialContent,
       },
     } as ChatMessage);
     chatData.value = { ...chatData.value, [sessionId]: { ...d } };
-    errorBySession.value = { ...errorBySession.value, [sessionId]: errorMessage };
+    errorBySession.value = { ...errorBySession.value, [sessionId]: friendly };
     console.log(
       `[chat] D212: error divider pushed (reason=${reason}, hasPartialContent=${hasPartialContent}, ` +
       `errorMessage=${errorMessage.slice(0, 80)})`
     );
+  }
+
+  /**
+   * v0.6.1: 把 provider 的 raw 错误转成 user 友好的中文提示.
+   * 当前支持:
+   *   - 429 / "rate limit" / "tpm" / "quota" / "tokens per minute" → 限流提示
+   *   - 其他原样返回
+   * 后续可以扩展 (401 → keychain 失效, 5xx → 服务异常 等)
+   */
+  function friendlyErrorMessage(raw: string): string {
+    const lower = raw.toLowerCase();
+    if (lower.includes('429') ||
+        lower.includes('rate limit') ||
+        lower.includes('rate_limit') ||
+        lower.includes('tpm') ||
+        lower.includes('tokens per minute') ||
+        lower.includes('quota')) {
+      return `LLM 限流 (429: TPM/Quota 触发). 可能原因: \n` +
+             `  • provider 免费层 TPM 配额较小, 当前会话累计 token 已超\n` +
+             `  • 1 分钟内重新发送会自动恢复\n` +
+             `  • 长 session 历史会占 token, 建议开新 session 或压缩 (右上角 \n` +
+             `\n原始错误: ${raw.slice(0, 200)}`;
+    }
+    return raw;
   }
   function startStreamHangWatchdog(sessionId: string): ReturnType<typeof setTimeout> {
     stopStreamHangWatchdog(sessionId);
@@ -408,6 +434,34 @@ export const useChatStore = defineStore('chat', () => {
   }
   function clearQuote(sessionId: string) {
     setQuote(sessionId, null);
+  }
+  // v0.6+ 文件引用 (file reference) — sidebar 文件树点文件 → 加到 pending refs.
+  //   跟 quote 的区别: quote 是引用历史消息, file ref 是引用 workspace 里的文件路径.
+  //   发送时: 把所有 pending refs 作为 markdown code block 前缀拼到 user message.
+  //   per-session 存储 (切 session 不丢, 跟 quote 一致).
+  //   UI 行为: Composer 渲染成可删除的 chip, sendPrompt 后清空 (跟 quote 一致).
+  const fileRefsBySession = ref<Record<string, Array<{ path: string; name: string; addedAt: number }>>>({});
+  function addFileRef(sessionId: string, ref: { path: string; name: string }) {
+    const list = fileRefsBySession.value[sessionId] ?? [];
+    // 同 path 重复不加
+    if (list.some((r) => r.path === ref.path)) return;
+    fileRefsBySession.value = {
+      ...fileRefsBySession.value,
+      [sessionId]: [...list, { ...ref, addedAt: Date.now() }],
+    };
+  }
+  function removeFileRef(sessionId: string, path: string) {
+    const list = fileRefsBySession.value[sessionId] ?? [];
+    fileRefsBySession.value = {
+      ...fileRefsBySession.value,
+      [sessionId]: list.filter((r) => r.path !== path),
+    };
+  }
+  function clearFileRefs(sessionId: string) {
+    fileRefsBySession.value = {
+      ...fileRefsBySession.value,
+      [sessionId]: [],
+    };
   }
   // v0.5.1: 当前 phase (thinking / text / tool / idle) — 用来在 streaming 状态
   //   显示 "思考中…" / "正在下笔…" / "调用工具…" 等不同文字, 文字轮换 (每 1.8s 换一次).
@@ -710,6 +764,13 @@ export const useChatStore = defineStore('chat', () => {
   async function sendPrompt(content: string, opts: { fromAutoRetry?: boolean } = {}) {
     const text = content.trim();
     if (!text) return;
+    // 0.3: 切 workspace in-flight 期间拒绝发. sidecar 还没就绪, 发过去会用旧 cwd 写到错位置.
+    if (sessionStore.isSwitchingWorkspace) {
+      const msg = '[chat] sendPrompt rejected: workspace 切换中, 等切换完成再发';
+      console.warn(msg);
+      errorBySession.value = { ...errorBySession.value, ['']: '工作区切换中, 请稍候再发' };
+      return;
+    }
     console.log('[chat] sendPrompt: contentLen=', text.length, 'activeSession=', sessionStore.activeSessionId, 'fromAutoRetry=', !!opts.fromAutoRetry);
 
     // 1. 确保有 active session
@@ -722,7 +783,8 @@ export const useChatStore = defineStore('chat', () => {
         try {
           const path = await piTauri.ensureDefaultWorkspace();
           console.log('[chat] sendPrompt: using default workspace', path);
-          const ws = sessionStore.addWorkspace({ path });
+          // 0.4: 标记为默认 workspace, UI 徽标 + 删时保护用
+          const ws = sessionStore.addWorkspace({ path, isDefault: true });
           wid = ws.id;
         } catch (e) {
           console.error('[chat] sendPrompt: ensureDefaultWorkspace failed', e);
@@ -776,6 +838,26 @@ export const useChatStore = defineStore('chat', () => {
       // 调试: 打印实际发送的 user message 全文, F12 console 可验证
       console.log('[chat] sendPrompt: fullUserText =\n', fullUserText);
     }
+    // v0.6+ 文件引用 (file reference) — sidebar 文件树点文件收集的 refs
+    //   拼成 markdown code block 放在 quote 之后, user text 之前. LLM 看到路径能直接 read.
+    //   没 quote 时直接拼在最前面. 不引号 quoteContent 单独存 (file refs 不是 "历史消息引用",
+    //   是当前 workspace 内的资源; 不需要 ChatMessage 单独 blockquote 样式, markdown 已经够清晰).
+    const fileRefs = fileRefsBySession.value[sessionId] ?? [];
+    if (fileRefs.length > 0) {
+      const refsBlock = fileRefs.map((r) => `\`${r.path}\``).join('\n');
+      const refsHeader = '以下文件被引用 (来自当前工作区):';
+      if (fullUserText === text) {
+        fullUserText = `${refsHeader}\n${refsBlock}\n\n${text}`;
+      } else {
+        // 有 quote 在前面, refs 插 quote 之后
+        const quotedLines = quote!.content
+          .split('\n')
+          .map((line) => line.trim() ? `> ${line}` : '>')
+          .join('\n');
+        fullUserText = `${quotedLines}\n\n${refsHeader}\n${refsBlock}\n\n${text}`;
+      }
+      console.log('[chat] sendPrompt: with fileRefs (count=', fileRefs.length, ', paths=', fileRefs.map((r) => r.path).join(', '), ')');
+    }
     appendUserMessage(sessionId, fullUserText, quoteContent);
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: true };
     errorBySession.value = { ...errorBySession.value, [sessionId]: null };
@@ -789,6 +871,7 @@ export const useChatStore = defineStore('chat', () => {
     }
     // 引用用完即清, 跟发完就消失的 UX 一致 (避免下次发还残留)
     if (quote) clearQuote(sessionId);
+    if (fileRefs.length > 0) clearFileRefs(sessionId);
     // touch session updated time
     sessionStore.touchSession(sessionId);
 
@@ -837,12 +920,18 @@ export const useChatStore = defineStore('chat', () => {
         streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: false };
         chatData.value = { ...chatData.value };  // 触发 UI 更新
       }
-      console.log(
-        '[chat] event:',
-        event.type,
-        'sessionMatch=',
-        !('sessionId' in event) || event.sessionId === sessionId,
-      );
+      // v0.6.1.1: 抑制高频 event log — `message_update` 在 LLM 流式响应时每 token chunk 触发一次,
+      //   一个 turn 经常 20-50 次, 跟 text_delta 类似. 真正调试聊天流应该看 streaming 状态,
+      //   不是 console. 关掉这个的 per-event log, 其它事件保留 (message_start / end, turn_start / end,
+      //   tool_*, error 等都是有意义的).
+      if (event.type !== 'message_update') {
+        console.log(
+          '[chat] event:',
+          event.type,
+          'sessionMatch=',
+          !('sessionId' in event) || event.sessionId === sessionId,
+        );
+      }
       if ('sessionId' in event && event.sessionId !== sessionId) return;
       const d2 = getSessionData(sessionId);
       // v0.3.8.12 fix: 之前 `if (idx < 0) return` 在 switch 之前, 导致 message_start
@@ -1020,7 +1109,12 @@ export const useChatStore = defineStore('chat', () => {
           //
           //   v0.4.6 之前 let 每次重生成 id → 每个 turn push 新 message → 多个空 message
           //   → "AI 没有回复内容" 灰色字 + thinking 重复 3 次 (用户实测反馈).
+          //
+          //   0.3: 第一次 message_start 也代表 sidecar 切 ws 完, 清 in-flight flag 早于 1.5s timer.
           if (idx < 0) {
+            // 第一次 message_start → sidecar 已就绪, 切 workspace 完
+            sessionStore.finishWorkspaceSwitch();
+
             // 第一次: push new message (用 curId = assistantId) + lazy step 0
             d2.messages.push({
               id: curId,  // v0.4.7: 用同一个 assistantId,后续 message_start 找得到
@@ -1422,7 +1516,8 @@ export const useChatStore = defineStore('chat', () => {
       }
     } catch (e) {
       console.error('[chat] sendPrompt FAILED', e);
-      errorBySession.value = { ...errorBySession.value, [sessionId]: e instanceof Error ? e.message : String(e) };
+      const rawMsg = e instanceof Error ? e.message : String(e);
+      errorBySession.value = { ...errorBySession.value, [sessionId]: friendlyErrorMessage(rawMsg) };
       streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
       off();
     }
@@ -1915,6 +2010,11 @@ export const useChatStore = defineStore('chat', () => {
     setQuote,
     clearQuote,
     quoteBySession,
+    // v0.6+ 文件引用 (file reference) — sidebar 文件树点文件 → composer chip
+    addFileRef,
+    removeFileRef,
+    clearFileRefs,
+    fileRefsBySession,
     appendUserMessage,
     clearSession,
     sendPrompt,
