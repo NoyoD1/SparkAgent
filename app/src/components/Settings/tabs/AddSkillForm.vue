@@ -494,7 +494,7 @@ async function submit() {
   gap: 10px;
   padding: 10px 12px;
   background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.02));
-  border: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-md);
   margin-bottom: 16px;
 }
@@ -539,7 +539,7 @@ async function submit() {
   gap: 4px;
   padding: 10px 12px;
   background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.02));
-  border: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-md);
   margin-bottom: 16px;
 }
@@ -668,7 +668,7 @@ async function submit() {
 
 .pad-addskill__preview {
   background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.02));
-  border: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-md);
   overflow: hidden;
 }
@@ -678,7 +678,7 @@ async function submit() {
   gap: 6px;
   padding: 6px 10px;
   background: var(--pad-card);
-  border-bottom: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  border-bottom: 1px solid var(--pad-border);
   color: var(--pad-fg-tertiary);
   font-size: 11px;
   font-weight: 500;

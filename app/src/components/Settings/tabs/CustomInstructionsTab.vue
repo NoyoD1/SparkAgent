@@ -213,18 +213,50 @@ onMounted(() => {
 .pad-instrtab__header { padding: 24px 0 16px 0; }
 .pad-instrtab__title { font-size: var(--pad-fs-22); font-weight: var(--pad-fw-semibold); color: var(--pad-fg-primary); margin: 0 0 4px 0; }
 .pad-instrtab__subtitle { font-size: var(--pad-fs-13); color: var(--pad-fg-secondary); margin: 0; line-height: 1.5; }
-.pad-instrtab__subtitle code { font-family: var(--pad-font-mono); font-size: 11px; background: var(--pad-bg-muted, rgba(0,0,0,0.04)); padding: 1px 4px; border-radius: 2px; }
+.pad-instrtab__subtitle code {
+  font-family: var(--pad-font-mono);
+  font-size: 11px;
+  background: var(--pad-bg-input);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
 .pad-instrtab__toast { display: flex; align-items: center; gap: 6px; padding: 8px 14px; margin-bottom: 12px; border-radius: var(--pad-radius-md, 8px); font-size: var(--pad-fs-12); }
 .pad-instrtab__toast.is-ok { background: var(--pad-bg-success-soft, rgba(34,197,94,0.08)); color: var(--pad-fg-success, #22c55e); }
 .pad-instrtab__toast.is-fail { background: var(--pad-bg-danger-soft, rgba(220,38,38,0.08)); color: var(--pad-fg-danger, #dc2626); }
 .pad-instrtab__toast-close { margin-left: auto; background: transparent; border: none; color: inherit; cursor: pointer; font-size: 16px; }
-.pad-instrtab__card { background: var(--pad-bg-base, #fff); border: 1px solid var(--pad-border-subtle, #e0e0e0); border-radius: var(--pad-radius-md, 8px); overflow: hidden; }
-.pad-instrtab__card-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--pad-bg-muted, rgba(0,0,0,0.02)); border-bottom: 1px solid var(--pad-border-subtle, #e0e0e0); color: var(--pad-fg-secondary); }
+/* Phase 8: dark mode 适配 — 修未定义的 --pad-bg-base / --pad-border-subtle / --pad-bg-muted */
+.pad-instrtab__card {
+  background: var(--pad-card);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md, 8px);
+  overflow: hidden;
+}
+.pad-instrtab__card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--pad-bg-input);
+  border-bottom: 1px solid var(--pad-border);
+  color: var(--pad-fg-secondary);
+}
 .pad-instrtab__card-title { flex: 1; font-size: var(--pad-fs-13); font-weight: var(--pad-fw-medium); display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .pad-instrtab__file-path { font-family: var(--pad-font-mono); font-size: 10px; color: var(--pad-fg-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pad-instrtab__actions { display: flex; gap: 6px; }
-.pad-instrtab__btn { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; font-size: var(--pad-fs-12); border: 1px solid var(--pad-border-subtle, #e0e0e0); border-radius: var(--pad-radius-sm, 4px); background: var(--pad-bg-base, #fff); color: var(--pad-fg-primary); cursor: pointer; transition: all 0.15s; }
-.pad-instrtab__btn:hover:not(:disabled) { background: var(--pad-bg-hover, rgba(0,0,0,0.04)); }
+.pad-instrtab__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  font-size: var(--pad-fs-12);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm, 4px);
+  background: var(--pad-bg-input);
+  color: var(--pad-fg-primary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.pad-instrtab__btn:hover:not(:disabled) { background: var(--pad-bg-hover); }
 .pad-instrtab__btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .pad-instrtab__btn--primary { background: var(--pad-accent, #6366f1); border-color: var(--pad-accent, #6366f1); color: var(--pad-fg-on-accent, #fff); }
 .pad-instrtab__btn--primary:hover:not(:disabled) { opacity: 0.9; }
@@ -236,10 +268,28 @@ onMounted(() => {
 .pad-instrtab__label { font-size: var(--pad-fs-12); color: var(--pad-fg-secondary); width: 60px; flex-shrink: 0; }
 .pad-instrtab__radio { display: flex; gap: 12px; }
 .pad-instrtab__radio label { display: inline-flex; align-items: center; gap: 4px; font-size: var(--pad-fs-12); cursor: pointer; padding: 4px 8px; border-radius: var(--pad-radius-sm, 4px); transition: background 0.15s; }
-.pad-instrtab__radio label:hover { background: var(--pad-bg-hover, rgba(0,0,0,0.04)); }
-.pad-instrtab__radio label.is-active { background: var(--pad-accent-soft, rgba(99,102,241,0.08)); color: var(--pad-fg-primary); font-weight: var(--pad-fw-medium); }
-.pad-instrtab__textarea { width: 100%; padding: 10px; font-family: var(--pad-font-mono); font-size: var(--pad-fs-13); line-height: 1.6; border: 1px solid var(--pad-border-subtle, #e0e0e0); border-radius: var(--pad-radius-sm, 4px); background: var(--pad-bg-base, #fff); resize: vertical; min-height: 360px; }
+.pad-instrtab__radio label:hover { background: var(--pad-bg-hover); }
+.pad-instrtab__radio label.is-active { background: var(--pad-accent-soft); color: var(--pad-fg-primary); font-weight: var(--pad-fw-medium); }
+.pad-instrtab__textarea {
+  width: 100%;
+  padding: 10px;
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-13);
+  line-height: 1.6;
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm, 4px);
+  background: var(--pad-bg-input);
+  color: var(--pad-fg-primary);
+  resize: vertical;
+  min-height: 360px;
+}
 .pad-instrtab__textarea:focus { outline: none; border-color: var(--pad-accent, #6366f1); }
 .pad-instrtab__hint { display: flex; align-items: flex-start; gap: 6px; padding: 12px 16px; color: var(--pad-fg-tertiary); font-size: 11px; line-height: 1.5; }
-.pad-instrtab__hint code { font-family: var(--pad-font-mono); font-size: 10px; background: var(--pad-bg-muted, rgba(0,0,0,0.04)); padding: 1px 4px; border-radius: 2px; }
+.pad-instrtab__hint code {
+  font-family: var(--pad-font-mono);
+  font-size: 10px;
+  background: var(--pad-bg-input);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
 </style>

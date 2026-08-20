@@ -282,7 +282,7 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
   align-items: center;
   gap: 6px;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  border-bottom: 1px solid var(--pad-border);
   color: var(--pad-fg-secondary);
   font-size: 12px;
   font-weight: 500;
@@ -342,7 +342,7 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
   align-items: flex-start;
   gap: 16px;
   padding: 12px 14px;
-  border-bottom: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.04));
+  border-bottom: 1px solid var(--pad-border);
   transition: background 0.1s;
 }
 .pad-skillstab__item:last-child {
@@ -418,11 +418,11 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
   background: var(--pad-bg-warning-soft, rgba(217, 119, 6, 0.06));
   color: var(--pad-fg-warning, #d97706);
   font-size: 11px;
-  border-top: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  border-top: 1px solid var(--pad-border);
 }
 .pad-skillstab__diag-list {
   padding: 8px 14px;
-  border-top: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  border-top: 1px solid var(--pad-border);
   font-size: 11px;
   color: var(--pad-fg-warning, #d97706);
   background: var(--pad-bg-warning-soft, rgba(217, 119, 6, 0.04));
@@ -444,7 +444,7 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
 .pad-skillstab__diag-list code {
   font-family: var(--pad-font-mono);
   font-size: 10px;
-  background: var(--pad-bg-muted, rgba(0, 0, 0, 0.06));
+  background: var(--pad-bg-input);
   padding: 1px 4px;
   border-radius: 2px;
 }
@@ -457,20 +457,20 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
   background: var(--pad-bg-danger-soft, rgba(220, 38, 38, 0.06));
   color: var(--pad-fg-danger, #dc2626);
   font-size: 11px;
-  border-top: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  border-top: 1px solid var(--pad-border);
   word-break: break-all;
 }
 .pad-skillstab__error code {
   font-family: var(--pad-font-mono);
   font-size: 10px;
-  background: var(--pad-bg-muted, rgba(0, 0, 0, 0.06));
+  background: var(--pad-bg-input);
   padding: 1px 4px;
   border-radius: 2px;
 }
 /* v0.4.4.6.2: Debug 折叠 (activeWorkspace / hasSnapshot / hasTauriList / skills.length 一目了然) */
 .pad-skillstab__debug {
   padding: 8px 14px;
-  border-top: 1px solid var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  border-top: 1px solid var(--pad-border);
   font-size: 11px;
   color: var(--pad-fg-tertiary);
 }
@@ -492,7 +492,7 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
 .pad-skillstab__debug code {
   font-family: var(--pad-font-mono);
   font-size: 10px;
-  background: var(--pad-bg-muted, rgba(0, 0, 0, 0.06));
+  background: var(--pad-bg-input);
   padding: 1px 4px;
   border-radius: 2px;
 }
@@ -518,7 +518,7 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
   justify-content: center;
   width: 24px;
   height: 24px;
-  border: 1px solid var(--pad-border-subtle, #e0e0e0);
+  border: 1px solid var(--pad-border);
   background: transparent;
   color: var(--pad-fg-tertiary, #888);
   border-radius: var(--pad-radius-sm, 4px);

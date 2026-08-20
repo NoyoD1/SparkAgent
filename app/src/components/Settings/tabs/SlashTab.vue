@@ -245,36 +245,96 @@ onMounted(() => {
 .pad-slashtab__header { padding: 24px 0 16px 0; }
 .pad-slashtab__title { font-size: var(--pad-fs-22); font-weight: var(--pad-fw-semibold); color: var(--pad-fg-primary); margin: 0 0 4px 0; }
 .pad-slashtab__subtitle { font-size: var(--pad-fs-13); color: var(--pad-fg-secondary); margin: 0; line-height: 1.5; }
-.pad-slashtab__subtitle code { font-family: var(--pad-font-mono); font-size: 11px; background: var(--pad-bg-muted, rgba(0,0,0,0.04)); padding: 1px 4px; border-radius: 2px; }
+.pad-slashtab__subtitle code { font-family: var(--pad-font-mono); font-size: 11px; background: var(--pad-bg-input); padding: 1px 4px; border-radius: 2px; }
 .pad-slashtab__toast { display: flex; align-items: center; gap: 6px; padding: 8px 14px; margin-bottom: 12px; border-radius: var(--pad-radius-md, 8px); font-size: var(--pad-fs-12); }
 .pad-slashtab__toast.is-ok { background: var(--pad-bg-success-soft, rgba(34,197,94,0.08)); color: var(--pad-fg-success, #22c55e); }
 .pad-slashtab__toast.is-fail { background: var(--pad-bg-danger-soft, rgba(220,38,38,0.08)); color: var(--pad-fg-danger, #dc2626); }
 .pad-slashtab__toast-close { margin-left: auto; background: transparent; border: none; color: inherit; cursor: pointer; font-size: 16px; }
-.pad-slashtab__card { background: var(--pad-bg-base, #fff); border: 1px solid var(--pad-border-subtle, #e0e0e0); border-radius: var(--pad-radius-md, 8px); overflow: hidden; }
-.pad-slashtab__card-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--pad-bg-muted, rgba(0,0,0,0.02)); border-bottom: 1px solid var(--pad-border-subtle, #e0e0e0); color: var(--pad-fg-secondary); }
+/* Phase 8: dark mode 适配 — 修未定义的 --pad-bg-base / --pad-border-subtle / --pad-bg-muted
+   改用 --pad-card / --pad-border / --pad-bg-input (light=#fff, dark=#171717/#262626/#1c1c1c) */
+.pad-slashtab__card {
+  background: var(--pad-card);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md, 8px);
+  overflow: hidden;
+}
+.pad-slashtab__card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--pad-bg-input);
+  border-bottom: 1px solid var(--pad-border);
+  color: var(--pad-fg-secondary);
+}
 .pad-slashtab__card-title { flex: 1; font-size: var(--pad-fs-13); font-weight: var(--pad-fw-medium); }
 .pad-slashtab__actions { display: flex; gap: 6px; }
-.pad-slashtab__btn { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; font-size: var(--pad-fs-12); border: 1px solid var(--pad-border-subtle, #e0e0e0); border-radius: var(--pad-radius-sm, 4px); background: var(--pad-bg-base, #fff); color: var(--pad-fg-primary); cursor: pointer; transition: all 0.15s; }
-.pad-slashtab__btn:hover:not(:disabled) { background: var(--pad-bg-hover, rgba(0,0,0,0.04)); }
+.pad-slashtab__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  font-size: var(--pad-fs-12);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm, 4px);
+  background: var(--pad-bg-input);
+  color: var(--pad-fg-primary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.pad-slashtab__btn:hover:not(:disabled) { background: var(--pad-bg-hover); }
 .pad-slashtab__btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .pad-slashtab__btn--primary { background: var(--pad-accent, #6366f1); border-color: var(--pad-accent, #6366f1); color: var(--pad-fg-on-accent, #fff); }
 .pad-slashtab__btn--primary:hover:not(:disabled) { opacity: 0.9; }
 .pad-slashtab__btn--danger { color: var(--pad-fg-danger, #dc2626); }
 .pad-slashtab__btn--danger:hover:not(:disabled) { background: var(--pad-bg-danger-soft, rgba(220,38,38,0.08)); }
-.pad-slashtab__form { padding: 16px; border-bottom: 1px solid var(--pad-border-subtle, #e0e0e0); display: flex; flex-direction: column; gap: 12px; }
+.pad-slashtab__form {
+  padding: 16px;
+  border-bottom: 1px solid var(--pad-border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
 .pad-slashtab__form-row { display: flex; align-items: center; gap: 8px; }
 .pad-slashtab__form-row--body { flex-direction: column; align-items: stretch; }
 .pad-slashtab__label { font-size: var(--pad-fs-12); color: var(--pad-fg-secondary); width: 80px; flex-shrink: 0; }
-.pad-slashtab__input { flex: 1; padding: 6px 10px; font-family: var(--pad-font-mono); font-size: var(--pad-fs-13); border: 1px solid var(--pad-border-subtle, #e0e0e0); border-radius: var(--pad-radius-sm, 4px); background: var(--pad-bg-base, #fff); }
+.pad-slashtab__input {
+  flex: 1;
+  padding: 6px 10px;
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-13);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm, 4px);
+  background: var(--pad-bg-input);
+  color: var(--pad-fg-primary);
+}
 .pad-slashtab__input:focus { outline: none; border-color: var(--pad-accent, #6366f1); }
-.pad-slashtab__textarea { width: 100%; padding: 10px; font-family: var(--pad-font-mono); font-size: var(--pad-fs-13); line-height: 1.6; border: 1px solid var(--pad-border-subtle, #e0e0e0); border-radius: var(--pad-radius-sm, 4px); background: var(--pad-bg-base, #fff); resize: vertical; min-height: 180px; }
+.pad-slashtab__textarea {
+  width: 100%;
+  padding: 10px;
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-13);
+  line-height: 1.6;
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm, 4px);
+  background: var(--pad-bg-input);
+  color: var(--pad-fg-primary);
+  resize: vertical;
+  min-height: 180px;
+}
 .pad-slashtab__textarea:focus { outline: none; border-color: var(--pad-accent, #6366f1); }
 .pad-slashtab__form-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .pad-slashtab__empty { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 20px; gap: 8px; color: var(--pad-fg-tertiary); }
 .pad-slashtab__empty-title { font-size: var(--pad-fs-14); color: var(--pad-fg-secondary); }
 .pad-slashtab__empty-desc { font-size: var(--pad-fs-12); color: var(--pad-fg-tertiary); text-align: center; }
 .pad-slashtab__list { list-style: none; padding: 0; margin: 0; }
-.pad-slashtab__item { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-top: 1px solid var(--pad-border-subtle, rgba(0,0,0,0.04)); }
+.pad-slashtab__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--pad-border);
+}
 .pad-slashtab__item-body { flex: 1; min-width: 0; }
 .pad-slashtab__item-name { display: flex; align-items: center; gap: 8px; font-size: var(--pad-fs-13); }
 .pad-slashtab__item-name code { font-family: var(--pad-font-mono); font-size: var(--pad-fs-13); color: var(--pad-fg-primary); font-weight: var(--pad-fw-medium); }
@@ -282,5 +342,5 @@ onMounted(() => {
 .pad-slashtab__item-body-preview { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--pad-fg-tertiary); margin-top: 2px; font-family: var(--pad-font-mono); }
 .pad-slashtab__item-actions { display: flex; gap: 4px; }
 .pad-slashtab__hint { display: flex; align-items: flex-start; gap: 6px; padding: 12px 16px; color: var(--pad-fg-tertiary); font-size: 11px; line-height: 1.5; }
-.pad-slashtab__hint code { font-family: var(--pad-font-mono); font-size: 10px; background: var(--pad-bg-muted, rgba(0,0,0,0.04)); padding: 1px 4px; border-radius: 2px; }
+.pad-slashtab__hint code { font-family: var(--pad-font-mono); font-size: 10px; background: var(--pad-bg-input); padding: 1px 4px; border-radius: 2px; }
 </style>

@@ -1220,7 +1220,7 @@ const statusText = computed(() => {
   margin-left: 2px;
 }
 .pad-msg__tool-card-toggle:hover {
-  background: var(--pad-bg-base);
+  background: var(--pad-card);
   color: var(--pad-fg-secondary);
 }
 .pad-msg__tool-card-chev {

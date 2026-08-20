@@ -1220,9 +1220,10 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
   gap: 4px;
   padding: 4px 6px;
   margin: 2px 2px 4px;
-  border: 1px solid var(--pad-border, rgba(0, 0, 0, 0.08));
+  border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-md, 6px);
-  background: var(--pad-bg-card, #ffffff);
+  /* Phase 8: dark mode — 改用 --pad-bg-input (light=#fff, dark=#1c1c1c) */
+  background: var(--pad-bg-input);
   transition: border-color var(--pad-dur-fast, 0.15s) ease, box-shadow var(--pad-dur-fast, 0.15s) ease;
 }
 .pad-wstree__search:focus-within {
@@ -1320,7 +1321,7 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
   min-width: 0;
   border: 1px solid var(--pad-accent);
   border-radius: var(--pad-radius-sm);
-  background: var(--pad-bg-card);
+  background: var(--pad-bg-input);
   color: var(--pad-fg-primary);
   font: inherit;
   padding: 0 4px;

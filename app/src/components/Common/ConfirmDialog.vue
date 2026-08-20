@@ -124,8 +124,9 @@ watch(
 }
 
 .pad-confirm-modal {
-  background: var(--pad-bg-card, #ffffff);
-  border: 1px solid var(--pad-border, rgba(0, 0, 0, 0.1));
+  /* Phase 8: dark mode 适配 — 修之前用 --pad-bg-card (未定义, fallback 白底) */
+  background: var(--pad-card);
+  border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-lg, 8px);
   padding: var(--pad-sp-6, 24px);
   max-width: 420px;
@@ -137,14 +138,14 @@ watch(
   margin: 0 0 var(--pad-sp-3, 12px);
   font-size: var(--pad-fs-15, 15px);
   font-weight: var(--pad-fw-medium, 500);
-  color: var(--pad-fg-primary, #1a1a1a);
+  color: var(--pad-fg-primary);
   line-height: 1.4;
 }
 
 .pad-confirm-message {
   margin: 0 0 var(--pad-sp-5, 20px);
   font-size: var(--pad-fs-13, 13px);
-  color: var(--pad-fg-secondary, #4a4a4a);
+  color: var(--pad-fg-secondary);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;

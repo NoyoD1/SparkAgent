@@ -1049,7 +1049,7 @@ function onProviderAdded(id: string) {
   flex-direction: column;
   gap: 0;
   min-height: 0;
-  background: var(--pad-bg-muted);
+  background: var(--pad-bg-input);
   border-right: 1px solid var(--pad-divider);
 }
 .pad-providers__list-head {
@@ -1315,7 +1315,7 @@ function onProviderAdded(id: string) {
   font-size: var(--pad-fs-12);
   color: var(--pad-fg-tertiary);
   padding: 12px;
-  background: var(--pad-bg-muted);
+  background: var(--pad-bg-input);
   border-radius: var(--pad-radius-md);
   text-align: center;
 }
@@ -1326,7 +1326,7 @@ function onProviderAdded(id: string) {
   border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-md);
   padding: 4px;
-  background: var(--pad-bg-muted);
+  background: var(--pad-bg-input);
 }
 .pad-provider-detail__model {
   display: flex;
@@ -1373,9 +1373,9 @@ function onProviderAdded(id: string) {
   line-height: 14px;
   padding: 1px 6px;
   border-radius: var(--pad-radius-sm);
-  background: var(--pad-bg-muted);
+  background: var(--pad-bg-input);
   color: var(--pad-fg-secondary);
-  border: 1px solid var(--pad-border-subtle);
+  border: 1px solid var(--pad-border);
 }
 /* v0.4.4.6: 配置 metadata 按钮 (跟删除按钮同 pattern: hover 才显) */
 .pad-provider-detail__model-config {
@@ -1419,7 +1419,7 @@ function onProviderAdded(id: string) {
   padding: 12px;
   margin: 4px 0 8px 0;
   background: var(--pad-bg-subtle);
-  border: 1px solid var(--pad-border-subtle);
+  border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-md);
 }
 .pad-provider-detail__form-row {
@@ -1439,8 +1439,8 @@ function onProviderAdded(id: string) {
   flex: 1;
   padding: 6px 10px;
   font-size: var(--pad-fs-13);
-  background: var(--pad-bg-base);
-  border: 1px solid var(--pad-border-subtle);
+  background: var(--pad-card);
+  border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-sm);
   color: var(--pad-fg-primary);
 }
@@ -1459,8 +1459,8 @@ function onProviderAdded(id: string) {
   font-size: var(--pad-fs-12);
   border-radius: var(--pad-radius-sm);
   cursor: pointer;
-  border: 1px solid var(--pad-border-subtle);
-  background: var(--pad-bg-base);
+  border: 1px solid var(--pad-border);
+  background: var(--pad-card);
   color: var(--pad-fg-primary);
   transition: all var(--pad-dur-fast) ease;
 }
@@ -1552,7 +1552,7 @@ function onProviderAdded(id: string) {
   font-size: var(--pad-fs-12);
   padding: 8px 12px;
   border-radius: var(--pad-radius-md);
-  background: var(--pad-bg-muted);
+  background: var(--pad-bg-input);
   color: var(--pad-fg-secondary);
 }
 .pad-provider-detail__result.is-ok { background: var(--pad-success-soft); color: var(--pad-success-text); }

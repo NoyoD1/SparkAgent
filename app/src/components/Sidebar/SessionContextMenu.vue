@@ -221,8 +221,10 @@ function emitAction(type: string, payload?: any) {
 .pad-contextmenu {
   position: fixed;
   min-width: 220px;
-  background: var(--pad-bg-card, #ffffff);
-  border: 1px solid var(--pad-border, rgba(0, 0, 0, 0.1));
+  /* Phase 8: dark mode 适配 — 修之前用 --pad-bg-card (未定义, fallback 白底)
+     改成正确的 --pad-card (light=#fff, dark=#171717) */
+  background: var(--pad-card);
+  border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-md, 6px);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
   padding: var(--pad-sp-1, 4px);
@@ -320,8 +322,9 @@ function emitAction(type: string, payload?: any) {
   min-width: 0;
   border: 1px solid var(--pad-accent, #3b82f6);
   border-radius: var(--pad-radius-sm, 4px);
-  background: var(--pad-bg-card, #ffffff);
-  color: var(--pad-fg-primary, #1a1a1a);
+  /* Phase 8: dark mode — 改用 --pad-bg-input (light=#fff, dark=#1c1c1c) */
+  background: var(--pad-bg-input);
+  color: var(--pad-fg-primary);
   font: inherit;
   font-size: var(--pad-fs-13, 13px);
   padding: 2px 6px;

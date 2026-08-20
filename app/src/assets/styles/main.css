@@ -67,6 +67,28 @@ body {
   background: transparent;
 }
 
+/* Phase 8: 全局滚动条 (覆盖 Settings 面板等没 .pad-scroll class 的滚动容器)
+   light/dark 自适应, dark 模式下用 --pad-border-strong (#404040) 当 thumb */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--pad-border-strong);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--pad-fg-tertiary);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+/* Firefox: 用 scrollbar-color + scrollbar-width */
+html {
+  scrollbar-color: var(--pad-border-strong) transparent;
+  scrollbar-width: thin;
+}
+
 /* Focus ring — matches pad-ring token */
 button:focus-visible,
 a:focus-visible,
