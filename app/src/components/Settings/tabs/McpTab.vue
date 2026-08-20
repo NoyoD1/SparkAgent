@@ -19,10 +19,10 @@
  * sidecar 启动时自动加载 MCP server 配置 + spawn + 拉 tools/list 转 Pi SDK ToolDefinition
  *   (工具名加 mcp_<server>_<tool> 前缀). **不**支持热重载 (P1.5 之后再说), 改完需重启 sidecar.
  */
-import { ref, computed, onMounted } from 'vue';
+import { ref, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import {
-  Plug, Plus, X, Save, Trash2, AlertCircle, Check, Info, Pencil, Upload, FileJson,
+  Plug, Plus, X, Trash2, AlertCircle, Check, Info, Pencil, Upload, FileJson,
 } from 'lucide-vue-next';
 import { useMcpServersStore, type McpServerScope } from '@/stores/mcpServers';
 import {
@@ -46,31 +46,28 @@ const formArgs = ref('');   // 空格分隔的 args (UI 简化), 提交时 split
 const isSavingCreate = ref(false);
 
 // ====== 编辑 dialog state (走 unified dialog, 跟新建共用 isCreating) ======
-//   editingName / editingBody / editingScope / isSavingEdit 留作 saveEdit 用
-const editingScope = ref<McpServerScope>('workspace');
+//   editingName / editingBody / isSavingEdit 留作 saveEdit 用
 const editingName = ref('');
 const editingBody = ref('');
 const isSavingEdit = ref(false);
 
-// ====== v0.6.3-rc1 P2-1.3: unified create/edit dialog (form / JSON tab 切换) ======
-//   替代之前简单的 form dialog + 纯 JSON edit dialog.
-//   创建 / 编辑共用同一个 dialog (通过 isCreating 区分模式),
-//   dialog 内部有 form (可视化字段) + json (textarea) 两个 tab, 跟 Cherry Studio 那种风格.
+// ====== v0.6.3-rc1 P2-1.4: 简约版 unified create/edit dialog state ======
+//   替代 P2-1.3 的 form/json tab + type radio 复杂版.
+//   核心 3 字段 (名称/命令/参数) 一直可见, 高级配置 (作用域/env/超时) 塞 <details> 折叠区.
+//   JSON tab 完全砍掉 (批量配置走顶部"导入 JSON"按钮, 单个高级配置走 env textarea).
 const dialogMode = ref<'create' | 'edit'>('create');   // 当前是新建还是编辑
-const dialogTab = ref<'form' | 'json'>('form');       // 当前显示哪个 tab
-const dialogType = ref<'stdio' | 'http' | 'sse'>('stdio');
-const dialogFormEnv = ref('');                         // env 字段 (JSON object string)
-const dialogIsHttpOrSse = computed(() => dialogType.value === 'http' || dialogType.value === 'sse');
+const editingScope = ref<McpServerScope>('workspace');  // 作用域 (高级区)
+const dialogFormEnv = ref('');                         // env 字段 (JSON object string, 高级区)
+const dialogFormTimeout = ref(30000);                 // 超时 (ms, 高级区)
 
 function startCreate() {
   dialogMode.value = 'create';
-  dialogTab.value = 'form';
-  dialogType.value = 'stdio';
   formName.value = '';
   formCommand.value = 'node';
   formArgs.value = '';
-  dialogFormEnv.value = '{}';
   editingScope.value = 'workspace';
+  dialogFormEnv.value = '{}';
+  dialogFormTimeout.value = 30000;
   isCreating.value = true;
 }
 
@@ -87,22 +84,20 @@ async function saveCreate() {
   isSavingCreate.value = true;
   toast.value = null;
   try {
-    // v0.6.3-rc1 P2-1.3: HTTP / SSE 暂未实现, 明确拒绝保存
-    if (dialogType.value !== 'stdio') {
-      throw new Error(`暂未支持 ${dialogType.value.toUpperCase()} 传输 (P2.3 实现), 当前请用 stdio`);
-    }
+    // v0.6.3-rc1 P2-1.4: 简约版, 单一 stdio transport (HTTP/SSE 暂未实现 — P2.3),
+    //   type 字段固定 stdio, 不再让 user 选 (简化 dialog)
     const args = formArgs.value
       .split(/\s+/)
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
     const env = parseEnvJson(dialogFormEnv.value, '环境变量');
     const body = mcpStore.buildBodyFromForm({
-      type: dialogType.value,
+      type: 'stdio',
       name: formName.value,
       command: formCommand.value,
       args,
       env,
-      timeout: 30000,
+      timeout: dialogFormTimeout.value || 30000,
     });
     await mcpStore.write(editingScope.value, formName.value, body);
     toast.value = { type: 'ok', message: `已创建 ${formName.value}` };
@@ -119,20 +114,22 @@ async function startEdit(scope: McpServerScope, name: string) {
   try {
     const body = await mcpStore.read(scope, name);
     dialogMode.value = 'edit';
-    dialogTab.value = 'form';
     editingScope.value = scope;
     editingName.value = name;
     editingBody.value = body;
-    // 反解 body 到 form 字段 (form tab 默认显示, user 可切到 json tab 看原文)
+    // 反解 body 到 form 字段
     try {
       const obj = JSON.parse(body);
-      dialogType.value = (obj.type === 'http' || obj.type === 'sse') ? obj.type : 'stdio';
       formCommand.value = obj.command || '';
       formArgs.value = Array.isArray(obj.args) ? obj.args.join(' ') : '';
       dialogFormEnv.value = obj.env ? JSON.stringify(obj.env, null, 2) : '{}';
+      dialogFormTimeout.value = typeof obj.timeout === 'number' ? obj.timeout : 30000;
     } catch {
-      // body 解析失败, 切到 json tab 让 user 看原文
-      dialogTab.value = 'json';
+      // body 解析失败, 留空让 user 手动填
+      formCommand.value = '';
+      formArgs.value = '';
+      dialogFormEnv.value = '{}';
+      dialogFormTimeout.value = 30000;
     }
     isCreating.value = true;  // 跟新建共用一个 dialog
     toast.value = null;
@@ -146,28 +143,19 @@ async function saveEdit() {
   isSavingEdit.value = true;
   toast.value = null;
   try {
-    let body: string;
-    if (dialogTab.value === 'form') {
-      // v0.6.3-rc1 P2-1.3: HTTP / SSE 暂未实现
-      if (dialogType.value !== 'stdio') {
-        throw new Error(`暂未支持 ${dialogType.value.toUpperCase()} 传输 (P2.3 实现), 当前请用 stdio`);
-      }
-      const args = formArgs.value
-        .split(/\s+/)
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0);
-      const env = parseEnvJson(dialogFormEnv.value, '环境变量');
-      body = mcpStore.buildBodyFromForm({
-        type: dialogType.value,
-        name: editingName.value,
-        command: formCommand.value,
-        args,
-        env,
-        timeout: 30000,
-      });
-    } else {
-      body = editingBody.value;
-    }
+    const args = formArgs.value
+      .split(/\s+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const env = parseEnvJson(dialogFormEnv.value, '环境变量');
+    const body = mcpStore.buildBodyFromForm({
+      type: 'stdio',
+      name: editingName.value,
+      command: formCommand.value,
+      args,
+      env,
+      timeout: dialogFormTimeout.value || 30000,
+    });
     await mcpStore.write(editingScope.value, editingName.value, body);
     toast.value = { type: 'ok', message: `已更新 ${editingName.value}` };
     cancelCreate();
@@ -363,7 +351,11 @@ async function refreshAndShowPath() {
       <span>{{ error }}</span>
     </div>
 
-    <!-- v0.6.3-rc1 P2-1.3: unified create/edit dialog (form / JSON tab 切换, 跟 Cherry Studio 风格) -->
+    <!-- v0.6.3-rc1 P2-1.4: 简约版 unified create/edit dialog
+         设计: 只露 3 个核心字段 (名称/命令/参数), 其它 (作用域/env/超时) 塞"高级"折叠区
+         砍掉: JSON tab / 类型 radio / 顶部大段 hint / HTTP-SSE 警告 / 协议文档链接
+         (JSON 批量配置用顶部"导入 JSON"按钮, 高级配置用展开的高级区)
+    -->
     <div v-if="isCreating" class="pad-mcptab__dialog">
       <div class="pad-mcptab__dialog-head">
         <component :is="dialogMode === 'create' ? Plus : Pencil" :size="14" :stroke-width="1.75" />
@@ -377,191 +369,105 @@ async function refreshAndShowPath() {
         </button>
       </div>
 
-      <!-- 顶部 hint -->
-      <div class="pad-mcptab__form-hint">
-        <Info :size="12" :stroke-width="1.75" />
-        <span>
-          填写 MCP 配置, 保存后返回列表. 修改后需重启 sidecar 生效.
-          <a
-            href="https://modelcontextprotocol.io/docs/concepts/architecture"
-            target="_blank"
-            rel="noopener"
-            class="pad-mcptab__link"
-          >MCP 协议文档</a>
-        </span>
-      </div>
-
       <div class="pad-mcptab__form">
-        <!-- 名称 (创建模式可编辑, 编辑模式只读, 改名通过删除+新建) -->
+        <!-- 核心 3 字段: 名称 / 命令 / 参数 (一直可见) -->
         <div class="pad-mcptab__form-row">
-          <label class="pad-mcptab__label">名称 <span class="pad-mcptab__hint-inline">(1-64 char, [A-Za-z0-9._@-], 不能跟 builtin 重)</span></label>
           <input
             v-model="formName"
-            class="pad-mcptab__input"
-            placeholder="例如 filesystem"
+            class="pad-mcptab__input pad-mcptab__input--large"
+            placeholder="名称, 例如 filesystem"
             spellcheck="false"
             :disabled="dialogMode === 'edit'"
           />
         </div>
-
-        <!-- 作用域 (workspace / global) -->
-        <div class="pad-mcptab__form-row">
-          <label class="pad-mcptab__label">作用域</label>
-          <div class="pad-mcptab__radio-group">
-            <label class="pad-mcptab__radio">
-              <input
-                type="radio"
-                value="workspace"
-                v-model="editingScope"
-                :disabled="dialogMode === 'edit' || isSavingCreate"
-              />
-              <span>workspace (当前工作区 <code>&lt;ws&gt;/.pi/mcp/&lt;name&gt;.json</code>)</span>
-            </label>
-            <label class="pad-mcptab__radio">
-              <input
-                type="radio"
-                value="global"
-                v-model="editingScope"
-                :disabled="dialogMode === 'edit' || isSavingCreate"
-              />
-              <span>global (跨工作区 <code>&lt;agentDir&gt;/mcp/&lt;name&gt;.json</code>)</span>
-            </label>
-          </div>
+        <div class="pad-mcptab__form-row pad-mcptab__form-row--inline">
+          <input
+            v-model="formCommand"
+            class="pad-mcptab__input pad-mcptab__input--mono"
+            placeholder="命令 (如 npx)"
+            spellcheck="false"
+          />
+          <input
+            v-model="formArgs"
+            class="pad-mcptab__input pad-mcptab__input--mono pad-mcptab__input--flex"
+            placeholder="参数 (空格分隔, 如 -y @modelcontextprotocol/server-fs D:\path)"
+            spellcheck="false"
+          />
         </div>
 
-        <!-- 类型 (stdio / http / sse) — v0.6.3-rc1 P2-1.3 -->
-        <div class="pad-mcptab__form-row">
-          <label class="pad-mcptab__label">类型 <span class="pad-mcptab__hint-inline">(transport 协议, stdio 已实现 / http / sse 暂未支持 P2.3)</span></label>
-          <div class="pad-mcptab__radio-group pad-mcptab__radio-group--inline">
-            <label class="pad-mcptab__radio">
-              <input
-                type="radio"
-                value="stdio"
-                v-model="dialogType"
-                :disabled="isSavingCreate"
+        <!-- 高级 (默认折叠, 大部分 user 用不到) -->
+        <details class="pad-mcptab__advanced">
+          <summary>高级</summary>
+          <div class="pad-mcptab__advanced-body">
+            <div class="pad-mcptab__form-row">
+              <label class="pad-mcptab__label-small">作用域</label>
+              <div class="pad-mcptab__radio-group pad-mcptab__radio-group--inline">
+                <label class="pad-mcptab__radio">
+                  <input
+                    type="radio"
+                    value="workspace"
+                    v-model="editingScope"
+                    :disabled="dialogMode === 'edit' || isSavingCreate"
+                  />
+                  <span>workspace (当前工作区)</span>
+                </label>
+                <label class="pad-mcptab__radio">
+                  <input
+                    type="radio"
+                    value="global"
+                    v-model="editingScope"
+                    :disabled="dialogMode === 'edit' || isSavingCreate"
+                  />
+                  <span>global (跨工作区)</span>
+                </label>
+              </div>
+            </div>
+            <div class="pad-mcptab__form-row">
+              <label class="pad-mcptab__label-small">环境变量 <span class="pad-mcptab__hint-inline">(JSON object, 留空用 {})</span></label>
+              <textarea
+                v-model="dialogFormEnv"
+                class="pad-mcptab__textarea pad-mcptab__textarea--mono"
+                rows="3"
+                spellcheck="false"
+                placeholder='{"MY_API_KEY": "your-key"}'
               />
-              <span>stdio (本地命令)</span>
-            </label>
-            <label class="pad-mcptab__radio" :title="`HTTP transport 暂未实现 (P2.3), 选了会保存失败`">
+            </div>
+            <div class="pad-mcptab__form-row">
+              <label class="pad-mcptab__label-small">超时 (毫秒)</label>
               <input
-                type="radio"
-                value="http"
-                v-model="dialogType"
-                :disabled="true"
+                v-model.number="dialogFormTimeout"
+                type="number"
+                class="pad-mcptab__input"
+                placeholder="30000"
               />
-              <span>HTTP <em>(暂未支持)</em></span>
-            </label>
-            <label class="pad-mcptab__radio" :title="`SSE transport 暂未实现 (P2.3), 选了会保存失败`">
-              <input
-                type="radio"
-                value="sse"
-                v-model="dialogType"
-                :disabled="true"
-              />
-              <span>SSE (Server-Sent Events) <em>(暂未支持)</em></span>
-            </label>
+            </div>
           </div>
-        </div>
+        </details>
 
-        <!-- 表单 / JSON tab 切换 (跟 Cherry Studio 截图同 UX) -->
-        <div class="pad-mcptab__tab-bar">
-          <button
-            type="button"
-            class="pad-mcptab__tab"
-            :class="{ 'is-active': dialogTab === 'form' }"
-            @click="dialogTab = 'form'"
-            :disabled="isSavingCreate"
-          >表单</button>
-          <button
-            type="button"
-            class="pad-mcptab__tab"
-            :class="{ 'is-active': dialogTab === 'json' }"
-            @click="dialogTab = 'json'"
-            :disabled="isSavingCreate"
-          >JSON</button>
-        </div>
-
-        <!-- 表单 tab 内容 -->
-        <template v-if="dialogTab === 'form'">
-          <div class="pad-mcptab__form-row">
-            <label class="pad-mcptab__label">命令 <span class="pad-mcptab__hint-inline">(可执行文件: npx / node / 绝对路径 / .exe)</span></label>
-            <input
-              v-model="formCommand"
-              class="pad-mcptab__input"
-              placeholder="例如 npx"
-              spellcheck="false"
-              :disabled="dialogIsHttpOrSse"
-            />
-          </div>
-          <div class="pad-mcptab__form-row">
-            <label class="pad-mcptab__label">参数 <span class="pad-mcptab__hint-inline">(空格分隔, 会转成 string[] 传给命令)</span></label>
-            <input
-              v-model="formArgs"
-              class="pad-mcptab__input"
-              placeholder="例如 -y @modelcontextprotocol/server-filesystem D:\workspace"
-              spellcheck="false"
-              :disabled="dialogIsHttpOrSse"
-            />
-          </div>
-          <div class="pad-mcptab__form-row">
-            <label class="pad-mcptab__label">环境变量 <span class="pad-mcptab__hint-inline">(JSON object, 留空用 {})</span></label>
-            <textarea
-              v-model="dialogFormEnv"
-              class="pad-mcptab__textarea pad-mcptab__textarea--mono"
-              rows="4"
-              spellcheck="false"
-              placeholder='例如 { "MY_API_KEY": "your-key" }'
-              :disabled="dialogIsHttpOrSse"
-            />
-          </div>
-          <div v-if="dialogIsHttpOrSse" class="pad-mcptab__form-hint pad-mcptab__form-hint--warn">
-            <AlertCircle :size="12" :stroke-width="1.75" />
-            <span>{{ dialogType.toUpperCase() }} 暂未实现, 切换回 stdio 后才能保存</span>
-          </div>
-        </template>
-
-        <!-- JSON tab 内容 (直接编辑完整 body) -->
-        <template v-else>
-          <div class="pad-mcptab__form-row pad-mcptab__form-row--body">
-            <label class="pad-mcptab__label">body (JSON)
-              <span class="pad-mcptab__hint-inline">type 必填 stdio, name/command 必填 string</span>
-            </label>
-            <textarea
-              v-model="editingBody"
-              class="pad-mcptab__textarea"
-              rows="12"
-              spellcheck="false"
-            />
-          </div>
-        </template>
-
-        <!-- 底部按钮 -->
+        <!-- 底部按钮 (一行: 取消 + 添加) -->
         <div class="pad-mcptab__form-actions">
           <button
             class="pad-mcptab__btn"
             @click="cancelCreate"
             :disabled="isSavingCreate || isSavingEdit"
           >
-            <X :size="14" :stroke-width="1.75" />
-            <span>取消</span>
+            取消
           </button>
           <button
             v-if="dialogMode === 'create'"
             class="pad-mcptab__btn pad-mcptab__btn--primary"
-            :disabled="isSavingCreate || dialogIsHttpOrSse"
+            :disabled="isSavingCreate"
             @click="saveCreate"
           >
-            <Save :size="14" :stroke-width="1.75" />
-            <span>{{ isSavingCreate ? '添加中…' : '添加' }}</span>
+            {{ isSavingCreate ? '添加中…' : '添加' }}
           </button>
           <button
             v-else
             class="pad-mcptab__btn pad-mcptab__btn--primary"
-            :disabled="isSavingEdit || (dialogTab === 'form' && dialogIsHttpOrSse)"
+            :disabled="isSavingEdit"
             @click="saveEdit"
           >
-            <Save :size="14" :stroke-width="1.75" />
-            <span>{{ isSavingEdit ? '保存中…' : '保存' }}</span>
+            {{ isSavingEdit ? '保存中…' : '保存' }}
           </button>
         </div>
       </div>
@@ -911,6 +817,19 @@ async function refreshAndShowPath() {
   flex-direction: column;
   gap: 4px;
 }
+.pad-mcptab__form-row--inline {
+  flex-direction: row;
+  gap: 6px;
+}
+.pad-mcptab__form-row--inline .pad-mcptab__input {
+  flex: 0 0 auto;
+  width: 30%;
+  min-width: 100px;
+}
+.pad-mcptab__form-row--inline .pad-mcptab__input--flex {
+  flex: 1 1 auto;
+  width: auto;
+}
 .pad-mcptab__form-row--body {
   gap: 4px;
 }
@@ -919,18 +838,19 @@ async function refreshAndShowPath() {
   font-weight: var(--pad-fw-medium);
   color: var(--pad-fg-secondary);
 }
+.pad-mcptab__label-small {
+  font-size: var(--pad-fs-11, 11px);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 .pad-mcptab__hint-inline {
   font-weight: var(--pad-fw-regular, 400);
   color: var(--pad-fg-tertiary);
   font-size: var(--pad-fs-11, 11px);
   margin-left: 4px;
 }
-.pad-mcptab__link {
-  color: var(--pad-accent);
-  text-decoration: none;
-  margin-left: 4px;
-}
-.pad-mcptab__link:hover { text-decoration: underline; }
 .pad-mcptab__input {
   padding: 6px 10px;
   background: var(--pad-popover);
@@ -940,9 +860,22 @@ async function refreshAndShowPath() {
   font-size: var(--pad-fs-13);
   color: var(--pad-fg-primary);
 }
+.pad-mcptab__input--large {
+  font-family: inherit;
+  font-size: var(--pad-fs-15, 15px);
+  padding: 8px 12px;
+  font-weight: var(--pad-fw-medium);
+}
+.pad-mcptab__input--mono {
+  font-family: var(--pad-font-mono);
+}
 .pad-mcptab__input:focus {
   outline: none;
   border-color: var(--pad-accent);
+}
+.pad-mcptab__input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .pad-mcptab__textarea {
   padding: 8px 10px;
@@ -956,6 +889,10 @@ async function refreshAndShowPath() {
   resize: vertical;
   min-height: 200px;
 }
+.pad-mcptab__textarea--mono {
+  font-family: var(--pad-font-mono);
+  min-height: 80px;  /* 高级区 env 不需要 200px */
+}
 .pad-mcptab__textarea:focus {
   outline: none;
   border-color: var(--pad-accent);
@@ -965,6 +902,52 @@ async function refreshAndShowPath() {
   gap: 8px;
   justify-content: flex-end;
   margin-top: 4px;
+}
+
+/* v0.6.3-rc1 P2-1.4: 高级折叠区 (用 <details> 原生, 零依赖) */
+.pad-mcptab__advanced {
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm);
+  background: var(--pad-bg-input);
+}
+.pad-mcptab__advanced > summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-secondary);
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--pad-radius-sm);
+  transition: background var(--pad-dur-fast) ease;
+}
+.pad-mcptab__advanced > summary::-webkit-details-marker { display: none; }  /* Safari 隐藏默认箭头 */
+.pad-mcptab__advanced > summary::before {
+  content: '▸';
+  font-size: 10px;
+  color: var(--pad-fg-tertiary);
+  transition: transform var(--pad-dur-fast) ease;
+  display: inline-block;
+  width: 10px;
+}
+.pad-mcptab__advanced[open] > summary::before {
+  transform: rotate(90deg);
+}
+.pad-mcptab__advanced > summary:hover {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
+}
+.pad-mcptab__advanced[open] > summary {
+  border-bottom: 1px solid var(--pad-divider);
+  font-weight: var(--pad-fw-medium);
+}
+.pad-mcptab__advanced-body {
+  padding: 10px 12px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .pad-mcptab__btn {
@@ -1117,61 +1100,17 @@ async function refreshAndShowPath() {
   color: #9333ea;
 }
 
-/* v0.6.3-rc1 P2-1.3: form/JSON tab bar (跟 Cherry Studio 同 UX) */
-.pad-mcptab__tab-bar {
-  display: flex;
-  gap: 0;
-  border: 1px solid var(--pad-border);
-  border-radius: var(--pad-radius-sm);
-  overflow: hidden;
-  align-self: flex-end;
-  margin-bottom: 4px;
-}
-.pad-mcptab__tab {
-  background: var(--pad-popover);
-  border: none;
-  padding: 4px 12px;
-  font-size: var(--pad-fs-12, 12px);
-  color: var(--pad-fg-secondary);
-  cursor: pointer;
-  font-family: inherit;
-  transition: all var(--pad-dur-fast) ease;
-}
-.pad-mcptab__tab:not(:first-child) {
-  border-left: 1px solid var(--pad-border);
-}
-.pad-mcptab__tab:hover:not(:disabled) {
-  background: var(--pad-bg-hover);
-  color: var(--pad-fg-primary);
-}
-.pad-mcptab__tab.is-active {
-  background: var(--pad-primary);
-  color: var(--pad-fg-inverse);
-}
-.pad-mcptab__tab:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* v0.6.3-rc1 P2-1.3: inline radio (3 个一排) */
+/* v0.6.3-rc1 P2-1.4: inline radio (P2-1.4 还在用, 高级区作用域 radio) */
 .pad-mcptab__radio-group--inline {
   flex-direction: row;
   gap: 12px;
-  padding: 8px 10px;
+  padding: 4px 0;
 }
 .pad-mcptab__radio-group--inline .pad-mcptab__radio em {
   color: var(--pad-fg-tertiary);
   font-style: normal;
   font-size: var(--pad-fs-11, 11px);
   margin-left: 2px;
-}
-
-/* v0.6.3-rc1 P2-1.3: warn 风格的 form hint (用于 HTTP/SSE 警告) */
-.pad-mcptab__form-hint--warn {
-  background: color-mix(in srgb, var(--pad-danger, #dc2626) 6%, transparent);
-}
-.pad-mcptab__form-hint--warn :deep(svg) {
-  color: var(--pad-danger, #dc2626);
 }
 .pad-mcptab__item-cmd {
   display: flex;
