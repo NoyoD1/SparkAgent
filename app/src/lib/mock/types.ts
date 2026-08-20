@@ -89,9 +89,40 @@ export interface ChatMessage {
    */
   errorMarker?: {
     errorMessage: string;
+    /**
+     * 2026-08-20 P1-3: 原始错误信息 (从 LLM / provider 直接返的, 不做 friendly 改写)
+     *   给 dev 排查用, UI 折叠显示 (默认折叠, user 点 "Show details" 展开).
+     *   跟 errorMessage 区别: errorMessage 是 user-friendly 中文 + 原因列表 + 下一步,
+     *   rawError 是 provider 原始字符串 (可能很长, 含 stack trace).
+     */
+    rawError?: string;
+    /**
+     * 2026-08-20 P1-3: 错误分类, 给 UI 切色 / 选 icon 用
+     *   - 'auth_401': API key 失效 (淡红 + 提示去 Settings)
+     *   - 'forbidden_403': model 拒绝 (橙色 + 提示换 model)
+     *   - 'rate_limit_429': 限流 (黄色 + 提示等 1 分钟)
+     *   - 'server_5xx': 服务异常 (灰色 + 提示等)
+     *   - 'network': 网络错误 (灰色 + 提示查网络)
+     *   - 'unknown': 未分类 (默认红色)
+     */
+    category?: 'auth_401' | 'forbidden_403' | 'rate_limit_429' | 'server_5xx' | 'network' | 'unknown';
     reason: 'message_end_stop_reason_error' | 'agent_end_no_retry';
     at: number;
     hasPartialContent: boolean;
+  };
+  /**
+   * 2026-08-20 P1-7: warning marker — LLM 协议层"静默失败"指示
+   *   跟 errorMarker 区别: error 是有 errorMessage 的具体失败, warning 是 "agent_end 来了但
+   *   message_start 没来, idx=-1" 的静默情况. 视觉上用 warning 黄色 (不是 error 红), 文案上
+   *   强调 "AI 没返回内容" + 列出常见根因 + 下一步行动, 引导 user 自己排查 (限流 / model 不支持 /
+   *   provider 协议不兼容 Pi SDK 0.84.2).
+   *   rawEventLog 留给 user / dev 排查时看, 不直接展示 (太长).
+   */
+  warningMarker?: {
+    title: string;
+    hint: string;
+    rawEventLog?: string;
+    at: number;
   };
   /**
    * v0.5.0-D 第15轮 (D202): assistant message 标志 — model 返回了空 message

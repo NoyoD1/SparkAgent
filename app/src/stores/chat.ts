@@ -343,51 +343,167 @@ export const useChatStore = defineStore('chat', () => {
       console.log(`[chat] D212: skip error divider (already pushed: ${lastMsg.errorMarker.errorMessage.slice(0, 60)})`);
       return;
     }
-    // v0.6.1: 把 raw 429 / TPM 错误转成中文友好提示
-    const friendly = friendlyErrorMessage(errorMessage);
+    // 2026-08-20 P1-3: friendlyErrorMessage 返回 { friendly, raw, category } 三段
+    //   friendly 展示给 user, raw 折叠显示给 dev 排查, category 给 UI 调样式 (401/403/429/5xx/network 各不同色)
+    const classified = friendlyErrorMessage(errorMessage);
     d.messages.push({
       id: `sys-error-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       role: 'system',
       content: '__LLM_ERROR_DIVIDER__',
       createdAt: new Date().toISOString(),
       errorMarker: {
-        errorMessage: friendly,
+        errorMessage: classified.friendly,
+        rawError: classified.raw,
+        category: classified.category,
         reason,
         at: Date.now(),
         hasPartialContent,
       },
     } as ChatMessage);
     chatData.value = { ...chatData.value, [sessionId]: { ...d } };
-    errorBySession.value = { ...errorBySession.value, [sessionId]: friendly };
+    // 2026-08-20 P1-3: errorBySession 保持 string 类型 (UI toast / 状态指示用, 不需要 raw + category)
+    //   raw + category 在 errorMarker 字段里, ChatMessage.vue 渲染时读
+    errorBySession.value = { ...errorBySession.value, [sessionId]: classified.friendly };
     console.log(
-      `[chat] D212: error divider pushed (reason=${reason}, hasPartialContent=${hasPartialContent}, ` +
-      `errorMessage=${errorMessage.slice(0, 80)})`
+      `[chat] D212: error divider pushed (reason=${reason}, category=${classified.category}, ` +
+      `hasPartialContent=${hasPartialContent}, errorMessage=${errorMessage.slice(0, 80)})`
     );
   }
 
   /**
-   * v0.6.1: 把 provider 的 raw 错误转成 user 友好的中文提示.
-   * 当前支持:
-   *   - 429 / "rate limit" / "tpm" / "quota" / "tokens per minute" → 限流提示
-   *   - 其他原样返回
-   * 后续可以扩展 (401 → keychain 失效, 5xx → 服务异常 等)
+   * 2026-08-20 P1-7: 推一条 warning 横线 (跟 error divider 同款, 区别是黄色不是红色).
+   *   触发场景: LLM 调用结束但 assistant message 没创建 (idx=-1) — Pi SDK 协议层"静默失败",
+   *   可能原因: LLM 拒绝 / 限流 / provider 协议层不兼容 / Pi SDK bug.
+   *   不算 error (没捕获到具体 errorMessage),所以视觉上用 warning 黄,user 一眼知道是
+   *   "AI 没回复 + 大概原因" 而不是 "AI 调用失败 + 具体错误".
+   *
+   * 防重复: 跟 error divider 一样, 看最后一条 system message 是不是 warningMarker,
+   *   是就 skip (LLM 抽风时可能连续 emit 多个 event 触发 push).
    */
-  function friendlyErrorMessage(raw: string): string {
+  function pushWarningDivider(
+    sessionId: string,
+    title: string,
+    hint: string,
+    rawEventLog?: string,
+  ) {
+    const d = getSessionData(sessionId);
+    if (!d) return;
+    const lastMsg = d.messages[d.messages.length - 1];
+    if (lastMsg && lastMsg.role === 'system' && lastMsg.warningMarker) {
+      console.log(`[chat] P1-7: skip warning divider (already pushed: ${lastMsg.warningMarker.title.slice(0, 60)})`);
+      return;
+    }
+    d.messages.push({
+      id: `sys-warn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      role: 'system',
+      content: '__LLM_WARNING_DIVIDER__',
+      createdAt: new Date().toISOString(),
+      warningMarker: {
+        title,
+        hint,
+        rawEventLog,
+        at: Date.now(),
+      },
+    } as ChatMessage);
+    chatData.value = { ...chatData.value, [sessionId]: { ...d } };
+    console.log(`[chat] P1-7: warning divider pushed (title=${title})`);
+  }
+
+  /**
+   * v0.6.1: 把 provider 的 raw 错误转成 user 友好的中文提示.
+   * 2026-08-20 P1-3: 扩展分类 (401 / 403 / 5xx) + raw error 折叠.
+   * 分类匹配用 keyword includes (不严格, 接受误判 — 优先覆盖常见情况).
+   * 命中后返回 { friendly, raw } 两段, raw 留给 UI 折叠显示给 dev 排查.
+   */
+  function friendlyErrorMessage(raw: string): { friendly: string; raw: string; category: string } {
     const lower = raw.toLowerCase();
+    // 401 / unauthorized / invalid api key → keychain 失效
+    if (lower.includes('401') ||
+        lower.includes('unauthorized') ||
+        lower.includes('invalid api') ||
+        lower.includes('invalid_api_key') ||
+        lower.includes('authentication')) {
+      return {
+        friendly: 'API Key 无效 (401 Unauthorized). 可能原因: \n' +
+                  '  • Settings → Providers 里的 apiKey 失效 / 填错\n' +
+                  '  • keychain 里保存的 key 跟当前 provider 不匹配\n' +
+                  '  • provider 账号被封 / key 已过期\n' +
+                  '下一步: 去 Settings → Providers 重新填 apiKey, 或检查 provider 官网控制台。',
+        raw,
+        category: 'auth_401',
+      };
+    }
+    // 403 / forbidden / model not allowed → model 名错 / 权限不够
+    if (lower.includes('403') ||
+        lower.includes('forbidden') ||
+        lower.includes('permission denied') ||
+        lower.includes('not allowed') ||
+        lower.includes('model_not_found') ||
+        lower.includes('model not found')) {
+      return {
+        friendly: '权限不足 / Model 不支持 (403 Forbidden). 可能原因: \n' +
+                  '  • active model 名拼错 (检查 model id 跟 provider 控制台对不对)\n' +
+                  '  • provider 没给当前 model 权限 (需要升级套餐 / 申请白名单)\n' +
+                  '  • baseUrl 跟 model 不匹配 (e.g. sensenova baseUrl 不能调 deepseek model)\n' +
+                  '下一步: 切到 Settings → Providers 检查 model 名, 或换一个 model 试。',
+        raw,
+        category: 'forbidden_403',
+      };
+    }
+    // 429 / 限流 / quota
     if (lower.includes('429') ||
         lower.includes('rate limit') ||
         lower.includes('rate_limit') ||
         lower.includes('tpm') ||
         lower.includes('tokens per minute') ||
         lower.includes('quota')) {
-      return `LLM 限流 (429: TPM/Quota 触发). 可能原因: \n` +
-             `  • provider 免费层 TPM 配额较小, 当前会话累计 token 已超\n` +
-             `  • 1 分钟内重新发送会自动恢复\n` +
-             `  • 长 session 历史会占 token, 建议开新 session 或压缩 (右上角 \n` +
-             `\n原始错误: ${raw.slice(0, 200)}`;
+      return {
+        friendly: 'LLM 限流 (429: TPM/Quota 触发). 可能原因: \n' +
+                  '  • provider 免费层 TPM 配额较小, 当前会话累计 token 已超\n' +
+                  '  • 1 分钟内重新发送会自动恢复\n' +
+                  '长 session 历史会占 token, 建议开新 session 或压缩 (右上角 \n',
+        raw,
+        category: 'rate_limit_429',
+      };
     }
-    return raw;
+    // 5xx / internal server error / bad gateway / service unavailable
+    if (lower.includes('500') ||
+        lower.includes('502') ||
+        lower.includes('503') ||
+        lower.includes('504') ||
+        lower.includes('internal server error') ||
+        lower.includes('bad gateway') ||
+        lower.includes('service unavailable')) {
+      return {
+        friendly: 'Provider 服务异常 (5xx). 可能原因: \n' +
+                  '  • provider 端服务挂了 / 维护中\n' +
+                  '  • 临时网络抖动\n' +
+                  '下一步: 等 1-2 分钟重试, 或切到别的 provider 临时顶一下。',
+        raw,
+        category: 'server_5xx',
+      };
+    }
+    // network / timeout / econnrefused / fetch failed
+    if (lower.includes('econnrefused') ||
+        lower.includes('enotfound') ||
+        lower.includes('etimedout') ||
+        lower.includes('fetch failed') ||
+        lower.includes('network') ||
+        lower.includes('timeout')) {
+      return {
+        friendly: '网络错误. 可能原因: \n' +
+                  '  • 断网 / VPN 不稳\n' +
+                  '  • provider baseUrl 拼错 (检查 Settings → Providers 里的 baseUrl)\n' +
+                  '  • provider 服务挂 (海外 API 偶尔不稳)\n' +
+                  '下一步: 检查网络 + baseUrl, 重试。',
+        raw,
+        category: 'network',
+      };
+    }
+    // 未命中分类: 原样返回, user 看 raw error
+    return { friendly: raw, raw, category: 'unknown' };
   }
+
   function startStreamHangWatchdog(sessionId: string): ReturnType<typeof setTimeout> {
     stopStreamHangWatchdog(sessionId);
     const timer = setTimeout(() => {
@@ -1108,6 +1224,25 @@ export const useChatStore = defineStore('chat', () => {
             'willRetry=',
             event.willRetry,
           );
+          // 2026-08-20 P1-7: idx=-1 = LLM 协议层"静默失败" (没 emit message_start)
+          //   之前 user 看到 "AI 没回复" 一脸懵 (跟 2026-08-20 sidecar 崩溃场景类似但根因不同,
+          //   sidecar 崩溃是工具层 bug, 这条是 Pi SDK 协议层 edge case).
+          //   修: 推 warning divider 告诉 user 原因, 引导他下一步怎么排查.
+          if (idx < 0) {
+            const totalMsgs = d2.messages.length;
+            pushWarningDivider(
+              sessionId,
+              'AI 没返回内容',
+              // hint 给几种最常见根因 + 下一步行动, user 知道该改什么
+              'LLM 调用结束但没产生 assistant message (Pi SDK 协议层静默失败). 常见原因: ' +
+              '① LLM 拒绝请求 (限流 / model 不支持 / 内容违规) ' +
+              '② Provider 协议层不兼容 Pi SDK 0.84.2 的 stream 协议 ' +
+              '③ LLM 返回了空响应 (无 content, 无 thinking, 无 tool_call). ' +
+              '建议: 切到 ask 模式重试 / 换 model / 看 .tauri-debug.log sidecar stderr 找 raw 错误。',
+              `agent_end event: willRetry=${event.willRetry}, totalMsgs=${totalMsgs}, ` +
+                `lastEventType=${event.type}`,
+            );
+          }
           off();
           maybeAutoNameSession(sessionId, text);
           // 2026-08-20 P0-1 补充 A: 当前 turn 走完, 自动从队列取下一条发.
@@ -1494,9 +1629,12 @@ export const useChatStore = defineStore('chat', () => {
           // v0.5.0: Pi SDK RPC 协议的 extension UI, 替代 v0.4.x 的 permission_request
           // 跟 v0.4.x 比, 走的是通用 dialog (method: select/confirm/input/editor/notify) 而不只 tool permission
           // 当前 v0.4.x FE UI 只展示 confirm (tool permission), 其它 method 只日志不弹窗
+          // 2026-08-20 P1-1: extension_ui_request 埋点 — 排查 "弹窗 lost" 根因
+          //   跟 sidecar confirm 链路配对, dev 排查时 grep "PERM-FE:" + "PERM-OK:" 对比 elapsed
+          //   lost 排查: 找到 "PERM-FE: extension_ui_request" 但无后续 "PERM-FE: respond sent" → 中间卡住
           if (event.method === 'confirm') {
             // tool permission 弹窗 (跟 v0.4.x permission_request 行为一致)
-            console.log('[chat] extension_ui_request confirm:', event.title, 'message=', event.message);
+            console.log(`[chat] PERM-FE: extension_ui_request received id=${event.id.slice(0, 8)} title=${event.title} sessionId=${event.sessionId}`);
             useUiStore().openPermissionDialog({
               toolCallId: event.id,        // 弹窗用 id 字段存 (跟 extension_ui_response 的 id 配对)
               toolName: event.title || 'Tool',
@@ -1606,7 +1744,9 @@ export const useChatStore = defineStore('chat', () => {
     } catch (e) {
       console.error('[chat] sendPrompt FAILED', e);
       const rawMsg = e instanceof Error ? e.message : String(e);
-      errorBySession.value = { ...errorBySession.value, [sessionId]: friendlyErrorMessage(rawMsg) };
+      // 2026-08-20 P1-3: friendlyErrorMessage 现在返 { friendly, raw, category } 对象, 取 friendly
+      const classified = friendlyErrorMessage(rawMsg);
+      errorBySession.value = { ...errorBySession.value, [sessionId]: classified.friendly };
       streamingBySession.value = { ...streamingBySession.value, [sessionId]: false };
       off();
     }

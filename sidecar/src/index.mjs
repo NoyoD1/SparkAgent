@@ -28,7 +28,7 @@
 //   - 现在: 写 config 1 行, 后续 RpcCommand 走 passthrough (Tauri 不用解析)
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, lstatSync, readlinkSync, statSync } from 'node:fs';
 import { join, resolve as pathResolve } from 'node:path';
 
 import {
@@ -536,21 +536,31 @@ function createPermissionExtension(permissionMode) {
 
       // mode = 'ask' / 'smart'+ 写类工具 / 其他未知: 弹 confirm 弹窗
       console.error(`[perm] ask ${toolName} (mode=${permissionMode}) args=${argsPreview}`);
+      // 2026-08-20 P1-1: confirm 链路埋点 — 排查 "弹窗 lost" 根因 (ADR 0008 / 0014 已知问题)
+      //   4 个时点都 log: confirm 调用前 / resolved / rejected / throw
+      //   每次带 PERM-LOST/PERM-OK 标记 + elapsed, dev 排查时直接 grep 这两个 tag
+      //   lost 排查: 找到 PERM-LOST 但无 PERM-OK 对应 → 弹窗挂了, 走 P1-6 60s 超时兜底
+      //   影响: 仅 console 输出, 不改主流程 (Tauri Rust 端 log::info 收集到 .tauri-debug.log)
+      const permStart = Date.now();
+      const permMark = `PERM-LOST: ${toolName} ${event.toolCallId.slice(0, 8)}`;
       try {
         const allowed = await ctx.ui.confirm(
           `Allow tool: ${toolName}`,
           JSON.stringify(toolArgs, null, 2),
         );
+        const elapsed = Date.now() - permStart;
         if (allowed) {
-          console.error(`[perm] user allowed ${toolName}`);
+          console.error(`[perm] PERM-OK: user allowed ${toolName} (elapsed=${elapsed}ms)`);
           return undefined;
         } else {
-          console.error(`[perm] user denied ${toolName}`);
+          console.error(`[perm] PERM-OK: user denied ${toolName} (elapsed=${elapsed}ms)`);
           return { block: true, reason: 'User denied permission' };
         }
       } catch (e) {
+        const elapsed = Date.now() - permStart;
         // confirm 抛错 (e.g. RPC stream closed, FE disconnected) — 默认 block
-        console.error(`[perm] confirm failed for ${toolName}:`, e instanceof Error ? e.message : String(e));
+        // P1-1: lost 的最可能根因 — confirm 等不到 user respond, RPC stream 断了
+        console.error(`[perm] ${permMark}: confirm failed after ${elapsed}ms:`, e instanceof Error ? e.message : String(e));
         return { block: true, reason: `Permission prompt failed: ${e instanceof Error ? e.message : String(e)}` };
       }
     });
@@ -601,16 +611,58 @@ function createMaxRoundsExtension(maxRounds) {
  *   - 边界: filePath === workspacePath 视为在内部
  *   - 防 prefix 误判: workspace=D:\work, filePath=D:\workspace-evil\foo.txt → reject
  *     (path.resolve 已 normalize 掉 ../, 后续 startsWith(w + '/') 保证边界对齐)
+ *
+ * 2026-08-20 P1-2: 加 symlink 防御. 之前 path.resolve 不解析 symlink, 攻击者建一个
+ *   workspace 内的 symlink 指向 C:\Windows\System32, LLM 写这个 symlink 实际写到 C 盘,
+ *   沙箱被骗. 修: 走 readlink 链路解析真实路径, 真实路径再校验. 上限 10 层防死循环.
+ *   workspacePath 不解析 (workspace 是合法的根目录, 不应该因为被 symlink 链到外面就被拒).
  */
+function realpathNoFollow(p, maxDepth = 10) {
+  // 把 p 的所有组件逐个 lstat, 是 symlink 就 readlink 拿真实目标, 拼到累积路径上.
+  // 简化实现: 用 lstat 看 p 本身, 是 symlink 就 readlink 拼上去, 递归解析.
+  let cur = p;
+  for (let i = 0; i < maxDepth; i++) {
+    let st;
+    try {
+      st = lstatSync(cur);
+    } catch (e) {
+      // 路径不存在 — 走 statSync (跨 symlink 解析, 跟 path.resolve 行为一致, 用于"目标应该存在但还没建"的写场景)
+      try {
+        return statSync(cur).isDirectory() ? cur : cur;
+      } catch {
+        return cur;  // 都查不到就返回原路径
+      }
+    }
+    if (!st.isSymbolicLink()) return cur;  // 不是 symlink, 是真实路径
+    let target;
+    try {
+      target = readlinkSync(cur);
+    } catch (e) {
+      return cur;  // readlink 失败 (Windows 上可能权限不足), 保守返回原路径
+    }
+    // 相对路径: 拼到当前路径的目录; 绝对路径: 直接用
+    const isAbsolute = process.platform === 'win32'
+      ? /^[A-Z]:/i.test(target) || target.startsWith('\\\\')
+      : target.startsWith('/');
+    cur = isAbsolute ? target : pathResolve(cur, '..', target);
+  }
+  // 超过 maxDepth, 可能是 symlink 环, 保守返回最后路径
+  console.warn(`[perm] realpath: maxDepth ${maxDepth} reached, returning last path: ${cur}`);
+  return cur;
+}
+
 function isPathWithinWorkspace(filePath, workspacePath) {
   try {
     const resolvedWorkspace = pathResolve(process.cwd(), workspacePath);
     const resolvedFile = pathResolve(resolvedWorkspace, filePath);
+    // 2026-08-20 P1-2: filePath 走 realpath 解析真实路径, 防 symlink 绕过
+    //   workspace 不解析 (workspace 本身被 symlink 链到外面也不应该被拒 — user 配置)
+    const realFile = realpathNoFollow(resolvedFile);
     const normalize = process.platform === 'win32'
       ? (p) => p.replace(/\\/g, '/').toLowerCase()
       : (p) => p.replace(/\\/g, '/');
     const w = normalize(resolvedWorkspace).replace(/\/+$/, '');
-    const f = normalize(resolvedFile);
+    const f = normalize(realFile);
     if (f === w) return true;
     if (!f.startsWith(w + '/')) return false;
     return true;

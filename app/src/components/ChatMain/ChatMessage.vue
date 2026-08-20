@@ -58,6 +58,22 @@ const chatStore = useChatStore();
 const isUser = computed(() => props.message.role === 'user');
 
 /**
+ * 2026-08-20 P1-3: error divider 折叠 raw details 用.
+ *   用 Set 跟踪哪些 messageId 是展开的 (默认折叠). 不持久化, reload 后重置.
+ *   本地 component state, 不放 store — 每个 ChatMessage 独立管自己 details.
+ */
+const errorDetailsOpen = ref<Set<string>>(new Set());
+function toggleErrorDetails(messageId: string) {
+  const next = new Set(errorDetailsOpen.value);
+  if (next.has(messageId)) next.delete(messageId);
+  else next.add(messageId);
+  errorDetailsOpen.value = next;
+}
+function isErrorDetailsOpen(messageId: string): boolean {
+  return errorDetailsOpen.value.has(messageId);
+}
+
+/**
  * v0.5.0-D 第4轮: per-step 渲染. 直接用 props.steps, 每个 step 独立渲染为一个
  *   collapsible sub-section. thinking / tools / text 都在 step 内部, 不再平铺累积.
  *
@@ -496,17 +512,51 @@ const statusText = computed(() => {
        跟压缩 UX 一致: 不用 toast, 全部走分隔线. -->
   <div
     v-else-if="message.role === 'system' && message.errorMarker"
-    :class="['pad-msg__compaction-divider', 'is-failure']"
+    :class="['pad-msg__compaction-divider', 'is-failure', `is-cat-${message.errorMarker.category || 'unknown'}`]"
     :data-message-id="message.id"
   >
     <span class="pad-msg__compaction-line" />
-    <span class="pad-msg__compaction-label">
+    <span class="pad-msg__compaction-label pad-msg__error-label">
+      <AlertTriangle :size="12" :stroke-width="1.75" />
+      <span class="pad-msg__error-body">
+        <!-- 2026-08-20 P1-3: 错误主体 — friendly 中文提示 + (已输出部分内容) hint -->
+        <span class="pad-msg__error-friendly">
+          {{ message.errorMarker.errorMessage || '未知错误' }}
+          <template v-if="message.errorMarker.hasPartialContent">
+            <span class="pad-msg__error-hint">(已输出部分内容)</span>
+          </template>
+        </span>
+        <!-- raw error 折叠 (默认折叠, dev 排查用, user 不用关心) -->
+        <button
+          v-if="message.errorMarker.rawError && message.errorMarker.rawError !== message.errorMarker.errorMessage"
+          class="pad-msg__error-details-toggle"
+          @click="toggleErrorDetails(message.id)"
+        >
+          {{ isErrorDetailsOpen(message.id) ? '▼ Hide details' : '▶ Show details' }}
+        </button>
+        <pre
+          v-if="message.errorMarker.rawError && isErrorDetailsOpen(message.id) && message.errorMarker.rawError !== message.errorMarker.errorMessage"
+          class="pad-msg__error-raw"
+        >{{ message.errorMarker.rawError }}</pre>
+      </span>
+    </span>
+    <span class="pad-msg__compaction-line" />
+  </div>
+
+  <!-- 2026-08-20 P1-7: warning marker (跟 error 同款, 黄色, "AI 没返回内容")
+       触发场景: LLM 调用结束但 assistant message 没创建 (idx=-1) — Pi SDK 协议层静默失败
+       跟 errorMarker 区别: error 是有 errorMessage 的具体错误, warning 是"啥也没拿到" -->
+  <div
+    v-else-if="message.role === 'system' && message.warningMarker"
+    :class="['pad-msg__compaction-divider', 'is-warning']"
+    :data-message-id="message.id"
+  >
+    <span class="pad-msg__compaction-line" />
+    <span class="pad-msg__compaction-label pad-msg__warning-label">
       <AlertTriangle :size="12" :stroke-width="1.75" />
       <span>
-        生成失败: {{ message.errorMarker.errorMessage || '未知错误' }}
-        <template v-if="message.errorMarker.hasPartialContent">
-          <span class="pad-msg__error-hint">(已输出部分内容)</span>
-        </template>
+        <strong>{{ message.warningMarker.title || 'AI 没返回内容' }}</strong>
+        <span class="pad-msg__warning-hint">{{ message.warningMarker.hint || '' }}</span>
       </span>
     </span>
     <span class="pad-msg__compaction-line" />
@@ -1014,6 +1064,110 @@ const statusText = computed(() => {
 }
 .pad-msg__compaction-divider.is-failure .pad-msg__compaction-label {
   color: var(--pad-fg-warning, #d97706);
+}
+
+/* 2026-08-20 P1-3: error category 切色 (跟 is-failure 错开, 让 user 视觉一眼分清错误类型)
+   - auth_401 (keychain 失效)   → 红色 (--pad-danger)
+   - forbidden_403 (model 拒绝) → 深红 (--pad-danger-strong)
+   - rate_limit_429 (限流)      → 琥珀 (--pad-fg-warning, 跟 is-failure 同色)
+   - server_5xx (服务异常)      → 灰色 (--pad-fg-tertiary)
+   - network (网络)             → 灰色 (--pad-fg-tertiary)
+   - unknown (未分类)            → 琥珀 (默认)
+   颜色用 CSS variable 优先, 缺省 fallback. 后续 dark mode 自动适配. */
+.pad-msg__compaction-divider.is-failure.is-cat-auth_401 .pad-msg__compaction-line,
+.pad-msg__compaction-divider.is-failure.is-cat-auth_401 .pad-msg__compaction-label {
+  color: var(--pad-danger, #dc2626);
+  background: var(--pad-danger, #dc2626);
+}
+.pad-msg__compaction-divider.is-failure.is-cat-forbidden_403 .pad-msg__compaction-line,
+.pad-msg__compaction-divider.is-failure.is-cat-forbidden_403 .pad-msg__compaction-label {
+  color: var(--pad-danger-strong, #991b1b);
+  background: var(--pad-danger-strong, #991b1b);
+}
+.pad-msg__compaction-divider.is-failure.is-cat-server_5xx .pad-msg__compaction-line,
+.pad-msg__compaction-divider.is-failure.is-cat-server_5xx .pad-msg__compaction-label,
+.pad-msg__compaction-divider.is-failure.is-cat-network .pad-msg__compaction-line,
+.pad-msg__compaction-divider.is-failure.is-cat-network .pad-msg__compaction-label {
+  color: var(--pad-fg-tertiary, #71717a);
+  background: var(--pad-fg-tertiary, #71717a);
+  opacity: 0.5;
+}
+/* 2026-08-20 P1-3: error divider 主体布局 — friendly + 折叠 details + raw pre */
+.pad-msg__error-label {
+  max-width: 90%;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: flex-start;
+  text-align: left;
+  gap: 6px;
+  padding: 0 8px;
+}
+.pad-msg__error-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.pad-msg__error-friendly {
+  white-space: pre-wrap;
+  font-size: var(--pad-fs-12, 12px);
+  line-height: 1.5;
+}
+.pad-msg__error-details-toggle {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid var(--pad-border, #e5e7eb);
+  color: var(--pad-fg-tertiary, #71717a);
+  font-size: var(--pad-fs-10, 10px);
+  padding: 2px 8px;
+  border-radius: var(--pad-radius-sm, 4px);
+  cursor: pointer;
+  font-family: var(--pad-font-mono, monospace);
+  transition: background var(--pad-dur-fast, 120ms) ease, color var(--pad-dur-fast, 120ms) ease;
+}
+.pad-msg__error-details-toggle:hover {
+  background: var(--pad-bg-hover, rgba(0,0,0,0.04));
+  color: var(--pad-fg-primary, #18181b);
+}
+.pad-msg__error-raw {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--pad-bg-input, #fafafa);
+  border: 1px solid var(--pad-border, #e5e7eb);
+  border-radius: var(--pad-radius-md, 6px);
+  font-family: var(--pad-font-mono, monospace);
+  font-size: var(--pad-fs-11, 11px);
+  color: var(--pad-fg-secondary, #3f3f46);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+  align-self: stretch;
+}
+/* 2026-08-20 P1-7: warning divider (LLM 协议层静默失败, 比 is-failure error 轻一档)
+   同 is-failure 框架, 颜色用更浅的琥珀 + 标题加粗 + hint 弱化. 跟 error 红 (var --pad-danger) 区分开,
+   user 视觉一眼知道 "AI 没回复但不算调用失败". */
+.pad-msg__compaction-divider.is-warning .pad-msg__compaction-line {
+  background: var(--pad-fg-warning-soft, #f59e0b);
+  opacity: 0.4;
+}
+.pad-msg__compaction-divider.is-warning .pad-msg__compaction-label {
+  color: var(--pad-fg-warning-soft, #f59e0b);
+}
+.pad-msg__warning-label {
+  max-width: 80%;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.pad-msg__warning-label strong {
+  font-weight: var(--pad-fw-semibold, 600);
+  margin-right: 6px;
+}
+.pad-msg__warning-hint {
+  font-size: var(--pad-fs-11, 11px);
+  color: var(--pad-fg-tertiary, #71717a);
+  margin-left: 4px;
 }
 /* v0.5.0-D 第29轮 (D212): error divider hint 文字弱化 (e.g. "已输出部分内容") */
 .pad-msg__error-hint {

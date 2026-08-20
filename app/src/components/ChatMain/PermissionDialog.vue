@@ -14,7 +14,7 @@
  *
  * 设计: 跟 minimal 风格一致 — 简单 modal + 卡片 + 主色按钮, 不打扰
  */
-import { computed } from 'vue';
+import { computed, watch, onUnmounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import { Shield, ShieldCheck, ShieldX, X } from 'lucide-vue-next';
 import { useUiStore } from '@/stores/ui';
@@ -24,6 +24,53 @@ const uiStore = useUiStore();
 const { pendingPermission } = storeToRefs(uiStore);
 
 const isOpen = computed(() => pendingPermission.value !== null);
+
+/**
+ * 2026-08-20 P1-6: 60s 超时兜底 — 弹窗挂着无响应时自动 reject.
+ *
+ * 业务背景: sidecar 跟 FE 断了 / sidecar 卡死 / FE 端弹窗组件出 bug / 别的 LLM stream hang 时,
+ *   permission 弹窗可能一直挂在那里, user 关不掉、点不动, 只能重启 app.
+ *   这是 P1 中"最坏情况兜底" — 修了之后 user 不会被迫重启.
+ *
+ * 实现: watch isOpen 状态, true 启 60s timer, false / 组件 unmount 时清 timer.
+ *   timer 触发: 自动调 respond(false) (发 extension_ui_response confirmed=false 给 sidecar) +
+ *   showToast 提示 user "工具调用超时已自动拒绝".
+ *
+ * 时长选 60s: 给 user 充分时间看 + 决定; 90s + 太长, 30s 太短 (LLM 思考 + tool 渲染可能就要 30s+).
+ *   后续根据 user 反馈调.
+ */
+const PERMISSION_TIMEOUT_MS = 60_000;
+let permissionTimeoutId: ReturnType<typeof setTimeout> | null = null;
+function clearPermissionTimeout() {
+  if (permissionTimeoutId !== null) {
+    clearTimeout(permissionTimeoutId);
+    permissionTimeoutId = null;
+  }
+}
+watch(isOpen, (open) => {
+  clearPermissionTimeout();
+  if (open) {
+    permissionTimeoutId = setTimeout(() => {
+      const req = pendingPermission.value;
+      permissionTimeoutId = null;
+      if (!req) return;  // 已经被用户手动 close, 跳过
+      console.warn('[PermissionDialog] P1-6: 60s 超时, 自动拒绝 tool call', {
+        toolCallId: req.toolCallId,
+        toolName: req.toolName,
+        sessionId: req.sessionId,
+      });
+      void respond(false);
+      uiStore.showToast(
+        `工具调用超时已自动拒绝 (${PERMISSION_TIMEOUT_MS / 1000}s 无响应): ${TOOL_LABEL[req.toolName] || req.toolName}`,
+        'warning',
+        5000,
+      );
+    }, PERMISSION_TIMEOUT_MS);
+  }
+});
+onUnmounted(() => {
+  clearPermissionTimeout();
+});
 
 /** tool name 翻译成中文 (跟 pi-coding-agent 7 工具对齐) */
 const TOOL_LABEL: Record<string, string> = {
@@ -49,7 +96,11 @@ const toolArgs = computed(() => {
 async function respond(allow: boolean) {
   const req = pendingPermission.value;
   if (!req) return;
-  console.log('[PermissionDialog] respond', { allow, sessionId: req.sessionId, id: req.toolCallId });
+  // 2026-08-20 P1-1: respond 埋点 — 跟 sidecar confirm + chat store extension_ui_request 配对
+  //   elapsed 从 uiStore.openPermissionDialog 时记录的 timestamp 算 (pendingPermission 刚到时 = 0,
+  //   user 真正点的时候开始算). >5s 视为异常 (正常 user 反应应该 < 5s)
+  //   lost 排查: 找到 sidecar 的 PERM-LOST 标记但 FE 这边无 PERM-FE respond sent → 中间 RPC stream 断
+  console.log(`[PermissionDialog] PERM-FE: respond sent allow=${allow} id=${req.toolCallId.slice(0, 8)} sessionId=${req.sessionId}`);
   try {
     // v0.5.0: Pi SDK 通用 extension UI 协议 — 弹窗响应走 RpcCommand { type: 'extension_ui_response' }
     //   替代 v0.4.x 的 sendPermissionResponse 特殊 invoke.
@@ -62,8 +113,10 @@ async function respond(allow: boolean) {
       id: req.toolCallId,
       confirmed: allow,
     });
+    console.log(`[PermissionDialog] PERM-OK: sendRpcCommand resolved id=${req.toolCallId.slice(0, 8)} allow=${allow}`);
   } catch (e) {
-    console.error('[PermissionDialog] sendRpcCommand(extension_ui_response) failed', e);
+    // P1-1: 标记 lost — FE sendRpcCommand 失败, sidecar 收不到 response
+    console.error(`[PermissionDialog] PERM-LOST: sendRpcCommand(extension_ui_response) failed id=${req.toolCallId.slice(0, 8)}:`, e);
   }
   // 立即关弹窗, 不等服务端 tool_end event (不然有视觉延迟)
   uiStore.closePermissionDialog();
