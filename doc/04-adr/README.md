@@ -68,10 +68,11 @@
 | [0015](0015-feature-skills.md) | **Skills / Slash Command** (Pi SDK loadSkills + @ 引用 + 自定义 slash) | [0015-feature-skills.md](0015-feature-skills.md) | 0009 |
 | [0016](0016-feature-compaction.md) | **Compaction** (auto + 手动 + 指示器) | [0016-feature-compaction.md](0016-feature-compaction.md) | 0007, 0005 |
 | [0017](0017-feature-agents-md.md) | **AGENTS.md** (项目级 system prompt 注入) | [0017-feature-agents-md.md](0017-feature-agents-md.md) | 0009 |
+| [0018](0018-feature-mcp.md) | **MCP 集成** (4 command + workspace/global scope + stdio/HTTP/SSE schema + Cherry Studio UI) | [0018-feature-mcp.md](0018-feature-mcp.md) | 0005, 0014 |
 
 **未实施 (规划中, 待开 ADR)**:
 - v0.6: Session 标题自动生成 / 删除二次确认 / 导出 / 搜索
-- v0.7+: MCP 集成 / Sub-agent / 协作分享
+- v0.7+: ~~MCP 集成~~ (v0.6.3-rc1 已完成, 见 0018) / Sub-agent / 协作分享 / MCP HTTP+SSE transport (P2-3) / MCP hot reload (P1-5.2)
 
 **不在本目录的旧 ADR**: 见 `.doc-backup-2026-08-19/04-adr/` (重写前的 25 个历史 ADR, 含 v0.3 / v0.4 / v0.5 期间被取代 / 合并的决策). 验证新版 ADR 没问题后可 `git rm -r .doc-backup-2026-08-19/` 彻底删.
 

@@ -17,7 +17,7 @@
 - ✅ Runtime 切换 mode (不需重启 sidecar)
 - 🟡 Per-tool remember decision
 - ❌ 自定义 tool 注册
-- ❌ MCP 集成
+- ✅ MCP 集成 → 详见 [0018-feature-mcp](0018-feature-mcp.md) (v0.6.3-rc1 P2-1 系列实现)
 - ❌ Tool 模板 / 分享
 
 ## 已实现 (v0.5.9+)
@@ -90,5 +90,25 @@
 - Tool 模板
 
 ### P2 (v0.7+)
-- MCP 集成
+- ~~MCP 集成~~ → 移到 [0018-feature-mcp](0018-feature-mcp.md) (v0.6.3-rc1 P2-1 实现完成)
 - Tool 分享
+
+---
+
+## 后续 Review (2026-08-21, v0.6.3-rc1)
+
+> 不可变原则: 决策落地后不改原文章节, 变更只追加 ## 后续 Review 段.
+
+### v0.6.3-rc1 状态变化
+
+- ✅ **MCP 集成**: 从 P2 移到 v0.6.3-rc1 落地, 详见 [0018-feature-mcp](0018-feature-mcp.md)
+  - 4 Tauri command (list/read/write/delete) + 2 层 scope (workspace/global) + stdio transport
+  - 4 格式 JSON 导入 (single/array/Claude Desktop) + Cherry Studio 同款 UI
+  - 端到端测过: offline-mcp-test 4 tool (echo/add/hello/sysinfo) 都能调
+- ❌ 自定义 tool 注册 (仍未做, P2-1.2 候选 hover 中)
+- ❌ Tool 模板 / 分享 (仍未做)
+- ❌ Per-tool remember decision (P0, 仍未做)
+- 🟡 Permission 弹窗 lost (P0, 仍未做)
+- 🟡 `smart` 分类 hardcoded (P1, 仍未做)
+- 🟡 bash 静态分析做不到 (设计限制, 接受)
+- 🟡 tool 错误信息 sanitize (P2, 仍未做)
