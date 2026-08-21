@@ -279,70 +279,190 @@ export class McpServerClient {
 // }
 
 // 把 MCP tool 的 inputSchema (JSON Schema) 转 Pi SDK TypeBox.
-// 简化实现: 只处理 4 种 primitive (string/number/boolean) + array + nested object.
-// 复杂情况 (oneOf / anyOf / $ref / enum) 留 fallback Type.Any() — Pi SDK TypeBox
-//   schema 跟 OpenAI JSON Schema 协议是互转的, 简单 schema LLM 能看懂, 复杂 schema
-//   降级也不影响调用 (args 走 MCP server 自己 schema 校验).
+// v0.6.3-rc1 P2-4: 升级到支持复杂 schema (oneOf/anyOf/allOf/$ref/递归嵌套)
+//   - 之前 P2-1 简化: 只处理 primitive + array(Any) + object({}), 复杂情况降级 Type.Any()
+//   - 现在: 完整支持 JSON Schema 2020-12 常用子集, LLM 看到正确的工具参数描述
+//   - 错误兜底: 任何解析失败 / 不支持的子集 → Type.Any() (Pi SDK TypeBox 跟 JSON Schema 互转,
+//     简单 case LLM 能看懂, 复杂 case 降级也不影响调用 — args 走 MCP server 自己 schema 校验)
 //
 // 跟 P1-5 user tool 不同: user tool args 是手填 JSON, MCP args 是动态从 server 拉,
 //   所以必须能处理任意 schema.
+//
+// $ref 解析: 用 rootSchema (本次调用的最外层 schema) 找 definitions / $defs.
+//   循环引用 (e.g. Tree 节点有 children: Tree[]) 用 visitedRefs Set 防无限递归.
 export function jsonSchemaToTypeBox(schema) {
   if (!schema || typeof schema !== 'object') return Type.Any();
-  const s = schema;
-  if (s.type !== 'object' || !s.properties || typeof s.properties !== 'object') {
-    // 非 object 类型 (顶层 string / number / array 等) → Type.Any() 兜底
-    return Type.Any();
-  }
-  const props = {};
-  const requiredSet = new Set(Array.isArray(s.required) ? s.required : []);
-  for (const [key, propSchema] of Object.entries(s.properties)) {
-    props[key] = jsonSchemaPropertyToTypeBox(propSchema, requiredSet.has(key));
-  }
-  const options = { additionalProperties: false };
-  if (typeof s.description === 'string') options.description = s.description;
-  return Type.Object(props, options);
+  // rootSchema = 最外层 schema (整个 tool 的 inputSchema, 含 $defs / definitions)
+  return convertSchema(schema, schema, new Set());
 }
 
-function jsonSchemaPropertyToTypeBox(prop, isRequired) {
-  if (!prop || typeof prop !== 'object') return wrapOptional(Type.Any(), isRequired);
-  const p = prop;
-  let base;
+/**
+ * 递归把 JSON Schema 子树转 TypeBox.
+ * @param schema  当前 schema 子树 (可能是 $ref 解析后的, 或原 propSchema)
+ * @param root    根 schema ($ref 解析用 — definitions / $defs 都在 root)
+ * @param visited 已访问过的 $ref path, 循环引用检测用 (e.g. "definitions/Tree")
+ */
+function convertSchema(schema, root, visited) {
+  if (!schema || typeof schema !== 'object') return Type.Any();
+
+  // 1. $ref 解析 (优先于 type 判断, JSON Schema 2020-12 $ref 可跟 type 共存但通常不)
+  if (typeof schema.$ref === 'string') {
+    const refPath = schema.$ref;
+    // 循环检测: 同一 $ref 在当前调用链出现第二次就当 Any 处理
+    if (visited.has(refPath)) {
+      // console.warn 防止日志爆炸, 只在调试时开
+      // console.error(`[mcpClient] circular $ref detected: ${refPath}, fallback to Any`);
+      return Type.Any();
+    }
+    const resolved = resolveRef(root, refPath);
+    if (!resolved) {
+      console.error(`[mcpClient] P2-4: $ref '${refPath}' 解析失败 (root 没找到), fallback to Any`);
+      return Type.Any();
+    }
+    visited.add(refPath);
+    try {
+      return convertSchema(resolved, root, visited);
+    } finally {
+      visited.delete(refPath);  // 回溯时移除, 允许同一 ref 在不同分支被引用
+    }
+  }
+
+  // 2. 顶层组合子 (oneOf / anyOf / allOf) — 优先于 type
+  //    注: P2-1 之前这些直接 fallthrough 到 Type.Any, 现在真支持
+  if (Array.isArray(schema.oneOf) && schema.oneOf.length > 0) {
+    return Type.Union(schema.oneOf.map((s) => convertSchema(s, root, new Set(visited))));
+  }
+  if (Array.isArray(schema.anyOf) && schema.anyOf.length > 0) {
+    return Type.Union(schema.anyOf.map((s) => convertSchema(s, root, new Set(visited))));
+  }
+  if (Array.isArray(schema.allOf) && schema.allOf.length > 0) {
+    // 简化: allOf 当 object 走, 合并所有 properties / required
+    // (对常见 case "allOf: [{$ref: Base}, {extra props}]" 足够, 跟 Type.Intersect 比起来 LLM 更易理解)
+    const merged = mergeAllOf(schema.allOf, root, visited);
+    if (merged) return merged;
+    // 兜底: 全是非 object 走 Type.Intersect (TypeBox 支持)
+    return Type.Intersect(schema.allOf.map((s) => convertSchema(s, root, new Set(visited))));
+  }
+
+  // 3. const (literal 值, JSON Schema 2020-12 新增)
+  if (schema.const !== undefined) {
+    return Type.Literal(schema.const);
+  }
+
+  // 4. 按 type 分支
   const descOptions = {};
-  if (typeof p.description === 'string') descOptions.description = p.description;
-  switch (p.type) {
+  if (typeof schema.description === 'string') descOptions.description = schema.description;
+  // format 透传 (e.g. "date-time", "uri", "email"), TypeBox 在 compile 时会保留到 JSON Schema 输出
+  if (typeof schema.format === 'string') descOptions.format = schema.format;
+
+  switch (schema.type) {
     case 'string': {
       const opts = { ...descOptions };
-      if (p.enum) opts.enum = p.enum;
-      base = Type.String(opts);
-      break;
+      if (Array.isArray(schema.enum)) opts.enum = schema.enum;
+      return Type.String(opts);
     }
     case 'number':
     case 'integer': {
-      base = Type.Number(descOptions);
-      break;
+      const opts = { ...descOptions };
+      if (typeof schema.minimum === 'number') opts.minimum = schema.minimum;
+      if (typeof schema.maximum === 'number') opts.maximum = schema.maximum;
+      return Type.Number(opts);
     }
     case 'boolean': {
-      base = Type.Boolean(descOptions);
-      break;
+      return Type.Boolean(descOptions);
+    }
+    case 'null': {
+      return Type.Null(descOptions);
     }
     case 'array': {
-      // 简化: 数组元素一律 Type.Any() (不递归 item schema), 后续 P2.2 增强
-      base = Type.Array(Type.Any(), descOptions);
-      break;
+      // P2-4: 递归处理 items (之前固定 Any)
+      // items 可以是 schema 或 schema[] (tuple). 简化: 只取 items (单 schema), tuple 降级
+      let itemType = Type.Any();
+      if (schema.items && typeof schema.items === 'object' && !Array.isArray(schema.items)) {
+        itemType = convertSchema(schema.items, root, new Set(visited));
+      }
+      const opts = { ...descOptions, items: itemType };
+      if (typeof schema.minItems === 'number') opts.minItems = schema.minItems;
+      if (typeof schema.maxItems === 'number') opts.maxItems = schema.maxItems;
+      return Type.Array(itemType, opts);
     }
     case 'object': {
-      // nested object → 简化: 用空 Object 表达 (P2.2 增强递归)
-      base = Type.Object({}, { ...descOptions, additionalProperties: false });
-      break;
+      // P2-4: 递归处理 nested object properties (之前固定空 object)
+      const props = {};
+      const requiredSet = new Set(Array.isArray(schema.required) ? schema.required : []);
+      if (schema.properties && typeof schema.properties === 'object') {
+        for (const [k, p] of Object.entries(schema.properties)) {
+          // P2-4 fix: required 字段不包 Type.Optional, 必须在 Type.Object 构造前决定
+          // (Type.Object 看 props 是不是 Optional 决定要不要放 required, 包晚了会全 required)
+          const childType = convertSchema(p, root, new Set(visited));
+          props[k] = requiredSet.has(k) ? childType : Type.Optional(childType);
+        }
+      }
+      const opts = { ...descOptions, additionalProperties: false };
+      // P2-4: 显式 additionalProperties schema 支持 (e.g. additionalProperties: {type: 'string'})
+      if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
+        opts.additionalProperties = convertSchema(schema.additionalProperties, root, new Set(visited));
+      } else if (schema.additionalProperties === true) {
+        opts.additionalProperties = Type.Any();
+      }
+      return Type.Object(props, opts);
     }
     default: {
-      // oneOf / anyOf / $ref / 未知 type → Type.Any() 兜底
-      base = Type.Any();
+      // 未知 type / 缺 type — 兜底 Any
+      return Type.Any();
     }
   }
-  return wrapOptional(base, isRequired);
 }
 
-function wrapOptional(t, isRequired) {
-  return isRequired ? t : Type.Optional(t);
+/**
+ * $ref 解析. 支持格式:
+ *   - "#/definitions/Foo" (JSON Schema draft-07)
+ *   - "#/$defs/Foo"     (JSON Schema 2020-12)
+ *   - "#/components/schemas/Foo" (OpenAPI)
+ * @returns 解析后的 schema, 失败返回 null
+ */
+function resolveRef(root, ref) {
+  if (!ref.startsWith('#/')) return null;
+  const path = ref.slice(2).split('/');
+  let cur = root;
+  for (const seg of path) {
+    if (!cur || typeof cur !== 'object') return null;
+    cur = cur[decodeURIComponent(seg)];
+  }
+  return cur && typeof cur === 'object' ? cur : null;
+}
+
+/**
+ * 合并 allOf 里的 object schemas.
+ * 简化策略: 把所有 object 类型成员的 properties / required 合并, 冲突后者覆盖.
+ * 非 object 类型走 Type.Intersect.
+ */
+function mergeAllOf(schemas, root, visited) {
+  const objectMembers = [];
+  for (const s of schemas) {
+    // 解析 $ref 优先 (常见 pattern: allOf: [{$ref: Base}, {extra}])
+    const resolved = (typeof s.$ref === 'string') ? resolveRef(root, s.$ref) : s;
+    if (resolved && typeof resolved === 'object' && resolved.type === 'object') {
+      objectMembers.push(resolved);
+    } else {
+      return null;  // 含有非 object, 走 Intersect 分支
+    }
+  }
+  if (objectMembers.length === 0) return null;
+
+  const props = {};
+  const required = new Set();
+  for (const s of objectMembers) {
+    if (s.properties && typeof s.properties === 'object') {
+      for (const [k, p] of Object.entries(s.properties)) {
+        // 跟 object case 一样: Type.Object 前决定 required
+        const childType = convertSchema(p, root, new Set(visited));
+        props[k] = required.has(k) ? childType : Type.Optional(childType);
+      }
+    }
+    if (Array.isArray(s.required)) {
+      for (const r of s.required) required.add(r);
+    }
+  }
+  return Type.Object(props, { additionalProperties: false });
 }
