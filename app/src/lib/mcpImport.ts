@@ -1,17 +1,22 @@
 /**
- * 2026-08-21 v0.6.3-rc1 P2-1: MCP server JSON 导入解析器
+ * 2026-08-21 v0.6.3-rc1 P2-1.8: MCP server JSON 导入解析器
  *
- * 支持 3 种 JSON 格式 (auto-detect):
+ * 支持 4 种 JSON 格式 (auto-detect):
  *   1. 单个 server object: { "name": "...", "command": "...", "args": [...] }
+ *      (P2-1.8 起: name + url 也算, 配 type=http/sse 不用 command)
  *   2. array:             [{...}, {...}, ...]
  *   3. Claude Desktop 标准: { "mcpServers": { "filesystem": {...}, "fetch": {...} } }
  *      (这是 Anthropic 官方 Claude Desktop / Cursor 用的标准格式, 复用现有配置)
+ *   4. map (P2-1.8 新加): { "filesystem": {...}, "fetch": {...} }
+ *      (workspace .pi/mcp/<name>.json 的原生格式: 外层 key = server name, 内层 = config.
+ *       跟 Claude Desktop 区别: 少了 mcpServers 这一层包裹. 实际就是 Claude Desktop 拆掉包装)
  *
  * 跟 store / Rust 端校验规则同步:
  *   - name 必填, 1-64 char, [A-Za-z0-9._@-], 不跟 builtin 7 个重
- *   - command 必填, 非空
+ *   - type=stdio: command 必填, 非空
+ *   - type=http|sse: url 必填, http:// 或 https:// 开头
  *   - args 可选 string[]
- *   - env 可选 Record<string, string>
+ *   - env 可选 Record<string, string> (stdio 时是子进程环境变量, http/sse 时是 request headers)
  *   - cwd 可选 string
  *   - timeout 可选 number
  *
@@ -20,7 +25,7 @@
 
 import { BUILTIN_TOOL_NAMES_MCP } from '@/stores/mcpServers';
 
-export type ImportFormat = 'single' | 'array' | 'claudeDesktop';
+export type ImportFormat = 'single' | 'array' | 'claudeDesktop' | 'map';
 
 export interface ParsedServer {
   /** server 名 (从 name 字段或外层 key 提取) */
@@ -102,9 +107,9 @@ export function parseMcpImportJson(jsonText: string): ImportParseResult {
     return result;
   }
 
-  // 单个 object 格式: {name, command, args}
-  // 启发式: 有 name + command 字段就当 single
-  if (typeof obj.name === 'string' && typeof obj.command === 'string') {
+  // 单个 object 格式: {name, command, args} 或 {name, type, url} (P2-1.8 放宽)
+  // 启发式: 有 name 字段 + 至少一个 (command | url), 就当 single
+  if (typeof obj.name === 'string' && (typeof obj.command === 'string' || typeof obj.url === 'string')) {
     result.format = 'single';
     const serverResult = tryBuildServerFromObject(obj.name, obj, 'single');
     if (serverResult.server) {
@@ -115,9 +120,44 @@ export function parseMcpImportJson(jsonText: string): ImportParseResult {
     return result;
   }
 
-  // 4. 不识别
+  // 4. v0.6.3-rc1 P2-1.8: map 格式 {<serverName>: {config}, ...} - 跟 Claude Desktop 区别
+  //    是没有 mcpServers 这层包裹 (实际就是 workspace .pi/mcp/<name>.json 的原生格式).
+  //    启发式: 顶层 object, 至少 1 个 entry, 所有 value 都是 server-shaped object
+  //    (有 command/url/type/args/env/cwd/timeout 之一), key 都不是 name/mcpServers/command/url
+  //    (前两个被前面判过, 后面两个用 strict compare 排除 "format ① 缺 name" 的退化情况).
+  const entries = Object.entries(obj);
+  if (entries.length > 0) {
+    const allServerShaped = entries.every(([k, v]) => {
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+      if (k === 'name' || k === 'mcpServers' || k === 'command' || k === 'url') return false;
+      const inner = v as Record<string, unknown>;
+      return (
+        typeof inner.command === 'string' ||
+        typeof inner.url === 'string' ||
+        typeof inner.type === 'string' ||
+        Array.isArray(inner.args) ||
+        (inner.env !== undefined && typeof inner.env === 'object' && !Array.isArray(inner.env)) ||
+        typeof inner.cwd === 'string' ||
+        typeof inner.timeout === 'number'
+      );
+    });
+    if (allServerShaped) {
+      result.format = 'map';
+      for (const [name, raw] of entries) {
+        const serverResult = tryBuildServerFromObject(name, raw, 'map');
+        if (serverResult.server) {
+          result.servers.push(serverResult.server);
+        } else {
+          result.invalid.push({ raw, reason: serverResult.error ?? 'unknown' });
+        }
+      }
+      return result;
+    }
+  }
+
+  // 5. 不识别
   result.topError =
-    '无法识别 JSON 格式. 支持: ① 单个 server {name, command, args} ② array [{...}] ③ Claude Desktop {mcpServers: {name: {...}}}';
+    '无法识别 JSON 格式. 支持: ① 单个 server {name, command|url, ...} ② array [{...}] ③ Claude Desktop {mcpServers: {name: {...}}} ④ map {name: {...}, ...}';
   result.invalid.push({
     raw: parsed,
     reason: '顶层 JSON 不匹配任何已知格式',
@@ -255,9 +295,10 @@ function tryBuildServerFromObject(
  */
 export function describeFormat(format: ImportFormat | 'mixed' | 'unknown'): string {
   switch (format) {
-    case 'single': return '单个 server object';
+    case 'single': return '单个 server object (含 name + command/url)';
     case 'array': return 'array of servers';
     case 'claudeDesktop': return 'Claude Desktop 标准格式 (mcpServers)';
+    case 'map': return 'map 格式 (name → config, 跟 .pi/mcp/*.json 一致)';
     case 'mixed': return 'mixed (多个格式)';
     case 'unknown': return '未识别';
   }

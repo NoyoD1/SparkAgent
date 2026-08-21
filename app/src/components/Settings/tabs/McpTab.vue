@@ -5,8 +5,9 @@
  * 列出已配置的 MCP server, 跟 Tools tab 同 pattern:
  *   - 列表: 展示所有 MCP server (含 workspace + global 两层 scope)
  *   - 新建: 弹 dialog 填 name / command / args, 保存到 <workspace>/.pi/mcp/<name>.json
- *   - 导入 JSON (v0.6.3-rc1 P2-1.1): 粘贴 / 选 .json 文件, auto-detect 3 种格式
- *     (single object / array / Claude Desktop {mcpServers: {...}}), preview 后批量写入
+ *   - 导入 JSON (v0.6.3-rc1 P2-1.1 + P2-1.8): 粘贴 / 选 .json 文件, auto-detect 4 种格式
+ *     (single object / array / Claude Desktop {mcpServers: {...}} / map {name: {...}}),
+ *     preview 后批量写入
  *   - 编辑: 弹 dialog 编辑 JSON body, 跟 Tools tab 一样 (P1.5.1 不再省略 edit)
  *   - 删除: 确认后删文件
  *
@@ -558,9 +559,10 @@ async function refreshAndShowPath() {
         <div class="pad-mcptab__form-hint">
           <Info :size="12" :stroke-width="1.75" />
           <span>
-            支持 3 种格式 (auto-detect): ① 单个 <code>{name, command, args}</code> ②
+            支持 4 种格式 (auto-detect): ① 单个 <code>{name, command|url, ...}</code> ②
             <code>[{...}, {...}]</code> array ③ Claude Desktop 标准
-            <code>{mcpServers: {name: {...}}}</code>.
+            <code>{mcpServers: {name: {...}}}</code> ④ map
+            <code>{name: {...}}</code> (跟 <code>.pi/mcp/*.json</code> 一致).
             选完文件后自动解析预览, 跟现有 <code>name</code> 冲突的会跳过.
           </span>
         </div>
@@ -617,7 +619,7 @@ async function refreshAndShowPath() {
             class="pad-mcptab__textarea pad-mcptab__textarea--mono"
             rows="10"
             spellcheck="false"
-            placeholder='例 1: { "name": "filesystem", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:\\path"] }&#10;&#10;例 2: { "mcpServers": { "filesystem": { ... }, "fetch": { ... } } }'
+            placeholder='例 1: { "name": "filesystem", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:\\path"] }&#10;&#10;例 2: { "mcpServers": { "filesystem": { ... }, "fetch": { ... } } }&#10;&#10;例 3 (P2-1.8): { "my-http-mcp": { "type": "http", "url": "http://localhost:3000/mcp" } }'
             :disabled="isImporting_apply"
             @input="parseImportPreview"
           />
