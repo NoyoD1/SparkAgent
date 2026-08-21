@@ -16,6 +16,8 @@ use crate::sidecar::kill_sidecar;  // v0.4.6: register tauri command (force kill
 use tauri::{AppHandle, Emitter, Manager, State};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::SystemTime;
 // v0.4.4.6: ClientConfig 用 sidecar::SkillsConfig / sidecar::ModelMetadataConfig
 use sidecar::{SkillsConfig, ModelMetadataConfig};
 
@@ -32,6 +34,66 @@ fn debug_log(msg: &str) {
         let ts = chrono::Utc::now().format("%H:%M:%S%.3f");
         let _ = writeln!(f, "[{ts}] {msg}");
     }
+}
+
+// ====== D214 v7: ref body 内存 cache (skill / user tool / mcp server) ======
+// 背景: Composer.send() 每次发消息都强制 read 3 类 ref body, 拼到 LLM prompt 头部.
+//   同一个 skill 连续发 10 条消息 = 10 次磁盘 IO. skill 文件通常几 KB, 不算大,
+//   但 IO 系统调用 + parse_frontmatter 有 overhead. 加个简单 in-memory cache,
+//   mtime 没变就复用, 变了就重读 (invalid 隐式靠 mtime, 不需要主动清).
+//
+// 故意做简单版: HashMap + Mutex, 不上 LRU. 用户的 ref 总数一般 < 100,
+//   即使全部 cache 也只占几 MB. 真正要严格控内存再说.
+//
+// key 设计: skill 用 `skill:{path}` (path 唯一), user tool / mcp server
+//   用 `{kind}:{scope}:{name}` (name 在 scope 内唯一, 加 scope 防 workspace / global 撞)
+struct RefBodyCacheEntry {
+    body: String,
+    mtime: SystemTime,
+}
+use std::sync::LazyLock;
+static REF_BODY_CACHE: LazyLock<Mutex<HashMap<String, RefBodyCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 通用 cache 读: mtime 一致返 cache, 不一致走 read_fn 重读 + 更新 cache.
+/// read_fn 是 closure 传进来, 因为 3 类 (skill/tool/mcp) 各自有不同 read 逻辑
+/// (skill 要 parse_frontmatter, tool/mcp 直接 read_to_string).
+async fn read_with_cache<F, Fut>(
+    cache_key: String,
+    path: &Path,
+    read_fn: F,
+) -> Result<String, String>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    // 1. 拿当前文件 mtime (失败 = 文件没了, 走 read_fn 让它自己报错)
+    let current_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    // 2. 查 cache: mtime 完全一致才算命中
+    if let Some(mtime) = current_mtime {
+        let cache = REF_BODY_CACHE.lock().expect("REF_BODY_CACHE poisoned");
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.mtime == mtime {
+                return Ok(entry.body.clone());
+            }
+        }
+    }
+    // 3. miss 或 mtime 变了 → 走 read_fn (skill 走 parse_frontmatter, tool/mcp 走 read_to_string)
+    let body = read_fn(path.to_path_buf()).await?;
+    // 4. 更新 cache (mtime 拿到了才写, 拿不到说明文件没了, 不写)
+    if let Some(mtime) = current_mtime {
+        let mut cache = REF_BODY_CACHE.lock().expect("REF_BODY_CACHE poisoned");
+        cache.insert(cache_key, RefBodyCacheEntry { body: body.clone(), mtime });
+    }
+    Ok(body)
+}
+
+/// write / delete 主动 invalidate (mtime 检查能 cover 99% 场景, 但 delete
+/// 后再 read 之前 metadata 会失败, cache 不会更新, 老 entry 留着无害但占内存.
+/// 主动清一下更干净.)
+fn invalidate_ref_body_cache(cache_key: &str) {
+    let mut cache = REF_BODY_CACHE.lock().expect("REF_BODY_CACHE poisoned");
+    cache.remove(cache_key);
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -242,6 +304,11 @@ async fn write_skill_file(args: WriteSkillFileArgs) -> Result<String, String> {
     // 4. 写文件
     std::fs::write(&target_path, args.body.as_bytes()).map_err(|e| format!("写文件失败 {:?}: {}", target_path, e))?;
 
+    // 4.5 D214 v7: invalidate ref body cache (写完 mtime 变了, 下次 read 会重读,
+    //     这里主动清更干净, 避免持有老 body 引用)
+    let canonical = std::fs::canonicalize(&target_path).unwrap_or(target_path.clone());
+    invalidate_ref_body_cache(&format!("skill:{}", canonical.to_string_lossy()));
+
     // 5. 返回绝对路径
     let abs = std::fs::canonicalize(&target_path).unwrap_or(target_path);
     Ok(abs.to_string_lossy().to_string())
@@ -252,6 +319,12 @@ async fn write_skill_file(args: WriteSkillFileArgs) -> Result<String, String> {
 async fn delete_skill_file(file_path: String) -> Result<(), String> {
     let path = PathBuf::from(&file_path);
     // 安全校验: 必须是绝对路径且是 .md 文件
+    // D214 v7: 先 invalidate cache (删了之后这条 entry 没意义, 主动清)
+    if path.is_absolute() && path.extension().map(|e| e == "md").unwrap_or(false) {
+        if let Ok(canonical) = std::fs::canonicalize(&path) {
+            invalidate_ref_body_cache(&format!("skill:{}", canonical.to_string_lossy()));
+        }
+    }
     if !path.is_absolute() {
         return Err("file_path 必须是绝对路径".to_string());
     }
@@ -403,12 +476,17 @@ async fn read_skill_file(path: String) -> Result<ParsedSkillFile, String> {
         // 不是 .md, 但仍读 — user 可能强制选
     }
 
-    // 3. 读文件
-    let raw = std::fs::read_to_string(&p).map_err(|e| format!("读文件失败: {}", e))?;
+    // 3. 走 ref body cache 拿 raw (mtime 一致返 cache, 不一致重读)
+    //    cache key 用 canonical path, 同一文件不管绝对/相对路径都命中同一 entry
+    let canonical_path = std::fs::canonicalize(&p).unwrap_or(p.clone());
+    let cache_key = format!("skill:{}", canonical_path.to_string_lossy());
+    let raw = read_with_cache(cache_key, &p, |q| async move {
+        std::fs::read_to_string(&q).map_err(|e| format!("读文件失败: {}", e))
+    }).await?;
 
-    // 4. 解析 frontmatter
+    // 4. 解析 frontmatter (每次都 parse — 很便宜, 比 cache parsed 更安全, 避免 frontmatter bug cache)
     let mut parsed = parse_skill_frontmatter(&raw);
-    parsed.path = std::fs::canonicalize(&p).unwrap_or(p).to_string_lossy().to_string();
+    parsed.path = canonical_path.to_string_lossy().to_string();
 
     // 5. 如果没 frontmatter, name 走 basename (去 .md)
     if parsed.name.is_empty() {
@@ -1386,8 +1464,12 @@ async fn read_user_tool(args: ReadDeleteUserToolArgs) -> Result<String, String> 
     if !path.exists() {
         return Err(format!("user tool '{}' (scope={}) 不存在", args.name, args.scope));
     }
-    std::fs::read_to_string(&path)
-        .map_err(|e| format!("read_to_string({}): {}", path.display(), e))
+    // D214 v7: 走 ref body cache, mtime 一致返 cache
+    let cache_key = format!("tool:{}:{}", args.scope, args.name);
+    read_with_cache(cache_key, &path, |p| async move {
+        std::fs::read_to_string(&p)
+            .map_err(|e| format!("read_to_string({}): {}", p.display(), e))
+    }).await
 }
 
 #[tauri::command]
@@ -1414,6 +1496,8 @@ async fn write_user_tool(args: UserToolArgs) -> Result<String, String> {
     let path = dir.join(format!("{}.json", name));
     std::fs::write(&path, args.body.as_bytes())
         .map_err(|e| format!("write({}): {}", path.display(), e))?;
+    // D214 v7: invalidate ref body cache
+    invalidate_ref_body_cache(&format!("tool:{}:{}", args.scope, name));
     debug_log(&format!("write_user_tool: wrote {} (scope={})", path.display(), args.scope));
     Ok(path.display().to_string())
 }
@@ -1427,6 +1511,8 @@ async fn delete_user_tool(args: ReadDeleteUserToolArgs) -> Result<bool, String> 
     }
     std::fs::remove_file(&path)
         .map_err(|e| format!("remove_file({}): {}", path.display(), e))?;
+    // D214 v7: invalidate ref body cache
+    invalidate_ref_body_cache(&format!("tool:{}:{}", args.scope, args.name));
     Ok(true)
 }
 
@@ -1743,8 +1829,12 @@ async fn read_mcp_server(args: ReadDeleteMcpServerArgs) -> Result<String, String
     if !path.exists() {
         return Err(format!("mcp server '{}' (scope={}) 不存在", args.name, args.scope));
     }
-    std::fs::read_to_string(&path)
-        .map_err(|e| format!("read_to_string({}): {}", path.display(), e))
+    // D214 v7: 走 ref body cache, mtime 一致返 cache
+    let cache_key = format!("mcp:{}:{}", args.scope, args.name);
+    read_with_cache(cache_key, &path, |p| async move {
+        std::fs::read_to_string(&p)
+            .map_err(|e| format!("read_to_string({}): {}", p.display(), e))
+    }).await
 }
 
 #[tauri::command]
@@ -1760,6 +1850,8 @@ async fn write_mcp_server(args: McpServerArgs) -> Result<String, String> {
     let path = dir.join(format!("{}.json", name));
     std::fs::write(&path, args.body.as_bytes())
         .map_err(|e| format!("write({}): {}", path.display(), e))?;
+    // D214 v7: invalidate ref body cache
+    invalidate_ref_body_cache(&format!("mcp:{}:{}", args.scope, name));
     debug_log(&format!("write_mcp_server: wrote {} (scope={})", path.display(), args.scope));
     Ok(path.display().to_string())
 }
@@ -1773,6 +1865,8 @@ async fn delete_mcp_server(args: ReadDeleteMcpServerArgs) -> Result<bool, String
     }
     std::fs::remove_file(&path)
         .map_err(|e| format!("remove_file({}): {}", path.display(), e))?;
+    // D214 v7: invalidate ref body cache
+    invalidate_ref_body_cache(&format!("mcp:{}:{}", args.scope, args.name));
     Ok(true)
 }
 

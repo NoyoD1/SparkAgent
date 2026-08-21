@@ -4,6 +4,7 @@
  */
 
 @import './tokens.css';
+@import './chip.css';
 
 /* ===== Global keyframes =====
  * 必须放在全局 (非 scoped), 否则 .vue 文件里 scoped 的 @keyframes 会被 Vite

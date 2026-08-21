@@ -149,6 +149,16 @@ export const useChatStore = defineStore('chat', () => {
         sendQueueBySession.value = nextQueue;
         console.log('[chat] sendQueueBySession pruned: removed queues for deleted sessions');
       }
+      // D214 v7: 同步清孤儿 recent refs (per-session last-mentioned tracking)
+      //   session 删了 recent refs 也无意义, 清掉避免内存泄漏
+      const nextRecent = { ...recentRefsBySession.value };
+      let recentChanged = false;
+      for (const k of Object.keys(nextRecent)) {
+        if (!idSet.has(k)) { delete nextRecent[k]; recentChanged = true; }
+      }
+      if (recentChanged) {
+        recentRefsBySession.value = nextRecent;
+      }
     },
   );
 
@@ -585,6 +595,46 @@ export const useChatStore = defineStore('chat', () => {
       [sessionId]: [],
     };
   }
+
+  // ====== D214 v7: last-mentioned tracking (隐式 ref 续接) ======
+  // 背景: user 上一句引用了 huashu-design, 这一句说"再分析一下" — 没 chip marker,
+  //   旧逻辑 fall through 到 cache, LLM 看不到 huashu-design. 解法: 维护"最近提到的
+  //   ref 列表", 每次 send 拼 prompt 时, 把 recent refs 中**不在当前 message 显式
+  //   提到的**也读 body 注入 `<recent_refs>` section. 显式 mention 走 `<reference>`,
+  //   隐式最近提到走 `<recent_refs>` (LLM 内部协议, 不显示在 user 气泡).
+  //
+  // 上限 3 条: cap token 成本. LLM 真要上下文还有 system prompt 兜底, 不至于
+  //   完全丢失. 长文件 (几 KB skill) × 3 = 几十 KB, 还能接受.
+  //
+  // 显式 vs 隐式区分: sendPrompt 解析 [[ref:kind:name]] marker 时, 收集
+  //   explicitRefKeys (Set<string>); recentRefs 不在 Set 里的才算"隐式".
+  type RecentRef = { kind: 'skill' | 'tool' | 'mcp'; name: string };
+  const RECENT_REFS_MAX = 3;
+  const recentRefsBySession = ref<Record<string, RecentRef[]>>({});
+
+  /**
+   * 加一个 recent ref. deduped (同 kind+name move to 末尾) + cap.
+   * Composer.insertMarkerAtCursor 调这里, 把刚插入的 chip 推到末尾.
+   */
+  function addRecentRef(sessionId: string, ref: RecentRef) {
+    const list = recentRefsBySession.value[sessionId] ?? [];
+    // 去掉已存在的 (按 kind+name dedupe)
+    const filtered = list.filter((r) => !(r.kind === ref.kind && r.name === ref.name));
+    // 末尾追加, cap 上限 (slice 留最后 N 个)
+    const newList = [...filtered, ref].slice(-RECENT_REFS_MAX);
+    recentRefsBySession.value = { ...recentRefsBySession.value, [sessionId]: newList };
+  }
+
+  function getRecentRefs(sessionId: string): RecentRef[] {
+    return recentRefsBySession.value[sessionId] ?? [];
+  }
+
+  function clearRecentRefs(sessionId: string) {
+    if (!recentRefsBySession.value[sessionId]?.length) return;
+    const next = { ...recentRefsBySession.value };
+    delete next[sessionId];
+    recentRefsBySession.value = next;
+  }
   // v0.5.1: 当前 phase (thinking / text / tool / idle) — 用来在 streaming 状态
   //   显示 "思考中…" / "正在下笔…" / "调用工具…" 等不同文字, 文字轮换 (每 1.8s 换一次).
   //   用户反馈 "实际当前任务还在后台继续跑, 但是因为是一段一段回复的, 正文可能有多条,
@@ -874,6 +924,8 @@ export const useChatStore = defineStore('chat', () => {
 
   function clearSession(sessionId: string) {
     chatData.value = { ...chatData.value, [sessionId]: emptySessionData() };
+    // D214 v7: clear chat 上下文也清掉 recent refs (新会话不需要上一段的 ref)
+    clearRecentRefs(sessionId);
   }
 
   /**
@@ -2153,6 +2205,11 @@ export const useChatStore = defineStore('chat', () => {
     removeFileRef,
     clearFileRefs,
     fileRefsBySession,
+    // D214 v7: last-mentioned tracking (隐式 ref 续接) — Composer 调 addRecentRef, sendPrompt 拼 recent_refs
+    addRecentRef,
+    getRecentRefs,
+    clearRecentRefs,
+    recentRefsBySession,
     appendUserMessage,
     clearSession,
     sendPrompt,

@@ -195,6 +195,22 @@ function renderMessageContent(content: string): string {
   return result;
 }
 
+// D214 v7: user 气泡里 chip 点击事件委托
+//   contentEditable (这里用 v-html 注入) 没有 Vue 事件, 走 parent click + closest 判断
+//   点 chip 主体 → 弹 ChipPreview 看完整 body; 点非 chip 区域 → 忽略
+function onUserContentClick(e: MouseEvent) {
+  const target = e.target as HTMLElement;
+  const chip = target.closest?.('.pad-composer__ref-chip') as HTMLElement | null;
+  if (!chip) return;
+  const kind = chip.dataset.refKind as 'skill' | 'tool' | 'mcp' | undefined;
+  const name = chip.dataset.refName;
+  if (!kind || !name) return;
+  // chat 已发出的 chip 没有 × 按钮, 整块都触发 preview
+  import('@/composables/useChipPreview').then(({ useChipPreview }) => {
+    useChipPreview().openRef(kind, name, chip);
+  });
+}
+
 // v0.5.0-D 第20轮 (D207): user 消息气泡里引用的可折叠行为
 //   默认 collapsed, 显示首行 + "..." + chevron, 点击展开全文 / 收起
 //   短引用 (< 80 字符单行) 自动不折叠 (用 Quote icon 装饰, 没有 chevron)
@@ -483,13 +499,22 @@ const statusText = computed(() => {
         <!-- 新问题部分: 从 message.content 去掉 quote 的 > 前缀行 + 空行 -->
         <div class="pad-msg__new-question">
           <!-- D214: 用 v-html 渲染, 让 [[ref:kind:name]] marker 显示成 chip
-               MarkdownContent 不认识 marker, 会当文本显示. chip CSS 用 :deep() 穿透 scoped -->
-          <div class="pad-msg__user-content" v-html="renderMessageContent(extractNewQuestion(message.content, message.quoteContent))" />
+               MarkdownContent 不认识 marker, 会当文本显示. chip CSS 提到全局 chip.css (D214 v7).
+               chip 点击走事件委托 (onUserContentClick) 弹预览浮层 -->
+          <div
+            class="pad-msg__user-content"
+            v-html="renderMessageContent(extractNewQuestion(message.content, message.quoteContent))"
+            @click="onUserContentClick"
+          />
         </div>
       </template>
       <template v-else>
-        <!-- D214: 同上 — v-html + renderMessageContent 渲染 chip -->
-        <div class="pad-msg__user-content" v-html="renderMessageContent(message.content)" />
+        <!-- D214: 同上 — v-html + renderMessageContent 渲染 chip. chip 点击弹预览 -->
+        <div
+          class="pad-msg__user-content"
+          v-html="renderMessageContent(message.content)"
+          @click="onUserContentClick"
+        />
       </template>
     </div>
   </div>
@@ -889,58 +914,8 @@ const statusText = computed(() => {
   line-height: var(--pad-lh-base, 1.5);
 }
 
-/* D214: user 消息气泡里 chip 渲染样式
-   跟 Composer 里的 chip 同款 (类名复用, 避免双套样式)
-   :deep() 穿透 scoped, 因为 chip 是 v-html 注入的 (没有 data-v-xxx 属性) */
-.pad-msg__user-content :deep(.pad-composer__ref-chip),
-.pad-msg__new-question :deep(.pad-composer__ref-chip) {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 8px 1px 4px;
-  margin: 0 2px;
-  border-radius: 4px;
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: nowrap;
-  vertical-align: baseline;
-  background: #e8e8ed;
-  border: 1px solid #c8c8d0;
-  color: #2a2a35;
-}
-.pad-msg__user-content :deep(.pad-composer__ref-chip[data-ref-kind="skill"]),
-.pad-msg__new-question :deep(.pad-composer__ref-chip[data-ref-kind="skill"]) {
-  background: #e0e8f7;
-  border-color: #9bb4e6;
-  color: #1a3a7a;
-}
-.pad-msg__user-content :deep(.pad-composer__ref-chip[data-ref-kind="tool"]),
-.pad-msg__new-question :deep(.pad-composer__ref-chip[data-ref-kind="tool"]) {
-  background: #ede0f7;
-  border-color: #c89be6;
-  color: #5a1a7a;
-}
-.pad-msg__user-content :deep(.pad-composer__ref-chip[data-ref-kind="mcp"]),
-.pad-msg__new-question :deep(.pad-composer__ref-chip[data-ref-kind="mcp"]) {
-  background: #dff0e4;
-  border-color: #95c8a4;
-  color: #1a5a2a;
-}
-.pad-msg__user-content :deep(.pad-composer__ref-chip-label),
-.pad-msg__new-question :deep(.pad-composer__ref-chip-label) {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  opacity: 0.65;
-  padding: 0 4px 0 4px;
-  border-right: 1px solid rgba(0, 0, 0, 0.15);
-}
-.pad-msg__user-content :deep(.pad-composer__ref-chip-name),
-.pad-msg__new-question :deep(.pad-composer__ref-chip-name) {
-  font-weight: 500;
-  padding: 0 4px 0 0;
-}
+/* D214 v7: user 消息气泡里 chip 样式已提到全局 app/src/assets/styles/chip.css
+   删掉这里的 :deep() 重复规则, 避免以后改 chip 样式要改两处 */
 
 /* ===== assistant 流 (左, 连续, 无背景) ===== */
 .pad-msg__body {

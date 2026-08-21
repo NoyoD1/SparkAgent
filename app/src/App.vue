@@ -10,6 +10,7 @@
  */
 import { onMounted, ref } from 'vue';
 import ChatView from '@/views/ChatView.vue';
+import ChipPreview from '@/components/ChipPreview.vue';
 import { useConfigStore } from '@/stores/config';
 import { useSessionStore } from '@/stores/session';
 import { useUiStore } from '@/stores/ui';
@@ -75,6 +76,8 @@ onMounted(async () => {
       </div>
     </TransitionGroup>
   </div>
+  <!-- D214 v7: 全局 chip 预览浮层 (Teleport 到 body) — 一次性 mount, 状态走 useChipPreview composable -->
+  <ChipPreview />
 </template>
 
 <style>

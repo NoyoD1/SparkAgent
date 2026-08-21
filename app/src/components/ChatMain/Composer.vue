@@ -348,20 +348,38 @@ function removeFileRef(path: string) {
 
 // D214 Phase 3: 点击 chip 里的 × 删除该 ref
 //   在 contentEditable 里点 × → 找到最近的 .pad-composer__ref-chip → 解析它的 marker → 从 inputText 删
+// D214 v7: 点 chip 主体 (非 × 按钮) 弹预览浮层 — 看完整 skill/tool/mcp 内容
 function onRichClick(e: MouseEvent) {
   const target = e.target as HTMLElement;
-  if (!target.classList.contains('pad-composer__ref-chip-x')) return;
+  // 路径 1: 点 × 按钮 → 删 chip
+  if (target.classList.contains('pad-composer__ref-chip-x')) {
+    const chip = target.closest('.pad-composer__ref-chip') as HTMLElement | null;
+    if (!chip) return;
+    const kind = chip.dataset.refKind;
+    const name = chip.dataset.refName;
+    if (!kind || !name) return;
+    const reNew = new RegExp(`\\[\\[ref:${kind}:${name}\\]\\]`, 'g');
+    const reOld = new RegExp(`\\[\\[${kind}:${name}\\]\\]`, 'g');
+    inputText.value = inputText.value.replace(reNew, '').replace(reOld, '');
+    e.preventDefault();
+    return;
+  }
+  // 路径 2: 点 chip 主体 → 弹预览浮层
   const chip = target.closest('.pad-composer__ref-chip') as HTMLElement | null;
-  if (!chip) return;
-  const kind = chip.dataset.refKind;
-  const name = chip.dataset.refName;
-  if (!kind || !name) return;
-  // 从 inputText 删对应 marker (新旧格式都删)
-  const reNew = new RegExp(`\\[\\[ref:${kind}:${name}\\]\\]`, 'g');
-  const reOld = new RegExp(`\\[\\[${kind}:${name}\\]\\]`, 'g');
-  inputText.value = inputText.value.replace(reNew, '').replace(reOld, '');
-  // 阻止冒泡 (避免触发 contentEditable 焦点)
-  e.preventDefault();
+  if (chip) {
+    const kind = chip.dataset.refKind as 'skill' | 'tool' | 'mcp' | undefined;
+    const name = chip.dataset.refName;
+    if (kind && name) {
+      // useChipPreview 是 singleton, import 一下直接用
+      // 动态 import 避免循环 (composable 动态 import store / tauri)
+      import('@/composables/useChipPreview').then(({ useChipPreview }) => {
+        useChipPreview().openRef(kind, name, chip);
+      });
+      e.preventDefault();
+      // 阻止冒泡: 不要让 click 冒到 contentEditable 触发 focus 偏移
+      e.stopPropagation();
+    }
+  }
 }
 // v0.4.1+ tool permission 菜单
 const showPermissionMenu = ref(false);
@@ -943,10 +961,74 @@ async function send() {
     llmText = `${refSection}\n\n---\n\n${text}`;
     console.log(`[Composer] embedded ${refs.length} reference(s) into LLM prompt: ${refs.map((r) => `${r.kind}:${r.name}`).join(', ')}`);
   }
+  // D214 v7: last-mentioned tracking (隐式 ref 续接)
+  //   把 chatStore 维护的 recent refs (per session, cap 3) 中, **不在当前 message 显式
+  //   提到的**也读 body 注入 `<recent_refs>` section. 走同一套 readSkillFile /
+  //   readUserTool / readMcpServer (Rust 端有 cache, 不会重复 IO).
+  //   例: user 上一句引用了 huashu-design, 这一句"再分析一下" 没 chip, 但 LLM
+  //   仍能拿到 huashu-design 的 body (走 recent_refs section).
+  const sid = sessionStore.activeSessionId;
+  if (sid) {
+    const recentRefs = chatStore.getRecentRefs(sid);
+    const explicitKeys = new Set(refs.map((r) => `${r.kind}:${r.name}`));
+    const implicitRefs = recentRefs.filter((r) => !explicitKeys.has(`${r.kind}:${r.name}`));
+    if (implicitRefs.length > 0) {
+      const recentBodies: Array<{ ref: typeof implicitRefs[0]; body: string }> = [];
+      for (const r of implicitRefs) {
+        try {
+          let body = '';
+          if (r.kind === 'skill') {
+            const cached = skillsStore.skills.find((s: any) => s.name === r.name);
+            if (cached) {
+              const parsed = await piTauri.readSkillFile(cached.filePath);
+              body = parsed.body || parsed.description || '';
+            }
+          } else if (r.kind === 'tool') {
+            const cached = userToolsStore.tools.find((t: any) => t.name === r.name);
+            if (cached) {
+              body = await piTauri.readUserTool({
+                scope: cached.scope,
+                workspacePath: sessionStore.activeWorkspace?.path ?? null,
+                agentDir: null,
+                name: r.name,
+              });
+            }
+          } else if (r.kind === 'mcp') {
+            const cached = mcpServersStore.servers.find((s: any) => s.name === r.name);
+            if (cached) {
+              body = await piTauri.readMcpServer({
+                scope: cached.scope,
+                workspacePath: sessionStore.activeWorkspace?.path ?? null,
+                agentDir: null,
+                name: r.name,
+              });
+            }
+          }
+          if (body) recentBodies.push({ ref: r, body });
+        } catch (e) {
+          console.warn(`[Composer] read recent ref ${r.kind}:${r.name} failed:`, e);
+        }
+      }
+      if (recentBodies.length > 0) {
+        // recent_refs 走单独的 wrapper, 跟显式 <reference> 区分 (前者是 LLM 隐式 context)
+        const recentSection = `<recent_refs>\n<!-- 最近提到的 ref, 不在当前 message 显式 mention. 用途: 处理 "再分析一下" 这类隐式续接, LLM 仍能看到完整 context -->\n${recentBodies
+          .map((x) => `<reference type="${x.ref.kind}" name="${x.ref.name}">\n${x.body}\n</reference>`)
+          .join('\n\n')}\n</recent_refs>`;
+        llmText = `${llmText}\n\n${recentSection}`;
+        console.log(`[Composer] embedded ${recentBodies.length} recent ref(s) into LLM prompt: ${recentBodies.map((x) => `${x.ref.kind}:${x.ref.name}`).join(', ')}`);
+      }
+    }
+  }
   inputText.value = '';
   if (richInputRef.value) richInputRef.value.innerHTML = '';
   // userText = text (无 reference section, 但有 [[ref:...]] marker, chat 渲染时转 chip)
   await chatStore.sendPrompt(llmText, { userText: text });
+  // 走完后才更新 recent refs (放这里避免 send 失败时污染)
+  if (sid) {
+    for (const r of refs) {
+      chatStore.addRecentRef(sid, { kind: r.kind, name: r.name });
+    }
+  }
 }
 
 /**
@@ -1423,76 +1505,8 @@ onMounted(() => {
   user-select: none;
 }
 
-/* D214 Phase 3: 灰底 inline chip 样式
-   ⚠️ 关键: chip 是通过 renderRichInput 的 innerHTML 注入, 不是 Vue template 渲染.
-     Vue scoped CSS 的 data-v-xxx 属性只加给 template 元素, innerHTML 加的 span
-     没有这个属性, 必须用 :deep() 穿透 scoped, 否则 chip 完全没有 CSS 样式
-   - [[ref:kind:name]] 在 contentEditable 里渲染成这个 span
-   - 灰底 + 圆角 + inline-block, 跟普通文字混排
-   - contenteditable="false" 防止用户改 chip 内部文字
-   - data-ref-kind 区分样式颜色 (skill=蓝, tool=紫, mcp=绿) */
-:deep(.pad-composer__ref-chip) {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px 2px 4px;
-  margin: 0 2px;
-  background: #e8e8ed;
-  border: 1px solid #c8c8d0;
-  border-radius: 4px;
-  font-size: 13px;
-  line-height: 1.4;
-  color: #2a2a35;
-  white-space: nowrap;
-  user-select: none;
-  -webkit-user-select: none;
-  cursor: default;
-  vertical-align: baseline;
-}
-:deep(.pad-composer__ref-chip[data-ref-kind="skill"]) {
-  background: #e0e8f7;
-  border-color: #9bb4e6;
-  color: #1a3a7a;
-}
-:deep(.pad-composer__ref-chip[data-ref-kind="tool"]) {
-  background: #ede0f7;
-  border-color: #c89be6;
-  color: #5a1a7a;
-}
-:deep(.pad-composer__ref-chip[data-ref-kind="mcp"]) {
-  background: #dff0e4;
-  border-color: #95c8a4;
-  color: #1a5a2a;
-}
-:deep(.pad-composer__ref-chip-label) {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  opacity: 0.65;
-  padding: 0 2px 0 4px;
-  border-right: 1px solid rgba(0, 0, 0, 0.15);
-  line-height: 1.2;
-}
-:deep(.pad-composer__ref-chip-name) {
-  font-weight: 500;
-  line-height: 1.2;
-}
-:deep(.pad-composer__ref-chip-x) {
-  margin-left: 2px;
-  padding: 0 2px;
-  cursor: pointer;
-  opacity: 0.5;
-  font-size: 14px;
-  line-height: 1;
-  user-select: none;
-  border-radius: 2px;
-}
-:deep(.pad-composer__ref-chip-x:hover) {
-  opacity: 1;
-  background: rgba(0, 0, 0, 0.1);
-}
-/* v0.6+: 文件引用 (file reference) chip — 跟 skill ref 类似的 chip 风格, 蓝色 (FileText icon) */
+/* D214 v7: chip 样式已提到全局 app/src/assets/styles/chip.css
+   这里只保留 file-ref (sidebar 文件引用) chip 样式, 跟 ref chip 是两种东西别混 */
 .pad-composer__file-refs {
   display: flex;
   align-items: center;

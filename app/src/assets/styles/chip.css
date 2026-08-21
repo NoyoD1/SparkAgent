@@ -1,0 +1,114 @@
+/* Pi Agent App — shared chip styles
+ * 之前 Composer + ChatMessage 两处都写 :deep(.pad-composer__ref-chip) 重复规则,
+ * 提这里做唯一来源. 两处都通过 v-html 注入 chip DOM, 没法走 Vue scoped 样式,
+ * 所以放全局 CSS, 类名不 data-v-xxx suffix 也能命中.
+ *
+ * D214 v7: 提到全局 + 加大 × 按钮 (触屏友好)
+ */
+
+/* ===== base chip (skill / tool / mcp reference) ===== */
+.pad-composer__ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 4px;
+  margin: 0 2px;
+  background: #e8e8ed;
+  border: 1px solid #c8c8d0;
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #2a2a35;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;        /* D214 v7: 整块可点 → 弹 overlay 预览 */
+  vertical-align: baseline;
+  transition: background 0.1s ease, border-color 0.1s ease;
+}
+.pad-composer__ref-chip:hover {
+  background: #d8d8e0;
+  border-color: #b0b0bc;
+}
+.pad-composer__ref-chip[data-ref-kind="skill"] {
+  background: #e0e8f7;
+  border-color: #9bb4e6;
+  color: #1a3a7a;
+}
+.pad-composer__ref-chip[data-ref-kind="skill"]:hover {
+  background: #d0dcf0;
+  border-color: #7a9adb;
+}
+.pad-composer__ref-chip[data-ref-kind="tool"] {
+  background: #ede0f7;
+  border-color: #c89be6;
+  color: #5a1a7a;
+}
+.pad-composer__ref-chip[data-ref-kind="tool"]:hover {
+  background: #e3d0f0;
+  border-color: #b07adb;
+}
+.pad-composer__ref-chip[data-ref-kind="mcp"] {
+  background: #dff0e4;
+  border-color: #95c8a4;
+  color: #1a5a2a;
+}
+.pad-composer__ref-chip[data-ref-kind="mcp"]:hover {
+  background: #cfe8d8;
+  border-color: #6db585;
+}
+
+.pad-composer__ref-chip-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+  padding: 0 2px 0 4px;
+  border-right: 1px solid rgba(0, 0, 0, 0.15);
+  line-height: 1.2;
+}
+
+.pad-composer__ref-chip-name {
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+/* × 按钮 — D214 v7 加大 14×14 → 18×18, 触屏友好 */
+.pad-composer__ref-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 2px;
+  cursor: pointer;
+  opacity: 0.5;
+  font-size: 14px;
+  line-height: 1;
+  user-select: none;
+  border-radius: 3px;
+  color: inherit;
+  background: transparent;
+  border: none;
+  padding: 0;
+  /* 阻止冒泡 (chip body 的 click handler 不会误触发) */
+  pointer-events: auto;
+}
+.pad-composer__ref-chip-x:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.1);
+}
+
+/* D214 v7: 当 × 按钮 hover 时, 整块 chip 不要也变 hover 颜色 (避免视觉冲突)
+   简单办法: × hover 时, 父 chip 不再 hover 样式 */
+.pad-composer__ref-chip-x:hover ~ * { /* no-op */ }
+.pad-composer__ref-chip:has(.pad-composer__ref-chip-x:hover) {
+  /* keep base background, 不加深 — 但 has() 兼容性差, 这里就保留简单 hover */
+}
+
+/* chat 场景 (user 气泡已发出, 不能删) — × 按钮不显示 */
+.pad-msg__user-content .pad-composer__ref-chip-x,
+.pad-msg__new-question .pad-composer__ref-chip-x {
+  display: none;
+}
