@@ -86,7 +86,7 @@ function parseSkillBody(raw: string): ParsedBody {
 // 浮层位置 (根据 chip 位置算)
 const popupStyle = computed(() => {
   if (!current.value) return {};
-  const POPUP_MAX_H = 240;          // D214 v8: 360→240, 跟 chip 视觉更近
+  const POPUP_MAX_H = 360;          // D214 v8.1: 240→360, 长 skill body (description 几百字) 需要更高
   const POPUP_W = 480;
   const MARGIN = 6;
   const vw = window.innerWidth;
@@ -96,15 +96,15 @@ const popupStyle = computed(() => {
   let left = anchor.left + anchor.width / 2 - POPUP_W / 2;
   left = Math.max(8, Math.min(left, vw - POPUP_W - 8));
   // 纵向: 默认下方, 下方 < POPUP_MAX_H + 40 时翻到上方
-  //   D214 v8: 跟 chip 视觉对齐 — popover 顶端贴 chip 底端 (top = anchor.top + 22 + MARGIN)
-  //   而不是 360+chip 高度才往下放
+  //   D214 v8.1: 仍 360 max, 但 body 内部有 overflow-y: auto, 长内容可以滚
+  //   (v8 设 240 跟 chip 视觉近, 但长内容截断没法滚 → user 反馈)
   const spaceBelow = vh - (anchor.top + MARGIN);
   const spaceAbove = anchor.top - MARGIN;
   let top: number;
-  if (spaceBelow >= Math.min(POPUP_MAX_H, 180) || spaceBelow > spaceAbove) {
+  if (spaceBelow >= Math.min(POPUP_MAX_H, 200) || spaceBelow > spaceAbove) {
     top = anchor.top + 22 + MARGIN;  // 22 ≈ chip 高度
   } else {
-    // 翻到 chip 上方: popover 底端贴 chip 顶端, 而不是固定 240 高 (更贴 chip)
+    // 翻到 chip 上方: popover 顶端贴 chip 底端 (anchor.top - maxHeight), 内部滚
     top = anchor.top - POPUP_MAX_H - MARGIN;
     if (top < 8) top = 8;
   }
@@ -112,7 +112,7 @@ const popupStyle = computed(() => {
     top: `${top}px`,
     left: `${left}px`,
     width: `${POPUP_W}px`,
-    maxHeight: `${Math.min(POPUP_MAX_H, Math.max(spaceBelow - 16, spaceAbove - 16, 200))}px`,
+    maxHeight: `${Math.min(POPUP_MAX_H, Math.max(spaceBelow - 16, spaceAbove - 16, 240))}px`,
   };
 });
 
@@ -261,13 +261,17 @@ watch(isOpen, async (open) => {
   background: var(--pad-bg-hover, rgba(0, 0, 0, 0.06));
   color: var(--pad-fg-primary);
 }
-/* D214 v8: 整体 body 容器, padding 减半, 没有 monospace 强制 (markdown 跟 json 走不同字体) */
+/* D214 v8.1: body 整体可滚 (单一 scrollbar, 长 skill description 不截断)
+   之前: body overflow: hidden, .chip-preview__content 自己 overflow-y: auto —
+     meta 表格里的 description 如果很长 (几百字), 撑爆 meta 高度,
+     把 content 区挤出可视区, 用户看到"不能滚" 其实是 .content 没滚到 meta.
+   改: body 自身 overflow-y: auto, meta + content 都参与 body 滚动,
+     .content 取消自己 overflow, 让 markdown 长文也能顺着 body 一起滚.
+   v8 改 max-height 240→360 留更多空间, 但 body 仍可滚, 不会硬截断. */
 .chip-preview__body {
   margin: 0;
   padding: 8px 10px;
-  /* D214 v8: flex 1 让 body 撑满剩余空间 (max-height 控高), 不再 overflow-y 在 body 自身.
-     内容多了由 .chip-preview__content 内部滚动. */
-  overflow: hidden;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -307,11 +311,9 @@ watch(isOpen, async (open) => {
   flex: 1;
 }
 
-/* D214 v8: 内容区 (markdown / json / text 走不同样式) */
+/* D214 v8.1: 内容区去掉自己的 overflow-y, 跟 body 一起滚 (避免双层 scrollbar) */
 .chip-preview__content {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
+  flex-shrink: 0;
 }
 /* markdown: 走 sans 字体, 跟 chat 一致. 顶部 margin 去掉避免空行 */
 .chip-preview__content--md {

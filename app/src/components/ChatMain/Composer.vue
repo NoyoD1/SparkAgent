@@ -605,10 +605,16 @@ function getSlashQuery(): string {
 // D214 Phase 3: watch inputText 触发 contentEditable re-render
 //   外部修改 (e.g. send 后清空, /use-latest 指令插入) 走 inputText.value = X,
 //   watch 会同步到 DOM. 用户直接打字走 onRichInput → 同步 inputText → watch → re-render.
+// D214 v8.1: 同时调 autoResize, 因为 renderRichInput 重置 innerHTML 后
+//   scrollHeight 变了, composer 高度得跟着重算. 之前只在 onRichInput 里调,
+//   加 chip (programmatic) 时不触发, composer 高度不跟 → 引用多时内容被截.
 watch(inputText, () => {
   // 在 IME 组合中不重渲染 (避免破坏中文输入)
   if (isComposing.value) return;
-  nextTick(renderRichInput);
+  nextTick(() => {
+    renderRichInput();
+    autoResize();
+  });
 });
 
 // D214: 主动 load 3 个 store, 确保 popover 里有数据
@@ -711,6 +717,9 @@ async function insertMarkerAtCursor(marker: string): Promise<void> {
   // marker 后面还有文字 (例如 user 输入了 `chip1 /test2 hello` → 选 chip 后是
   //   `chip1 chip2 hello`, cursor 应在 chip2 后但在 hello 前), 走 offset 算法
   setCursorByTextOffset(targetOffset);
+  // D214 v8.1: 加 chip 后重算高度. watch 也会触发 autoResize, 但 pickSlashItem
+  // 走的是 await rAF → setCursor, DOM 这时已稳定, 显式调一次更稳
+  autoResize();
 }
 
 async function pickSlashItem(item: SlashItem) {
@@ -1501,12 +1510,13 @@ onMounted(() => {
    - 跟 textarea 视觉一致, 但支持 inline chip
    - :empty 伪元素实现 placeholder (contentEditable 不支持 placeholder 属性)
    - D214 v6: min-height 44→28px, 1 行高, 不需要 2 行的空 padding (之前用户反映留白太大)
+   - D214 v8.1: min-height 28→36px, 略宽一点, 输入体验更舒服 (28 之前偏挤)
    - D214 v8: max-height 200→400px, 引多个 chip 时换行生长 (之前 200 太矮会卡住)
    - D214 v8: 加 white-space: pre-wrap + overflow-wrap: anywhere, 让 chip 跟文字
      能在 chip 边界自然换行, 不再溢出 composer */
 .pad-composer__input-rich {
   /* 跟 textarea 完全一致的尺寸/排版, 让切换零视觉差 */
-  min-height: 28px;
+  min-height: 36px;
   max-height: 400px;
   overflow-y: auto;
   /* chip + 文字 都能换行. pre-wrap 保留所有空白 + 自动换行, overflow-wrap
