@@ -109,6 +109,8 @@ import { loadSkills, formatSkillsForPrompt } from '@earendil-works/pi-coding-age
 //   用官方 SDK (@modelcontextprotocol/sdk) 走 JSON-RPC over stdio.
 //   跟 P1-5 user tool 走同一个 customTools path (merge 到 LLM 可见的 tools list).
 import { McpServerClient, McpServerError, jsonSchemaToTypeBox } from './mcpClient.mjs';
+// v0.6.3-rc1 P2-6: 工具错误分类 + 人类可读化 (401/403/5xx/网络错误 → user 看得懂的提示)
+import { classifyToolError, formatToolError } from './errorSanitizer.mjs';
 // v0.6.3-rc1 P2-2: MCP config dir 热重载 watcher (fs.watch + debounce)
 import { watchMcpConfigDirs } from './mcpWatcher.mjs';
 
@@ -949,9 +951,12 @@ function wrapMcpToolsAsCustomTools(mcpClients) {
             const result = await client.callTool(mcpTool.name, params ?? {});
             return mcpCallResultToAgentToolResult(result);
           } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            console.error(`[sidecar] P2-1: MCP callTool failed (${toolName}): ${msg}`);
-            throw new Error(`MCP callTool failed: ${msg}`);
+            // v0.6.3-rc1 P2-6: 用 classifyToolError 翻译成 user 看得懂的分类 + 行动提示
+            //   之前是 raw error message, user 看到 "fetch failed" 不知道是 key 过期还是 rate limit
+            const timeoutMs = client.config.timeout;
+            const classified = classifyToolError(e, { timeoutMs });
+            console.error(`[sidecar] P2-6: MCP callTool failed (${toolName}): [${classified.category}] ${classified.original}`);
+            throw new Error(formatToolError(classified));
           }
         },
       });
