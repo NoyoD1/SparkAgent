@@ -172,6 +172,14 @@ function renderRichInput(): void {
       html += `<span class="pad-composer__ref-chip" contenteditable="false" data-ref-kind="${p.refKind}" data-ref-name="${escapeHtml(p.refName || '')}" data-text-length="${p.content.length}"><span class="pad-composer__ref-chip-label" contenteditable="false">${p.refKind}</span><span class="pad-composer__ref-chip-name" contenteditable="false">${escapeHtml(p.refName || '')}</span><span class="pad-composer__ref-chip-x" contenteditable="false" data-remove="${escapeHtml(p.content)}">×</span></span>`;
     }
   }
+  // D214 v6 fix: 在 chip 后面追加 zero-width space 作光标锚点
+  //   浏览器 (尤其 WebView2) 在光标放在 non-editable chip 之后时, 经常 snap 到 chip 之前
+  //   (表现为"光标卡在两个 chip 中间, 需要手动按 End 才能到末尾"). 加一个零宽空格
+  //   让光标有可编辑目标可以落在它后面. 零宽空格是 0 宽字符, 视觉上不可见.
+  //   extractLogicalText 会 strip 它, 不影响 inputText 内容.
+  if (parts.length > 0 && parts[parts.length - 1].kind === 'chip') {
+    html += '&#x200B;';
+  }
   // 只有内容真正变了才写 (避免无谓重渲染)
   if (richInputRef.value.innerHTML !== html) {
     richInputRef.value.innerHTML = html;
@@ -236,6 +244,8 @@ function setCursorByTextOffset(offset: number): void {
 // 从 contentEditable 的当前 selection 计算 text offset
 // D214 bug fix: chip 用 data-text-length 记录 marker 实际长度, 累加时用它
 //   而不是 chip 显示文本长度 (display "@skill:x" ≠ marker "[[ref:skill:x]]")
+// D214 v6: 同时 strip zero-width space (renderRichInput 加的 cursor anchor), 让 offset
+//   跟 inputText 字符串位置 1:1 对应, 否则差 1 会让 setCursorByTextOffset 算错位置
 function getCursorOffsetInText(): number {
   if (!richInputRef.value) return inputText.value.length;
   const sel = window.getSelection();
@@ -246,17 +256,24 @@ function getCursorOffsetInText(): number {
   }
   const root = richInputRef.value;
   let total = 0;
+  // helper: text 节点去掉 zero-width space 后的可见长度
+  const visibleTextLen = (s: string): number => s.replace(/\u200B/g, '').length;
   function visit(node: Node, until: Node | null, untilOffset: number): boolean {
     if (node === until) {
       if (node.nodeType === Node.TEXT_NODE) {
-        total += untilOffset;
+        // until 是 text 节点: untilOffset 是 DOM 内的字符位置, 需要把 ZWSP 折算回 inputText 偏移
+        const text = node.textContent || '';
+        const zwspBefore = (text.slice(0, untilOffset).match(/\u200B/g) || []).length;
+        total += untilOffset - zwspBefore;
+        return true;
       } else if (node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).tagName === 'BR') {
         total += untilOffset;
+        return true;
       } else {
         for (let i = 0; i < untilOffset && i < node.childNodes.length; i++) {
           const c = node.childNodes[i];
           if (c.nodeType === Node.TEXT_NODE) {
-            total += (c.textContent || '').length;
+            total += visibleTextLen(c.textContent || '');
           } else if (c.nodeType === Node.ELEMENT_NODE) {
             const cel = c as HTMLElement;
             if (cel.classList && cel.classList.contains('pad-composer__ref-chip')) {
@@ -267,11 +284,11 @@ function getCursorOffsetInText(): number {
             }
           }
         }
+        return true;
       }
-      return true;
     }
     if (node.nodeType === Node.TEXT_NODE) {
-      total += (node.textContent || '').length;
+      total += visibleTextLen(node.textContent || '');
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement;
       if (el.classList && el.classList.contains('pad-composer__ref-chip')) {
@@ -654,11 +671,13 @@ async function pickSlashItem(item: SlashItem) {
 // D214 v3 bug fix: 用 innerText 提取会丢 chip marker (变成 "SKILL name ×" 字符串)
 //   改用 DOM walk, chip 元素用 marker 文本代替, 纯文本节点原样保留
 //   这样输入 `/` 后 chip 不会被 watch 重渲染抹掉
+// D214 v6: 同步 strip zero-width space (\u200B, renderRichInput 加的 cursor anchor),
+//   不让这个不可见字符进入 inputText → 避免污染 LLM prompt 和 user 气泡渲染
 function extractLogicalText(root: HTMLElement): string {
   let result = '';
   function visit(node: Node): void {
     if (node.nodeType === Node.TEXT_NODE) {
-      result += (node.textContent || '').replace(/\u00A0/g, ' ');
+      result += (node.textContent || '').replace(/\u00A0/g, ' ').replace(/\u200B/g, '');
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement;
       if (el.classList && el.classList.contains('pad-composer__ref-chip')) {
@@ -1353,10 +1372,11 @@ onMounted(() => {
 
 /* D214 Phase 3: contentEditable rich input
    - 跟 textarea 视觉一致, 但支持 inline chip
-   - :empty 伪元素实现 placeholder (contentEditable 不支持 placeholder 属性) */
+   - :empty 伪元素实现 placeholder (contentEditable 不支持 placeholder 属性)
+   - D214 v6: min-height 44→28px, 1 行高, 不需要 2 行的空 padding (之前用户反映留白太大) */
 .pad-composer__input-rich {
   /* 跟 textarea 完全一致的尺寸/排版, 让切换零视觉差 */
-  min-height: 44px;
+  min-height: 28px;
   max-height: 200px;
   overflow-y: auto;
   /* contentEditable 跟普通 div 一样, 需要 user-select: text 允许选中文本 */
@@ -1620,31 +1640,30 @@ onMounted(() => {
 }
 
 /* v0.4.7a: Composer / popover (skill / agent / mcp, 不含 builtin 22)
-   D214: 改 absolute 定位, 从输入框上方弹出, 跟 permission menu 一样浮在上面 */
+   D214: 改 absolute 定位, 从输入框上方弹出, 跟 permission menu 一样浮在上面
+   D214 v6: max-height 280→200px, padding 4→2px, 整体更紧凑 (用户反映留白太大) */
 .pad-composer__slash-popover {
   position: absolute;
   bottom: calc(100% + 6px);
   left: 0;
   right: 0;
-  max-height: 320px;
+  max-height: 200px;
   overflow-y: auto;
   background: var(--pad-card, #fff);
   border: 1px solid var(--pad-border, rgba(0,0,0,0.1));
   border-radius: var(--pad-radius-md, 8px);
   box-shadow: var(--pad-shadow-popover);
-  padding: 4px;
-  max-height: 280px;
-  overflow-y: auto;
+  padding: 2px;
 }
 .pad-composer__slash-empty {
-  padding: 16px;
+  padding: 12px;
   text-align: center;
   font-size: var(--pad-fs-12);
   color: var(--pad-fg-tertiary);
 }
-.pad-composer__slash-list { display: flex; flex-direction: column; gap: 2px; }
+.pad-composer__slash-list { display: flex; flex-direction: column; gap: 1px; }
 .pad-composer__slash-group-label {
-  padding: 6px 10px 2px;
+  padding: 4px 10px 1px;
   font-size: 10px;
   font-weight: var(--pad-fw-medium);
   color: var(--pad-fg-tertiary);
@@ -1654,14 +1673,14 @@ onMounted(() => {
 .pad-composer__slash-item {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  padding: 8px 12px;
+  padding: 5px 10px;
   font-size: var(--pad-fs-12);
   color: var(--pad-fg-secondary);
   background: transparent;
   border: none;
-  border-radius: var(--pad-radius-sm, 6px);
+  border-radius: var(--pad-radius-sm, 5px);
   cursor: pointer;
   text-align: left;
   transition: background var(--pad-dur-fast) ease;
@@ -1673,15 +1692,16 @@ onMounted(() => {
 .pad-composer__slash-item.is-placeholder { opacity: 0.5; cursor: not-allowed; }
 .pad-composer__slash-item.is-placeholder:hover { background: transparent; }
 
-/* D214: Notion/Slack 风格 — 左侧图标 + 右侧 vertical stack */
+/* D214: Notion/Slack 风格 — 左侧图标 + 右侧 vertical stack
+   D214 v6: icon 28→22px, 让 item 整体高度更紧凑 (单 item 35px → ~28px) */
 .pad-composer__slash-item-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
   flex-shrink: 0;
-  border-radius: 6px;
+  border-radius: 5px;
   background: var(--pad-bg-secondary, rgba(0,0,0,0.04));
   color: var(--pad-fg-tertiary);
   margin-top: 1px;
@@ -1689,12 +1709,12 @@ onMounted(() => {
 .pad-composer__slash-item-body {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
   min-width: 0;
   flex: 1;
 }
 .pad-composer__slash-item-name {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: var(--pad-fw-medium, 500);
   color: var(--pad-fg-primary);
   line-height: 1.3;
@@ -1703,7 +1723,7 @@ onMounted(() => {
   text-overflow: ellipsis;
 }
 .pad-composer__slash-item-desc {
-  font-size: 11px;
+  font-size: 10px;
   color: var(--pad-fg-tertiary);
   line-height: 1.3;
   white-space: nowrap;
@@ -1731,7 +1751,7 @@ onMounted(() => {
 .pad-composer__slash-hint {
   display: flex;
   gap: 12px;
-  padding: 6px 10px;
+  padding: 4px 10px;
   border-top: 1px solid var(--pad-border-subtle, rgba(0,0,0,0.06));
   font-size: 10px;
   color: var(--pad-fg-tertiary);
