@@ -1,7 +1,7 @@
 # ADR-0015: Skills / Slash Command 模块
 
 - **状态**: Accepted (v0.6.3-rc1 含 D214 完整化增量)
-- **日期**: 2026-08-19 (D214 增量 2026-08-22)
+- **日期**: 2026-08-19 (D214 增量 2026-08-22, v8.2 修 2026-08-22)
 - **Type**: Functional
 - **Module**: Skills
 - **决策者**: user
@@ -95,6 +95,40 @@
 | Chat list padding-bottom 120→24px | ✅ | 短消息不再大片空白 |
 | Session 切换自动滚底 (rAF + setTimeout 50ms 三重保险) | ✅ | 之前 nextTick 太早 scrollHeight=0 |
 
+### D214 v8 UI 优化 (v0.6.3-rc1, commit 01e310f)
+
+| 功能 | 状态 | 备注 |
+|---|---|---|
+| Composer max-height 200→400px + `white-space: pre-wrap` + `overflow-wrap: anywhere` | ✅ | 多 chip + 长文本不溢出, 手动换行也保留 |
+| Slash popover `scrollActiveItemIntoView()` (键盘 ↑↓ 选中项滚进可视区) | ✅ | `scrollIntoView({block: 'nearest'})` 只滚最小距离, 顶/底已在内就不滚, 避免抖动 |
+| ChipPreview 剥 frontmatter 走 `MarkdownContent` 渲染 | ✅ | 跟 chat 气泡的 markdown 渲染一致, 预览所见即所得 |
+| ChipPreview body JSON 走 pretty print | ✅ | `JSON.stringify(parsed, null, 2)`, 读 tool/mcp body 更清晰 |
+
+### D214 v8.1 UI polish (v0.6.3-rc1, commit c636049)
+
+| 功能 | 状态 | 备注 |
+|---|---|---|
+| ChipPreview body 整体可滚 (meta + content 一起滚) | ✅ | 之前 content 自己 overflow: auto, meta 不动, 双层 scrollbar 体验差. 改成整个 body 一个 scrollbar |
+| ChipPreview popover max-height 240→360px | ✅ | 给更多内容留空间, 配合 body 整体滚 |
+| Composer min-height 28→36px | ✅ | 1 行高, 上下呼吸更舒展 |
+| `watch(inputText)` 加 `autoResize()` | ✅ | 外部修改 inputText 后, composer 高度自适应 |
+| `insertMarkerAtCursor` 末尾补 `autoResize()` | ✅ | 加 chip 后, composer 高度即时跟新内容 |
+
+### D214 v8.2 chat 气泡 chip preview 启动时序修 (v0.6.3-rc1, commit 3c6c646)
+
+**问题**: 启动程序后立即发 chat, 气泡里如果带 chip, 点击会报 "Skill 不存在: xxx" (同 tool/mcp). 在输入框 `/` 选过 chip 后再点, 就正常.
+
+**根因**: `useChipPreview.fetchRefBody` 走 `skillsStore.skills.find()` / `userToolsStore.tools.find()` / `mcpServersStore.servers.find()` 找 entry, 但 FE 启动时不一定先访问 Skills/Tools/MCP tab, 3 个 store 还没从 Tauri 拉数据, 数组是空的, find 直接 miss → throw. 被动刷新链只有 `Composer.vue` 的 `ensureResourcesLoaded` (slash popover 打开时), chat 气泡里的历史 chip 走不到这条链.
+
+**修法 (结构层面)**: `fetchRefBody` 3 个 if 分支, find miss 时主动调对应 store 的 refresh, 再 find 一次, 仍找不到才 throw. 跟 `ensureResourcesLoaded` 同 pattern, 不引入新机制.
+
+| 功能 | 状态 | 备注 |
+|---|---|---|
+| `fetchRefBody` skill 分支 miss 后调 `skillsStore.refreshFromTauri()` | ✅ | refresh 失败 console.warn 不 throw, 让后续 "Skill 不存在" 报准 |
+| `fetchRefBody` tool 分支 miss 后调 `userToolsStore.refresh()` | ✅ | 同上 |
+| `fetchRefBody` mcp 分支 miss 后调 `mcpServersStore.refresh()` | ✅ | 同上 |
+| 3 类资源对称处理, 通用机制不硬编码 | ✅ | 不引入新 store, 不改 store 签名, 仅在 composable 兜底 |
+
 ## 核验方法 (端到端)
 
 ### Skill 加载 (P2)
@@ -140,6 +174,24 @@
 3. user 上句引用 huashu-design, 下句"再分析一下" (没 chip) → LLM 还能看到 huashu-design 内容
    (走 `<recent_refs>` section, D214 v7 隐式续接支持)
 
+### D214 v8 UI 优化 (01e310f)
+1. Composer 加 5-8 个 chip + 长文字 → composer 自动撑高, 不溢出屏幕
+2. Slash popover 键盘 ↑↓ 选中项 → 选中项始终在可视区, 不滚过头
+3. 点 skill chip → preview 浮层里 skill frontmatter 剥掉, 只显示正文 (跟 chat 一致渲染)
+4. 点 tool/mcp chip → JSON 格式化显示 (缩进 2 空格)
+
+### D214 v8.1 UI polish (c636049)
+1. 点 chip → preview body 一个 scrollbar (meta + content 整体滚, 不再双层 scrollbar)
+2. Composer 加 chip → composer 高度即时跟新内容 (insertMarkerAtCursor 末尾 autoResize)
+3. 空 Composer → 高度 36px (比 28px 舒展)
+4. 外部清空 inputText → composer 高度回到 min
+
+### D214 v8.2 chat 气泡 chip 启动时序修 (3c6c646)
+1. 启动程序 → 不访问 Skills/Tools/MCP tab → 直接发带 chip 的 chat
+2. 点 chat 气泡里的 chip → 浮层正常显示 body (不报 "Skill 不存在")
+3. F12 console 看不到 `[useChipPreview] xxx refresh failed` warn (正常拉到了)
+4. 第二次点同 chip → 仍然正常 (refresh 一次后 store 已有数据, 不再走 refresh 分支)
+
 ## 已知问题 / 技术债
 
 - 🟡 **D165 system prompt 不可动态改**: 切 skill / 改 skill 内容要重启 sidecar (~150-300ms). `<skill_realtime>` 已在 v0.6.3-rc1 走 user message 注入缓解, 但 system prompt 段仍需重启
@@ -166,6 +218,23 @@
 - ✅ Chip CSS 提到全局 (assets/styles/chip.css, Composer/ChatMessage 重复规则删掉)
 - ✅ Rust 端 ref body 内存 cache (mtime 校验 + write/delete 主动 invalidate)
 - ✅ Last-mentioned tracking (chat store 维护 recentRefs, 隐式续接 inject recent_refs)
+
+### P0 (v0.6.3-rc1 已完成, 01e310f D214 v8)
+- ✅ Composer max-height 200→400px + pre-wrap + overflow-wrap (多 chip 不溢出)
+- ✅ Slash popover 键盘 ↑↓ 选中项 `scrollIntoView({block: 'nearest'})` 滚进可视区
+- ✅ ChipPreview 剥 frontmatter 走 MarkdownContent 渲染 (跟 chat 一致)
+- ✅ ChipPreview JSON body pretty print (2 空格缩进)
+
+### P0 (v0.6.3-rc1 已完成, c636049 D214 v8.1)
+- ✅ ChipPreview body 整体可滚 (meta + content 一起滚, 取消 content 自己的 overflow, 避免双层 scrollbar)
+- ✅ ChipPreview popover max-height 240→360px
+- ✅ Composer min-height 28→36px
+- ✅ `watch(inputText)` 加 `autoResize()` (外部修改 inputText 高度跟)
+- ✅ `insertMarkerAtCursor` 末尾补 `autoResize()` (加 chip 高度即时跟)
+
+### P0 (v0.6.3-rc1 已完成, 3c6c646 D214 v8.2)
+- ✅ 修 chat 气泡 chip 启动时序: `useChipPreview.fetchRefBody` find miss 时主动 refresh store 再 find
+  (3 类资源 skills/tools/mcp 对称处理, 跟 Composer.vue `ensureResourcesLoaded` 同 pattern)
 
 ### P1 (v0.7 候选)
 - Last-mentioned "短消息才 inject" 启发式 (降 token 成本)
