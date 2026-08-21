@@ -18,7 +18,10 @@
  *   - 编辑时跟 Tools tab 一样暴露 JSON textarea (高手 / 调试用)
  *
  * sidecar 启动时自动加载 MCP server 配置 + spawn + 拉 tools/list 转 Pi SDK ToolDefinition
- *   (工具名加 mcp_<server>_<tool> 前缀). **不**支持热重载 (P1.5 之后再说), 改完需重启 sidecar.
+ *   (工具名加 mcp_<server>_<tool> 前缀).
+ * v0.6.3-rc1 P2-2: **支持热重载**, sidecar fs.watch 两个 config dir, 改完 300ms debounce
+ *   自动 close + re-spawn. LLM 下一轮 turn 看到新 tool. 不重建 Pi SDK agent session,
+ *   不丢对话状态.
  */
 import { ref, computed, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
@@ -377,7 +380,8 @@ async function refreshAndShowPath() {
         <code>&lt;agentDir&gt;/mcp/*.json</code> (workspace 优先).
         sidecar 启动时自动加载 + spawn 每个 server, 走 <code>@modelcontextprotocol/sdk</code>
         拉 tools/list 转 Pi SDK ToolDefinition (工具名加 <code>mcp_&lt;server&gt;_&lt;tool&gt;</code> 前缀).
-        <strong>修改后需重启 sidecar 生效 (不支持热重载)</strong>.
+        <strong>v0.6.3-rc1 P2-2 起支持热重载</strong>: 改完 JSON 文件 sidecar 自动
+        close + re-spawn (300ms debounce), LLM 下一轮 turn 看到新 tool, 不丢对话状态.
       </p>
     </div>
 
@@ -773,8 +777,9 @@ async function refreshAndShowPath() {
       <Info :size="12" :stroke-width="1.75" />
       <span>
         MCP (Model Context Protocol) 是 Anthropic 提出的开放标准, 让 LLM 跟外部工具/数据源对话.
-        本项目通过官方 SDK 集成, 每个 MCP server 是独立子进程, 走 JSON-RPC over stdio.
-        修改配置后需重启 sidecar 生效 (侧边栏切 workspace / 退出 app 再开, 都会触发 sidecar 重启).
+        本项目通过官方 SDK 集成, 每个 MCP server 是独立子进程, 走 JSON-RPC over stdio
+        (或 HTTP/SSE 长连接, P2-1.8 起).
+        <strong>改完配置自动热重载</strong> (P2-2 起, 300ms debounce, 不需重启 sidecar).
       </span>
     </div>
   </div>

@@ -109,6 +109,149 @@ import { loadSkills, formatSkillsForPrompt } from '@earendil-works/pi-coding-age
 //   用官方 SDK (@modelcontextprotocol/sdk) 走 JSON-RPC over stdio.
 //   跟 P1-5 user tool 走同一个 customTools path (merge 到 LLM 可见的 tools list).
 import { McpServerClient, McpServerError, jsonSchemaToTypeBox } from './mcpClient.mjs';
+// v0.6.3-rc1 P2-2: MCP config dir 热重载 watcher (fs.watch + debounce)
+import { watchMcpConfigDirs } from './mcpWatcher.mjs';
+
+// v0.6.3-rc1 P2-2: MCP subsystem 模块级状态, 让热重载 callback 能访问
+//   - clients: 当前运行的 McpServerClient[] (cleanup 跟 reload 用)
+//   - customTools: 当前 wrap 好的 Pi SDK ToolDefinition[] (createAgentSession 拼 allCustomTools 用)
+//   - results: 本次 (re)load 的结果, 含每个 server 的 status / reason (给后续 FE 反馈用)
+//   - watcherClose: 关闭 watcher 的 fn (sidecar 退出时调)
+//   - workspacePath / agentDir: reload 时需要重新读 config, 保留 init 时的路径
+const mcpState = {
+  clients: [],
+  customTools: [],
+  results: [],
+  watcherClose: null,
+  workspacePath: null,
+  agentDir: null,
+};
+
+/**
+ * v0.6.3-rc1 P2-2: 抽 initMcpSubsystem — 之前是 createAgentSession 内联逻辑, 现在抽出来
+ *   给 hot reload 复用. 读 configs → spawn → wrap, 返回完整结果.
+ * 错误降级: 单个 server start 失败不影响其它, 也不影响 sidecar 自身 (跟 P2-1 一致).
+ */
+async function initMcpSubsystem(workspacePath, agentDir) {
+  const configs = loadMcpServerConfigs(workspacePath, agentDir);
+  const results = [];
+  const clients = [];
+  for (const config of configs) {
+    const client = new McpServerClient(config);
+    try {
+      await client.start();
+      clients.push(client);
+      results.push({
+        name: config.name,
+        status: 'started',
+        toolCount: client.toolCount,
+        durationMs: client.startDurationMs,
+      });
+      console.error(`[sidecar] P2-1: MCP server '${config.name}' started (${client.toolCount} tools, ${client.startDurationMs}ms)`);
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      results.push({ name: config.name, status: 'failed', reason });
+      console.error(`[sidecar] P2-1: MCP server '${config.name}' failed to start, skip: ${reason}`);
+    }
+  }
+  const customTools = wrapMcpToolsAsCustomTools(clients);
+  if (customTools.length > 0) {
+    console.error(`[sidecar] P2-1: ${customTools.length} MCP tool(s) merged into customTools: [${customTools.map((t) => t.name).join(', ')}]`);
+  }
+  return { clients, customTools, results };
+}
+
+/**
+ * v0.6.3-rc1 P2-2: 热重载 MCP — 关所有 client + 重 init + 更新 mcpState.
+ *
+ * 关键: 不重建 Pi SDK agent session, 保留对话状态. Pi SDK 0.84.2 不支持 mid-conversation
+ *   改 tool 白名单, 新的 tool 会在 LLM 下一轮 turn 看到 (跟 Claude Code / Cursor 同款体验).
+ * 老 session 持有的 customTools 引用不变, 但我们替换 mcpState.customTools 后,
+ *   下次 wrapMcpToolsAsCustomTools 被调时会用新引用 (也支持运行时重 wrap).
+ *
+ * 错误降级: 新一轮 init 失败的 server 不影响已经运行好的 (只是不更新其引用).
+ *   旧的 clients 数组先关再换, 避免泄漏 stdio 子进程 / HTTP 长连接.
+ *
+ * 并发保护: 用 mcpState.reloadInProgress 标志, 防止上一个 reload 没跑完下一个又进来
+ *   (e.g. user 连改 2 个文件, debounce 300ms 内可能触发 2 次). 第二个进来直接 skip,
+ *   已经被 debounce 合并的 1 次就够了.
+ */
+let reloadInProgress = false;
+async function reloadMcpSubsystem() {
+  if (reloadInProgress) {
+    console.error('[sidecar] P2-2: reload already in progress, skip (concurrent trigger)');
+    return;
+  }
+  reloadInProgress = true;
+  const t0 = Date.now();
+  console.error('[sidecar] P2-2: MCP config change detected, reloading...');
+
+  try {
+    // 1. 关所有现有 client (best effort, 不 throw)
+    const oldClients = mcpState.clients;
+    for (const client of oldClients) {
+      try {
+        await client.stop();
+      } catch (e) {
+        console.error(`[sidecar] P2-2: stop old client '${client.config.name}' failed (ignored):`, e instanceof Error ? e.message : String(e));
+      }
+    }
+
+    // 2. 重新 init
+    const { clients, customTools, results } = await initMcpSubsystem(mcpState.workspacePath, mcpState.agentDir);
+
+    // 3. 更新 module-level state
+    mcpState.clients = clients;
+    mcpState.customTools = customTools;
+    mcpState.results = results;
+
+    const elapsed = Date.now() - t0;
+    const started = results.filter((r) => r.status === 'started').length;
+    const failed = results.filter((r) => r.status === 'failed');
+    const oldNames = new Set(oldClients.map((c) => c.config.name));
+    const newNames = new Set(clients.map((c) => c.config.name));
+    const removed = [...oldNames].filter((n) => !newNames.has(n));
+    const added = [...newNames].filter((n) => !oldNames.has(n));
+    console.error(
+      `[sidecar] P2-2: reload done in ${elapsed}ms — ${started} started, ${failed.length} failed, ` +
+      `${added.length} added [${added.join(', ') || '-'}], ${removed.length} removed [${removed.join(', ') || '-'}]`
+    );
+    if (failed.length > 0) {
+      for (const f of failed) {
+        console.error(`[sidecar] P2-2:   ❌ ${f.name}: ${f.reason}`);
+      }
+    }
+    // 重要: LLM 下一轮 turn 才能看到新 tool (Pi SDK 0.84.2 不支持 mid-conversation 改 tool 白名单).
+    // 旧 tool 在 LLM tool 白名单里仍可见 (如果它原本是 started 状态), 但 client 已关, 调用会失败.
+    // 给 user 一个清晰提示 — 改完文件, 下一条 prompt 生效.
+    if (added.length > 0 || removed.length > 0) {
+      console.error(`[sidecar] P2-2: tool list changed (added=${added.length}, removed=${removed.length}), LLM will see updates on next turn`);
+    }
+  } catch (e) {
+    console.error('[sidecar] P2-2: reload failed:', e instanceof Error ? e.message : String(e));
+  } finally {
+    reloadInProgress = false;
+  }
+}
+
+/**
+ * v0.6.3-rc1 P2-2: 装 fs watcher, 触发 reload. 在 createAgentSession 末尾调一次.
+ *   - 第一次调用时 (sidecar 启动), 路径为 initMcpSubsystem 时用过的
+ *   - reload 内部会自己读 mcpState.workspacePath / agentDir
+ */
+function installMcpWatcher() {
+  // 先关旧的 (理论上只有 createAgentSession 走一次, 防御)
+  if (mcpState.watcherClose) {
+    try { mcpState.watcherClose(); } catch { /* ignore */ }
+  }
+  const handle = watchMcpConfigDirs(mcpState.workspacePath, mcpState.agentDir, () => {
+    // fire-and-forget: watcher callback 是同步的, reload 是 async
+    reloadMcpSubsystem().catch((e) => {
+      console.error('[sidecar] P2-2: reload failed:', e instanceof Error ? e.message : String(e));
+    });
+  });
+  mcpState.watcherClose = handle.close;
+}
 // v0.4.5: Pi SDK 0.84.2 BUILTIN_SLASH_COMMANDS 不在主入口 export, 走 subpath 不稳
 //   (package.json 没声明 ./core/* exports). 复制 21 个常量过来, 跟 Pi SDK 0.84.2 一致.
 //   源: pi-sdk/packages/coding-agent/src/core/slash-commands.ts
@@ -479,27 +622,21 @@ intent across the session is still part of the conversation.
   // 2026-08-21 P2-1: 加载 MCP servers (通用框架, 接任意 MCP server).
   //   跟 user tool 走同一个 customTools path, LLM 看到 mcp_<server>_<tool> 名字 + (MCP: server) 标识.
   //   错误降级: 1 个 server 启动失败不影响其它 server, 不影响 sidecar 自身.
-  const mcpConfigs = loadMcpServerConfigs(workspacePath, agentDir);
-  const mcpClients = [];
-  for (const config of mcpConfigs) {
-    const client = new McpServerClient(config);
-    try {
-      await client.start();
-      mcpClients.push(client);
-      console.error(`[sidecar] P2-1: MCP server '${config.name}' started (${client.toolCount} tools, ${client.startDurationMs}ms)`);
-    } catch (e) {
-      // 降级: 这个 server 跳过, 不影响其它 server
-      console.error(`[sidecar] P2-1: MCP server '${config.name}' failed to start, skip:`, e instanceof Error ? e.message : String(e));
-    }
-  }
-  // 成功 start 的 clients → wrap 成 Pi SDK ToolDefinition
-  const mcpCustomTools = wrapMcpToolsAsCustomTools(mcpClients);
-  if (mcpCustomTools.length > 0) {
-    console.error(`[sidecar] P2-1: ${mcpCustomTools.length} MCP tool(s) merged into customTools: [${mcpCustomTools.map((t) => t.name).join(', ')}]`);
-  }
+  // v0.6.3-rc1 P2-2: 抽 initMcpSubsystem + 装 watcher (hot reload 改完文件自动生效)
+  mcpState.workspacePath = workspacePath;
+  mcpState.agentDir = agentDir;
+  const { clients: mcpClients, customTools: mcpCustomTools, results: mcpResults } = await initMcpSubsystem(workspacePath, agentDir);
+  mcpState.clients = mcpClients;
+  mcpState.customTools = mcpCustomTools;
+  mcpState.results = mcpResults;
 
   // 注册 sidecar 关闭时 stop 所有 MCP clients (SIGTERM 子进程, 防僵尸)
-  registerMcpCleanup(mcpClients);
+  // P2-2: 不再传 fixed clients, registerMcpCleanup 内部读 mcpState.clients
+  //   (reload 后的 clients 也要在 sidecar 关闭时被 stop)
+  registerMcpCleanup();
+
+  // P2-2: 装 fs watcher, config 改完自动 reload
+  installMcpWatcher();
 
   // 合并 user tool + MCP tool 成一个 customTools 列表
   const allCustomTools = [...userTools, ...mcpCustomTools];
@@ -727,10 +864,32 @@ function tryParseMcpServerJson(filePath, scope) {
     console.error(`[sidecar] P2-1: ${filePath} 缺 'name' 字段, 跳过`);
     return null;
   }
-  if (typeof parsed.command !== 'string' || !parsed.command) {
-    console.error(`[sidecar] P2-1: ${filePath} 缺 'command' 字段, 跳过`);
+  // v0.6.3-rc1 P2-1.8: type 决定必填字段
+  //   - stdio (default): command 必填
+  //   - http / sse:     url 必填 (http:// 或 https:// 开头)
+  // 之前只校验 command, http/sse config 会被这里拒绝. P2-1.8 修.
+  const serverType = (typeof parsed.type === 'string') ? parsed.type : 'stdio';
+  if (!['stdio', 'http', 'sse'].includes(serverType)) {
+    console.error(`[sidecar] P2-1.8: ${filePath} type 必须是 'stdio' | 'http' | 'sse', got '${parsed.type}', 跳过`);
     return null;
   }
+  if (serverType === 'stdio') {
+    if (typeof parsed.command !== 'string' || !parsed.command) {
+      console.error(`[sidecar] P2-1: ${filePath} type=stdio 缺 'command' 字段, 跳过`);
+      return null;
+    }
+  } else {
+    // http / sse
+    if (typeof parsed.url !== 'string' || !parsed.url) {
+      console.error(`[sidecar] P2-1.8: ${filePath} type=${serverType} 缺 'url' 字段, 跳过`);
+      return null;
+    }
+    if (!parsed.url.startsWith('http://') && !parsed.url.startsWith('https://')) {
+      console.error(`[sidecar] P2-1.8: ${filePath} type=${serverType} 的 'url' 必须是 http:// 或 https:// 开头, got '${parsed.url}', 跳过`);
+      return null;
+    }
+  }
+
   // 校验 name 跟 builtin tool 不重 (跟 P1-5 一样, 防 mcp_<name>_<tool> 前缀撞 builtin)
   // 这里只查 mcp server 名字本身, 实际 LLM 看到的 tool 名字是 mcp_<server>_<tool>, 不会撞
   // 但 server name 也不能跟 builtin 重, 否则 tools 列表里 mcp_<server>_<tool> 会跟 builtin 同名前缀
@@ -740,7 +899,10 @@ function tryParseMcpServerJson(filePath, scope) {
   }
   return {
     name: parsed.name,
-    command: parsed.command,
+    type: serverType,
+    // stdio 时传 command, http/sse 时为 undefined (McpServerClient 按 type 分支取字段)
+    command: typeof parsed.command === 'string' ? parsed.command : undefined,
+    url: typeof parsed.url === 'string' ? parsed.url : undefined,
     args: Array.isArray(parsed.args) ? parsed.args : undefined,
     env: (parsed.env && typeof parsed.env === 'object') ? parsed.env : undefined,
     cwd: typeof parsed.cwd === 'string' ? parsed.cwd : undefined,
@@ -838,11 +1000,19 @@ function mcpCallResultToAgentToolResult(result) {
  * 2026-08-21 P2-1: 注册 sidecar 关闭时 stop 所有 MCP clients (SIGTERM 子进程, 防僵尸).
  *   走 process.on('exit' / 'SIGTERM' / 'SIGINT') 三个事件, 任一触发就 stop 所有 client.
  *   best-effort: stop 失败不抛 (子进程可能已死), exit 钩子同步执行不能 await, 用 Promise.race 加 timeout.
+ *
+ * v0.6.3-rc1 P2-2: 不再接 clients 参数, 内部读 mcpState.clients (保证 reload 后的 clients
+ *   也会在 sidecar 关闭时被 stop). 同时关掉 fs watcher 防 fd 泄漏.
  */
-function registerMcpCleanup(clients) {
-  if (clients.length === 0) return;
+function registerMcpCleanup() {
   const cleanup = () => {
-    for (const client of clients) {
+    // 关 fs watcher
+    if (mcpState.watcherClose) {
+      try { mcpState.watcherClose(); } catch { /* ignore */ }
+      mcpState.watcherClose = null;
+    }
+    // stop 所有 client
+    for (const client of mcpState.clients) {
       try {
         // exit 钩子是同步, 不能 await. SDK close 内部 await child.kill, 但这里 fire-and-forget
         client.stop().catch(() => {});
@@ -868,7 +1038,7 @@ function registerMcpCleanup(clients) {
     cleanup();
     process.exit(0);
   });
-  console.error(`[sidecar] P2-1: registered cleanup for ${clients.length} MCP client(s) (SIGTERM/SIGINT/SIGHUP/exit)`);
+  console.error(`[sidecar] P2-1: registered cleanup for MCP clients + watcher (SIGTERM/SIGINT/SIGHUP/exit)`);
 }
 
 function tryParseUserToolJson(filePath, builtinToolDefs) {
