@@ -83,6 +83,12 @@ export function useChipPreview(): {
 /**
  * fetchRefBody — 按 kind 走对应 store + Tauri command 拉 body
  *   集中在这里, 避免在 click handler 里堆一堆 if/else.
+ *
+ * D214 v8.2: 启动时序问题 — store 可能还没从 sidecar / Tauri 拉数据 (FE 启动
+ *   不一定先访问 Skills/Tools/MCP tab), 这时如果直接点 chat 气泡里的历史
+ *   chip, 会因为 find 不到对应的 entry 抛 "X 不存在". 修法: find 失败时
+ *   主动调对应 store 的 refresh 一次, 再 find, 仍找不到才 throw.
+ *   这样 chat 历史里的 chip 不需要 user 先在输入框 "/" 触发被动刷新.
  */
 async function fetchRefBody(kind: 'skill' | 'tool' | 'mcp', name: string): Promise<string> {
   // 动态 import 避免循环依赖 (store import tauri, tauri 不依赖 store)
@@ -94,7 +100,12 @@ async function fetchRefBody(kind: 'skill' | 'tool' | 'mcp', name: string): Promi
 
   if (kind === 'skill') {
     const skillsStore = useSkillsStore();
-    const skill = skillsStore.skills.find((s: any) => s.name === name);
+    let skill = skillsStore.skills.find((s: any) => s.name === name);
+    if (!skill) {
+      // 启动时 store 是空, 主动拉一次 (跟 Composer.vue ensureResourcesLoaded 同 pattern)
+      try { await skillsStore.refreshFromTauri(); } catch (e) { console.warn('[useChipPreview] skills refresh failed:', e); }
+      skill = skillsStore.skills.find((s: any) => s.name === name);
+    }
     if (!skill) throw new Error(`Skill 不存在: ${name}`);
     const parsed = await piTauri.readSkillFile(skill.filePath);
     // skill body: frontmatter 下面那部分 (raw 去掉 yaml 头)
@@ -104,7 +115,11 @@ async function fetchRefBody(kind: 'skill' | 'tool' | 'mcp', name: string): Promi
   if (kind === 'tool') {
     const userToolsStore = useUserToolsStore();
     const sessionStore = useSessionStore();
-    const tool = userToolsStore.tools.find((t: any) => t.name === name);
+    let tool = userToolsStore.tools.find((t: any) => t.name === name);
+    if (!tool) {
+      try { await userToolsStore.refresh(); } catch (e) { console.warn('[useChipPreview] userTools refresh failed:', e); }
+      tool = userToolsStore.tools.find((t: any) => t.name === name);
+    }
     if (!tool) throw new Error(`Tool 不存在: ${name}`);
     return await piTauri.readUserTool({
       scope: tool.scope,
@@ -117,7 +132,11 @@ async function fetchRefBody(kind: 'skill' | 'tool' | 'mcp', name: string): Promi
   if (kind === 'mcp') {
     const mcpServersStore = useMcpServersStore();
     const sessionStore = useSessionStore();
-    const mcp = mcpServersStore.servers.find((s: any) => s.name === name);
+    let mcp = mcpServersStore.servers.find((s: any) => s.name === name);
+    if (!mcp) {
+      try { await mcpServersStore.refresh(); } catch (e) { console.warn('[useChipPreview] mcpServers refresh failed:', e); }
+      mcp = mcpServersStore.servers.find((s: any) => s.name === name);
+    }
     if (!mcp) throw new Error(`MCP server 不存在: ${name}`);
     return await piTauri.readMcpServer({
       scope: mcp.scope,
