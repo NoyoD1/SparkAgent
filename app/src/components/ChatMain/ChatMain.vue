@@ -221,7 +221,15 @@ watch(
   () => {
     isNearBottom.value = true;
     showScrollToBottom.value = false;
-    nextTick(() => scrollToBottom(false));
+    // D214 v6: 用 requestAnimationFrame + setTimeout 双保险, 等新 session 的消息真的
+    //   渲染完再 scroll-to-bottom. 之前 nextTick 太快, scrollHeight 还是 0, 滚不动.
+    //   (用户反馈: "每次点击 session 应该在最底部, 而不是最顶部")
+    const doScroll = () => scrollToBottom(false);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setTimeout(doScroll, 50);
+      });
+    });
   },
 );
 
@@ -458,8 +466,11 @@ function jumpToMessage(messageId: string) {
   overflow-y: auto;
   /* v0.3.8.7: padding-right 10px, 让浏览器原生滚动条不贴 ResizeHandle 中线,
    * 避免鼠标在两者之间无法选中滚动条.
-   * (list-inner 是 max-width 880px margin 0 auto, 居中逻辑不受影响) */
-  padding: 16px 10px 120px 0;
+   * (list-inner 是 max-width 880px margin 0 auto, 居中逻辑不受影响)
+   * D214 v6: padding-bottom 120→24px. 之前 120 是为了"最后消息不被 composer 盖住",
+   *   但 120 太大会让短消息 (1-2 条) 的 chat 出现大片空白区, 用户体验差.
+   *   composer-area 自带 12px padding, 24px + 12px = 36px 总间距, 足够视觉分隔. */
+  padding: 16px 10px 24px 0;
 }
 .pad-chatmain__list-inner {
   display: flex;

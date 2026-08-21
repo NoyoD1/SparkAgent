@@ -632,7 +632,10 @@ function closeSlashPopover() {
 //   旧实现 "/" 用 lastNl+1, 单行场景 (chip + text + /skill2) 会把整行前面全删
 //   (issue 3: 第二个 slash 覆盖第一个 chip). 统一用 lastIndexOf(trigger),
 //   跟 getSlashQuery 保持一致 — trigger char 前面不管什么字符都放行.
-function insertMarkerAtCursor(marker: string): void {
+// D214 v6 修: 用 requestAnimationFrame 等 DOM 真的渲染完再 setCursor, 避免 watch 的
+//   renderRichInput 重渲染 innerHTML 把光标位置重置. setCursor 内部用 setStartAfter(lastChip)
+//   最直接放法, 不依赖 setCursorByTextOffset 的 offset 算 (WebView2 在 chip 后 snap 光标).
+async function insertMarkerAtCursor(marker: string): Promise<void> {
   const text = inputText.value;
   const cursor = getCursorOffsetInText();
   const before = text.slice(0, cursor);
@@ -643,14 +646,41 @@ function insertMarkerAtCursor(marker: string): void {
     if (lastTrigger >= 0) replaceFrom = lastTrigger;
   }
   const newText = text.slice(0, replaceFrom) + marker + text.slice(cursor);
+  const targetOffset = replaceFrom + marker.length;
   inputText.value = newText;
   closeSlashPopover();
-  nextTick(() => {
-    if (richInputRef.value) {
-      richInputRef.value.focus();
-      setCursorByTextOffset(replaceFrom + marker.length);
+  // 等 watch 触发 → renderRichInput 跑完 → 浏览器把 DOM 真的渲染出来
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  if (!richInputRef.value) return;
+  richInputRef.value.focus();
+  // D214 v6 修 cursor 卡中间: 优先用 setStartAfter(lastChip) 直接放光标
+  //   跨过 non-editable chip 后的 snap 问题 (WebView2 在 setCursorByTextOffset 算的
+  //   parent offset N 之后, 仍 snap 到 chip 之前). 拿所有 chip 找最后一个, 直接
+  //   range.setStartAfter. 如果 marker 不在末尾 (用户后面还有文字), 退回到 setCursorByTextOffset.
+  const chips = Array.from(richInputRef.value.querySelectorAll('.pad-composer__ref-chip'));
+  const sel = window.getSelection();
+  if (sel && chips.length > 0) {
+    // 算出最后一个 chip 在 inputText 中的位置, 看 targetOffset 是不是在它之后
+    //   (即 marker 真的是最后一个, 后面没有别的文字)
+    let lastChipInputEnd = 0;
+    for (const c of chips) {
+      const len = parseInt((c as HTMLElement).dataset.textLength || '0', 10);
+      lastChipInputEnd += len;
     }
-  });
+    if (targetOffset === lastChipInputEnd) {
+      // 真的在最后一个 chip 后面 → 用 setStartAfter 直接放 (最可靠)
+      const range = document.createRange();
+      const lastChip = chips[chips.length - 1] as HTMLElement;
+      range.setStartAfter(lastChip);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return;
+    }
+  }
+  // marker 后面还有文字 (例如 user 输入了 `chip1 /test2 hello` → 选 chip 后是
+  //   `chip1 chip2 hello`, cursor 应在 chip2 后但在 hello 前), 走 offset 算法
+  setCursorByTextOffset(targetOffset);
 }
 
 async function pickSlashItem(item: SlashItem) {
@@ -664,7 +694,7 @@ async function pickSlashItem(item: SlashItem) {
   }
   // D214: 统一 marker 格式 [[ref:kind:name]], send 时按 kind 解析
   const marker = `[[ref:${item.kind}:${item.name}]]`;
-  insertMarkerAtCursor(marker);
+  await insertMarkerAtCursor(marker);
   console.log(`[Composer / popover] ${item.kind} reference inserted: ${item.name}`);
 }
 
