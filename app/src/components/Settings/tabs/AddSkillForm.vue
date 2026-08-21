@@ -1,6 +1,10 @@
 <script setup lang="ts">
 /**
- * AddSkillForm — v0.4.4 Skills "添加自定义" form
+ * AddSkillForm — v0.4.4 Skills "添加/编辑" form (P0-1 edit mode)
+ *
+ * v0.4.4: 创建模式 (create mode)
+ * v0.5.0 P0-1: 编辑模式 (edit mode) — 通过 initialSkill prop 传入已有 skill,
+ *   读文件 body, 预填表单, 提交走同一 writeSkillFile (幂等), emit 'updated'.
  *
  * 走 Pi SDK 0.84.2 SKILL.md 格式 (frontmatter 解析). 收集:
  *   - name (a-zA-Z0-9._-)  → 写文件时用作文件名
@@ -8,25 +12,33 @@
  *   - body                  → frontmatter 之后的所有 markdown 内容
  *   - scope                 → 'workspace' (写到 <ws>/.pi/skills/<name>.md) / 'global' (写到 <agentDir>/skills/<name>.md)
  *
- * 写完 emit 'created' 给 SkillsTab, SkillsTab 切回 'list' view, 提示 user 重启 .exe
+ * 写完 emit 'created' / 'updated' 给 SkillsTab, SkillsTab 切回 'list' view, 提示 user 重启 .exe
  * (D165 systemPrompt 不可动态改, sidecar 重启才会 loadSkills 看到新文件).
- *
- * 不做 (D184 不推测, v0.4.4.x polish):
- *   - 复杂 name 校验提示 (只看客户端 1-64 char + 字符集)
- *   - 编辑 / 删除 skill
- *   - 测试 skill 预览
- *   - 上传 .md 文件
  */
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { ArrowLeft, Save, AlertCircle, Loader2, Check, FileText, Sparkles, Upload, FileArchive, Link } from 'lucide-vue-next';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { piTauri } from '@/lib/tauri';
 import { useSessionStore } from '@/stores/session';
 import { useSkillsStore } from '@/stores/skills';
 
+// ====== P0-1: edit mode ======
+const props = defineProps<{
+  /** 传入已有 skill 时进入编辑模式 (从 SkillsTab 跳转) */
+  initialSkill?: {
+    name: string;
+    description: string;
+    filePath: string;
+    baseDir: string;
+  };
+}>();
+
+const isEditMode = computed(() => !!props.initialSkill);
+
 const emit = defineEmits<{
   close: [];
   created: [filePath: string];
+  updated: [name: string];
   zipImported: [info: { name: string; targetDir: string; fileCount: number }];
   urlImported: [info: { name: string; targetPath: string; bytes: number }];
 }>();
@@ -44,6 +56,34 @@ const body = ref<string>('# 在此写 skill 的 prompt / 指令\n\n比如:\n- �
 const submitState = ref<'idle' | 'submitting' | 'ok' | 'fail'>('idle');
 const submitMessage = ref<string>('');
 
+// ====== P0-1: edit mode init ======
+const isLoadingBody = ref(false);
+const bodyLoadError = ref<string | null>(null);
+
+onMounted(async () => {
+  if (!isEditMode.value) return;
+  const s = props.initialSkill!;
+  // name / description 直接用
+  name.value = s.name;
+  description.value = s.description;
+  // 从 baseDir 判断 scope (workspace vs global)
+  // baseDir 格式: workspace 时是 <ws>/.pi/skills, global 时是 <agentDir>/skills
+  // workspace 路径含 .pi/skills，global 不含
+  scope.value = s.baseDir.includes('.pi') ? 'workspace' : 'global';
+  // 读文件 body
+  isLoadingBody.value = true;
+  bodyLoadError.value = null;
+  try {
+    const parsed = await piTauri.readSkillFile(s.filePath);
+    body.value = parsed.body;
+  } catch (e) {
+    bodyLoadError.value = e instanceof Error ? e.message : String(e);
+    console.error('[AddSkillForm] readSkillFile failed', bodyLoadError.value);
+  } finally {
+    isLoadingBody.value = false;
+  }
+});
+
 /** 拿当前 active workspace path (跟 sidecar workspacePath 保持一致) */
 const activeWorkspacePath = computed<string | null>(() => {
   const id = sessionStore.activeWorkspaceId;
@@ -52,12 +92,17 @@ const activeWorkspacePath = computed<string | null>(() => {
   return ws?.path ?? null;
 });
 
-// Pi SDK 0.84.2 skill name 约束: a-zA-Z0-9._-, 1-64 char (跟 Rust write_skill_file 校验一致)
+// D212: name 校验放宽到 Unicode — 允许任意 Unicode 字母/数字 (含中文), 仍然禁止
+//   路径分隔符 / Windows 保留字符 / 控制字符 / 单独 "." 或 ".." (防 path traversal)
+//   跟 Rust validate_skill_name 校验逻辑保持一致.
 const nameValid = computed(() => {
   if (!name.value) return null;
   if (name.value.length > 64) return false;
-  if (!/^[a-zA-Z0-9._-]+$/.test(name.value)) return false;
   if (name.value === '.' || name.value === '..') return false;
+  // 禁止路径分隔符、Windows 保留字符、控制字符
+  if (/[\/\\:*?"<>|\x00-\x1f]/.test(name.value)) return false;
+  // 至少要有一个 Unicode 字母或数字 (不允许纯符号)
+  if (!/[\p{L}\p{N}]/u.test(name.value)) return false;
   return true;
 });
 
@@ -211,7 +256,7 @@ async function submit() {
   }
   if (nameValid.value === false) {
     submitState.value = 'fail';
-    submitMessage.value = 'name 只能含 [a-zA-Z0-9._-], 长度 1-64';
+    submitMessage.value = 'name 长度 1-64, 含 Unicode 字母/数字 + . _ -, 禁止路径分隔符和 Windows 保留字符';
     return;
   }
   if (!description.value.trim()) {
@@ -228,12 +273,16 @@ async function submit() {
       body: string;
       workspacePath?: string | null;
       agentDir?: string | null;
+      filePath?: string | null;
     } = {
       scope: scope.value,
       name: name.value.trim(),
       body: finalBody.value,
     };
-    if (scope.value === 'workspace') {
+    if (isEditMode.value && props.initialSkill) {
+      // P0-1 fix: edit mode 传精确 filePath, 直接覆盖不走路径推算
+      args.filePath = props.initialSkill.filePath;
+    } else if (scope.value === 'workspace') {
       // workspace: 拿 session store 当前 active workspace path
       const wsPath = activeWorkspacePath.value;
       if (!wsPath) {
@@ -249,15 +298,31 @@ async function submit() {
     }
     const filePath = await piTauri.writeSkillFile(args);
     submitState.value = 'ok';
-    submitMessage.value = `已写入 ${filePath}`;
+    submitMessage.value = isEditMode.value
+      ? `已更新 ${filePath}（已热重载skills，下条消息生效）`
+      : `已写入 ${filePath}（已热重载skills，下条消息生效）`;
     // v0.4.4.6: 写完后立刻调 list_skills 刷新 skills store (跟 sidecar skills_snapshot 解耦, user 不用重启 .exe 也能看到)
     const skillsStore = useSkillsStore();
     await skillsStore.refreshFromTauri();
-    // v0.4.4 占位: 提示 user 重启 .exe. skills store 不会自动刷新 (sidecar 没重启).
-    // 后续 v0.4.4.x polish: 写完自动 restart sidecar.
-    console.warn('[skills] created at', filePath, '— 重启 release .exe 让 sidecar 重新加载 skills 注入 system prompt (D165 systemPrompt 不可动态改).');
+    console.warn(`[skills] ${isEditMode.value ? 'updated' : 'created'} at ${filePath} — triggering skills hot reload.`);
+    // P0-1 hot reload: 写完文件后发 Pi SDK reload 命令热重载 skills.
+    //   reload 重建 runtime 并重新 loadSkills, session history 不丢. 下一条消息用新 skills.
+    const sid = sessionStore.activeSessionId;
+    if (sid) {
+      try {
+        await piTauri.reloadSkills(sid);
+        console.log('[skills] hot reload triggered successfully');
+      } catch (e) {
+        console.warn('[skills] hot reload failed:', e);
+      }
+    } else {
+      console.warn('[skills] no active session, hot reload skipped.');
+    }
     // emit 后 SkillsTab 切回 'list' + 显示 toast
-    setTimeout(() => emit('created', filePath), 600);
+    setTimeout(() => {
+      if (isEditMode.value) emit('updated', name.value.trim());
+      else emit('created', filePath);
+    }, 600);
   } catch (e) {
     submitState.value = 'fail';
     submitMessage.value = e instanceof Error ? e.message : String(e);
@@ -274,15 +339,21 @@ async function submit() {
       </button>
       <h3 class="pad-addskill__title">
         <Sparkles :size="16" :stroke-width="1.75" />
-        添加自定义 skill
+        {{ isEditMode ? `编辑 skill「${name}」` : '添加自定义 skill' }}
       </h3>
-      <p class="pad-addskill__subtitle">
+      <p v-if="!isEditMode" class="pad-addskill__subtitle">
         创建一个 <code>SKILL.md</code> 文件 (Pi SDK 0.84.2 <code>loadSkills</code> 格式). 走 frontmatter + markdown body.
         启用后会在每次 send_prompt 时注入 system prompt.
         <strong>已有 SKILL.md?</strong> 下面"从文件导入"自动解析 frontmatter.
       </p>
+      <p v-else class="pad-addskill__subtitle">
+        编辑已存在的 skill. 修改后需重启 release .exe 让 sidecar 重新加载注入 system prompt
+        (D165 systemPrompt 不可动态改).
+      </p>
     </div>
 
+    <!-- edit mode: 隐藏导入区 (只用于创建) -->
+    <template v-if="!isEditMode">
     <div class="pad-addskill__import-row">
       <button
         type="button"
@@ -334,21 +405,32 @@ async function submit() {
         </button>
       </div>
     </div>
+    </template><!-- /v-if="!isEditMode.value" 导入区 -->
 
-    <form class="pad-addskill__form" @submit.prevent="submit">
+    <!-- P0-1: body loading indicator (edit mode) -->
+    <div v-if="isLoadingBody" class="pad-addskill__loading-body">
+      <Loader2 :size="14" :stroke-width="1.75" class="pad-addskill__spinner" />
+      <span>加载 skill 内容中...</span>
+    </div>
+    <div v-else-if="bodyLoadError" class="pad-addskill__error">
+      <AlertCircle :size="12" :stroke-width="1.75" />
+      <span>读文件失败: <code>{{ bodyLoadError }}</code></span>
+    </div>
+
+    <form v-if="!isLoadingBody && !bodyLoadError" class="pad-addskill__form" @submit.prevent="submit">
       <!-- Scope: workspace / global -->
       <div class="pad-addskill__field">
         <label class="pad-addskill__label">范围</label>
         <div class="pad-addskill__scope-options">
-          <label class="pad-addskill__scope-option" :class="{ 'is-active': scope === 'workspace' }">
-            <input type="radio" v-model="scope" value="workspace" />
+          <label class="pad-addskill__scope-option" :class="{ 'is-active': scope === 'workspace', 'is-disabled': isEditMode }">
+            <input type="radio" v-model="scope" value="workspace" :disabled="isEditMode" />
             <div>
               <div class="pad-addskill__scope-title">Workspace</div>
               <div class="pad-addskill__scope-desc">写到当前 workspace 的 <code>.pi/skills/</code> — 跟随 workspace 走, 团队共享</div>
             </div>
           </label>
-          <label class="pad-addskill__scope-option" :class="{ 'is-active': scope === 'global' }">
-            <input type="radio" v-model="scope" value="global" />
+          <label class="pad-addskill__scope-option" :class="{ 'is-active': scope === 'global', 'is-disabled': isEditMode }">
+            <input type="radio" v-model="scope" value="global" :disabled="isEditMode" />
             <div>
               <div class="pad-addskill__scope-title">Global</div>
               <div class="pad-addskill__scope-desc">写到 <code>~/.pi/agent/skills/</code> — 所有 workspace 共享, 个人</div>
@@ -365,13 +447,15 @@ async function submit() {
           v-model="name"
           type="text"
           class="pad-addskill__input"
-          :class="{ 'is-error': nameValid === false }"
+          :class="{ 'is-error': nameValid === false, 'is-readonly': isEditMode }"
+          :readonly="isEditMode"
           placeholder="my-skill"
           maxlength="64"
           autocomplete="off"
         />
         <div class="pad-addskill__hint">
-          只能含 <code>[a-zA-Z0-9._-]</code>, 1-64 字符. 跟 Pi SDK 0.84.2 frontmatter.name 一致.
+          <span v-if="isEditMode">编辑模式下 name 不可修改. 若需改名请删除后重建.</span>
+          <span v-else>1-64 字符, 允许 Unicode (含中文) + <code>. _ -</code>. 禁止路径分隔符、Windows 保留字符、控制字符.</span>
         </div>
       </div>
 
@@ -427,7 +511,11 @@ async function submit() {
           <Loader2 v-if="submitState === 'submitting'" :size="14" :stroke-width="1.75" class="pad-addskill__spinner" />
           <Check v-else-if="submitState === 'ok'" :size="14" :stroke-width="1.75" />
           <Save v-else :size="14" :stroke-width="1.75" />
-          <span>{{ submitState === 'submitting' ? '写入中...' : submitState === 'ok' ? '已写入' : '写入 SKILL.md' }}</span>
+          <span>
+            {{ submitState === 'submitting' ? (isEditMode ? '更新中...' : '写入中...') :
+               submitState === 'ok' ? (isEditMode ? '已更新' : '已写入') :
+               isEditMode ? '更新 SKILL.md' : '写入 SKILL.md' }}
+          </span>
         </button>
       </div>
 
@@ -447,6 +535,40 @@ async function submit() {
 .pad-addskill__head {
   margin-bottom: 16px;
 }
+
+/* P0-1: edit mode body loading */
+.pad-addskill__loading-body {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 20px;
+  color: var(--pad-fg-tertiary);
+  font-size: 13px;
+}
+.pad-addskill__loading-body .pad-addskill__spinner {
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.pad-addskill__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 12px 16px;
+  background: var(--pad-bg-danger-soft, rgba(220, 38, 38, 0.06));
+  color: var(--pad-fg-danger, #dc2626);
+  font-size: 12px;
+  border-radius: var(--pad-radius-sm, 4px);
+  margin-bottom: 12px;
+}
+.pad-addskill__error code {
+  font-family: var(--pad-font-mono);
+  font-size: 10px;
+  background: var(--pad-bg-input);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
 .pad-addskill__back {
   display: inline-flex;
   align-items: center;
@@ -605,6 +727,11 @@ async function submit() {
 .pad-addskill__textarea:focus {
   border-color: var(--pad-accent-primary, #6366f1);
 }
+/* P0-1: edit mode name field readonly */
+.pad-addskill__input.is-readonly {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 .pad-addskill__input.is-error {
   border-color: var(--pad-fg-warning, #d97706);
 }
@@ -646,6 +773,14 @@ async function submit() {
 .pad-addskill__scope-option input {
   margin-top: 2px;
   accent-color: var(--pad-accent-primary, #6366f1);
+}
+/* P0-1: edit mode scope locked */
+.pad-addskill__scope-option.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.pad-addskill__scope-option.is-disabled:hover {
+  background: var(--pad-card);
 }
 .pad-addskill__scope-title {
   font-size: 12px;

@@ -129,6 +129,52 @@ const mcpState = {
   agentDir: null,
 };
 
+// 2026-08-21: Skills 模块级可变状态 — 支持 in-session hot reload
+//   allSkills: 所有扫描到的 skill (按 name 去重)
+//   enabledSkillNames: 当前启用的 skill name Set (来自 config)
+//   skillsPromptFragment: 格式化后的 skill 内容, spread 进 system prompt (line ~563)
+//   config: 保留 init 时的 config 引用 (reload 时用 workspacePath/agentDir/skills 配置)
+let allSkills: any[] = [];
+let enabledSkillNames = new Set<string>();
+let skillsPromptFragment = '';
+let skillsState: {
+  config: any;
+  workspacePath: string;
+  agentDir: string;
+} | null = null;
+let skillsReloadInProgress = false;
+
+/**
+ * 2026-08-21: 重新加载 skills 文件并重建 skillsPromptFragment.
+ * 跟 MCP reload 同模式: 下一轮 prompt 生效, 当前 session 已有消息不受影响.
+ */
+function rebuildSkillsFragment(wsPath: string, agDir: string, cfg: any) {
+  const sc = cfg?.skills ?? { enabledNames: [], extraPaths: [] };
+  const result = loadSkills({
+    cwd: wsPath,
+    agentDir: agDir,
+    skillPaths: sc.extraPaths ?? [],
+    includeDefaults: true,
+  });
+  const enabled = new Set(sc.enabledNames ?? []);
+  const enabledList = result.skills.filter((s: any) => enabled.has(s.name));
+  const fragment = enabledList.length > 0
+    ? '\n\n' + formatSkillsForPrompt(enabledList)
+    : '';
+  allSkills = result.skills;
+  enabledSkillNames = enabled;
+  skillsPromptFragment = fragment;
+  console.error(
+    `[sidecar] skills hot-reload: ${result.skills.length} total, ${enabledList.length} enabled, ` +
+    `${result.diagnostics.length} diags, fragment=${fragment.length} chars`
+  );
+  return {
+    skills: result.skills,
+    enabledCount: enabledList.length,
+    diagnostics: result.diagnostics,
+  };
+}
+
 /**
  * v0.6.3-rc1 P2-2: 抽 initMcpSubsystem — 之前是 createAgentSession 内联逻辑, 现在抽出来
  *   给 hot reload 复用. 读 configs → spawn → wrap, 返回完整结果.
@@ -281,32 +327,12 @@ const BUILTIN_SLASH_COMMANDS = [
   { name: 'reload', description: 'Reload keybindings, extensions, skills, prompts, themes, and context files' },
   { name: 'quit', description: 'Quit Pi Agent' },
 ];
-const skillsConfig = config.skills ?? { enabledNames: [], extraPaths: [] };
-const skillsResult = loadSkills({
-  cwd: workspacePath,
-  agentDir,
-  skillPaths: skillsConfig.extraPaths ?? [],
-  includeDefaults: true,
-});
-const allSkills = skillsResult.skills;
-const skillsDiagnostics = skillsResult.diagnostics;
-const enabledSkillNames = new Set(skillsConfig.enabledNames ?? []);
-const enabledSkills = allSkills.filter((s) => enabledSkillNames.has(s.name));
-const skillsPromptFragment = enabledSkills.length > 0
-  ? '\n\n' + formatSkillsForPrompt(enabledSkills)
-  : '';
-console.error(`[sidecar] skills: loaded ${allSkills.length} total, ${enabledSkills.length} enabled, ${skillsDiagnostics.length} diagnostics`);
-
-// v0.5.0-v0.1: 删 multi-agent persona 段 (回滚 v0.4.6.1 + v0.4.6.2 + v0.5.0-PR1)
-//   user 16:24 拍板: agent 是边界定义/思维指导, 永远是 1 个通用 agent, single agent 链路
-//   Pi SDK 0.84.2 DefaultResourceLoader 自动 load <agentDir>/AGENTS.md + <cwd>/AGENTS.md
-//   (resource-loader.ts:71) → 注入 system prompt 段. AGENTS.md 编辑走 Settings → Custom Instructions tab.
-//   sidecar 不用拼 persona 段, 也不需要 active_agent 字段.
-// v0.5.0-v0.1: 3 段 system prompt 显式 log (Base / Skills / Context Awareness) + Project context
-//  Pi SDK auto-load. 让 user 装 .msi 跑端到端能从 sidecar stderr 看拼装.
-console.error(`[sidecar] system prompt: 4 segments [base=Pi-SDK-default skills=${enabledSkills.length}(${skillsPromptFragment.length} chars) project_context=AGENTS.md-auto(Pi-SDK) context_awareness=set]`);
-if (skillsDiagnostics.length > 0) {
-  for (const d of skillsDiagnostics.slice(0, 5)) {
+// 2026-08-21: 初始化 skills (用模块级变量, 支持 hot reload)
+skillsState = { config, workspacePath, agentDir };
+const skillsInitResult = rebuildSkillsFragment(workspacePath, agentDir, config);
+console.error(`[sidecar] system prompt: 5 segments [base=Pi-SDK-default skills=${skillsInitResult.enabledCount}(${skillsPromptFragment.length} chars) skill_realtime=约束 LLM 每次用 skill 前读最新文件 project_context=AGENTS.md-auto(Pi-SDK) context_awareness=set]`);
+if (skillsInitResult.diagnostics.length > 0) {
+  for (const d of skillsInitResult.diagnostics.slice(0, 5)) {
     console.error(`[sidecar] skills diag: ${d.type} ${d.message} ${d.path ?? ''}`);
   }
 }
@@ -326,7 +352,7 @@ process.stdout.write(JSON.stringify({
     baseDir: s.baseDir,
     disableModelInvocation: s.disableModelInvocation,
   })),
-  diagnostics: skillsDiagnostics,
+  diagnostics: skillsInitResult.diagnostics,
 }) + '\n');
 
 // ====== v0.4.5: slash_snapshot (Pi SDK BUILTIN_SLASH_COMMANDS 21 个 + 自定义 command 路径) ======
@@ -561,6 +587,33 @@ intent across the session is still part of the conversation.
         //   返回 XML 格式, 跟 <context_awareness> 风格一致). enabledSkillNames 从 config 传, 改 enabled
         //   必须重启 sidecar (D165 systemPrompt 不可动态改).
         ...(skillsPromptFragment ? [skillsPromptFragment] : []),
+        // 2026-08-21: Skill 实时读取约束 — 解决 LLM 用对话历史中的旧 skill 描述而不读最新文件的问题
+        //   LLM 没有自动版本对比机制, 需要显式约束. 这段加在 skills fragment 之后, 每次 prompt 都生效.
+        //
+        // v2 修订 (D_D209): LLM 把"before following"理解成"第一次需要 read, 之后 fall through 到
+        //   上下文缓存", 实测 LLM 会诚实说"首次加载本地路径, 后续复用上下文记忆".
+        //   修法: 改成强协议格式 (numbered steps + absolute rules), 显式声明 "EVERY invocation",
+        //   禁止"用之前对话里读过的版本".
+        `<skill_realtime>
+MANDATORY skill re-read protocol — applies to EVERY skill invocation, not just the first.
+
+When the user references a skill — by mentioning its name, via [[skill:xxx]], or by saying "用 xxx skill" / "按 xxx skill 做" / "use the xxx skill" / "用之前保存的 skill" — you MUST execute this protocol IN ORDER before following the skill's instructions:
+
+  Step 1: Identify the skill's file path from <available_skills>.
+  Step 2: Call the read tool to fetch the file's CURRENT contents from disk.
+  Step 3: Read the returned content.
+  Step 4: Follow the instructions in the freshly-read file.
+
+ABSOLUTE RULES (violating any of these means you are acting on outdated instructions):
+
+  - Re-read on EVERY skill invocation, not just the first turn. A second or third mention of the same skill in the same conversation still requires a fresh read.
+  - Do NOT reuse skill content you remember from earlier turns of this conversation. The file may have been edited by the user between your reads.
+  - Do NOT trust the description in <available_skills> as a substitute for the file content. The description is a brief summary, not the authoritative instructions.
+  - Do NOT skip the read because "I just read it" or "the user is repeating the same request". Every mention of a skill is a fresh invocation.
+  - The conversation history is NOT a reliable cache for skill files. Skill files are user-editable artifacts that change independently of this conversation.
+
+The re-read is a single tool call — a small cost for correctness. Skipping it risks acting on outdated instructions, which the user has explicitly asked to prevent. When in doubt, re-read.
+</skill_realtime>`,
         // v0.5.0-v0.1: 删 active agent persona 段 (multi-agent persona 回滚)
         //   Pi SDK 0.84.2 DefaultResourceLoader 自动 load AGENTS.md (resource-loader.ts:71)
         //   → 注入 project_context 段. sidecar 不用拼 persona.

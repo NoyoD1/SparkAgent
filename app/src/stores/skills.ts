@@ -131,6 +131,20 @@ export const useSkillsStore = defineStore('skills', () => {
     return Object.keys(enabledByName.value).filter((k) => enabledByName.value[k] === true);
   }
 
+  // P0-1: 删除 skill 文件 (按精确路径, 跟 writeSkillFile filePath 模式一致)
+  async function removeSkill(filePath: string): Promise<void> {
+    await piTauri.deleteSkillFile(filePath);
+    // 删文件后清除启用状态 (如果用户之前启用了)
+    const fileName = filePath.split(/[/\\]/).pop()?.replace(/\.md$/, '') ?? '';
+    if (fileName) {
+      const next = { ...enabledByName.value };
+      delete next[fileName];
+      enabledByName.value = next;
+    }
+    // 刷新列表
+    await refreshFromTauri();
+  }
+
   return {
     skills,
     enabledByName,
@@ -144,5 +158,6 @@ export const useSkillsStore = defineStore('skills', () => {
     toggle,
     getEnabledNames,
     refreshFromTauri,
+    removeSkill,
   };
 });

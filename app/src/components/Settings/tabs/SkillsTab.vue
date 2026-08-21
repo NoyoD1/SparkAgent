@@ -16,8 +16,8 @@
  */
 import { ref, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
-import { Sparkles, Plus, AlertCircle, Info, Check } from 'lucide-vue-next';
-import { useSkillsStore } from '@/stores/skills';
+import { Sparkles, Plus, AlertCircle, Info, Check, Edit3, Trash2 } from 'lucide-vue-next';
+import { useSkillsStore, type SkillInfo } from '@/stores/skills';
 import { useSessionStore } from '@/stores/session';
 import AddSkillForm from './AddSkillForm.vue';
 
@@ -41,14 +41,13 @@ async function refreshList() {
 }
 onMounted(refreshList);
 
-const viewMode = ref<'list' | 'add'>('list');
+const viewMode = ref<'list' | 'add' | 'edit'>('list');
+const editingSkill = ref<SkillInfo | null>(null);
 const toast = ref<{ type: 'ok' | 'fail'; message: string } | null>(null);
 
 function onToggle(name: string, value: boolean) {
   if (value) skillsStore.enable(name);
   else skillsStore.disable(name);
-  // v0.4.4 占位: toggle 改 localStorage, 但 sidecar 没重启 → system prompt 还没注入.
-  //   user 必须重启 release .exe (kill 当前 sidecar + send_prompt 触发新 spawn) 才生效.
   console.warn(`[skills] toggled "${name}" → ${value}. 记得重启 release .exe 让 sidecar 重新加载 skills 注入 system prompt (D165 systemPrompt 不可动态改).`);
 }
 
@@ -56,19 +55,39 @@ function openAdd() {
   viewMode.value = 'add';
   toast.value = null;
 }
-function closeAdd() {
-  viewMode.value = 'list';
+
+/** P0-1: 打开编辑模式 */
+function openEdit(skill: SkillInfo) {
+  editingSkill.value = skill;
+  viewMode.value = 'edit';
 }
+
+function closeForm() {
+  viewMode.value = 'list';
+  editingSkill.value = null;
+}
+
 function onCreated(filePath: string) {
-  // 写完文件, 切回 list, 显示 toast
   viewMode.value = 'list';
   toast.value = {
     type: 'ok',
     message: `已写入 ${filePath} — 记得重启 release .exe 让 sidecar 重新加载 skills`,
   };
-  // 5s 后清掉 toast
   setTimeout(() => {
     if (toast.value?.message.includes(filePath)) toast.value = null;
+  }, 5000);
+}
+
+/** P0-1: skill 更新完成 */
+function onUpdated(name: string) {
+  viewMode.value = 'list';
+  editingSkill.value = null;
+  toast.value = {
+    type: 'ok',
+    message: `已更新「${name}」— 记得重启 release .exe 让 sidecar 重新加载 skills`,
+  };
+  setTimeout(() => {
+    if (toast.value?.message.includes(name)) toast.value = null;
   }, 5000);
 }
 /**
@@ -98,6 +117,20 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
   setTimeout(() => {
     if (toast.value?.message.includes(info.name)) toast.value = null;
   }, 5000);
+}
+
+/** P0-1: 删除 skill 文件 */
+async function removeSkill(skill: SkillInfo) {
+  if (!confirm(`确认删除 skill「${skill.name}」？此操作不可撤销。`)) return;
+  try {
+    await skillsStore.removeSkill(skill.filePath);
+    toast.value = { type: 'ok', message: `已删除「${skill.name}」` };
+    setTimeout(() => {
+      if (toast.value?.message.includes(skill.name)) toast.value = null;
+    }, 5000);
+  } catch (e) {
+    toast.value = { type: 'fail', message: e instanceof Error ? e.message : String(e) };
+  }
 }
 </script>
 
@@ -191,14 +224,32 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
               <div class="pad-skillstab__item-desc">{{ s.description || '(no description)' }}</div>
               <div class="pad-skillstab__item-path">{{ s.baseDir }}</div>
             </div>
-            <label class="pad-skillstab__item-toggle" :class="{ 'is-disabled': s.disableModelInvocation }">
-              <input
-                type="checkbox"
-                :checked="skillsStore.isEnabled(s.name)"
-                :disabled="s.disableModelInvocation"
-                @change="(e: Event) => onToggle(s.name, (e.target as HTMLInputElement).checked)"
-              />
-            </label>
+            <div class="pad-skillstab__item-actions">
+              <!-- P0-1: 编辑按钮 -->
+              <button
+                class="pad-skillstab__action-btn"
+                title="编辑 skill"
+                @click="openEdit(s)"
+              >
+                <Edit3 :size="13" :stroke-width="1.75" />
+              </button>
+              <!-- P0-1: 删除按钮 -->
+              <button
+                class="pad-skillstab__action-btn pad-skillstab__action-btn--danger"
+                title="删除 skill"
+                @click="removeSkill(s)"
+              >
+                <Trash2 :size="13" :stroke-width="1.75" />
+              </button>
+              <label class="pad-skillstab__item-toggle" :class="{ 'is-disabled': s.disableModelInvocation }">
+                <input
+                  type="checkbox"
+                  :checked="skillsStore.isEnabled(s.name)"
+                  :disabled="s.disableModelInvocation"
+                  @change="(e: Event) => onToggle(s.name, (e.target as HTMLInputElement).checked)"
+                />
+              </label>
+            </div>
           </li>
         </ul>
 
@@ -233,11 +284,20 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
       </div>
     </template>
 
-    <!-- viewMode: 'add' → AddSkillForm -->
+    <!-- viewMode: 'add' / 'edit' → AddSkillForm -->
+    <!-- P0-1: edit mode: 传入 editingSkill; add mode: 不传 -->
     <AddSkillForm
-      v-else
-      @close="closeAdd"
+      v-else-if="viewMode === 'add'"
+      @close="closeForm"
       @created="onCreated"
+      @zipImported="onZipImported"
+      @urlImported="onUrlImported"
+    />
+    <AddSkillForm
+      v-else-if="viewMode === 'edit' && editingSkill"
+      :initial-skill="editingSkill"
+      @close="closeForm"
+      @updated="onUpdated"
       @zipImported="onZipImported"
       @urlImported="onUrlImported"
     />
@@ -392,6 +452,38 @@ function onUrlImported(info: { name: string; targetPath: string; bytes: number }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.pad-skillstab__item-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex-shrink: 0;
+}
+/* P0-1: 编辑按钮 */
+.pad-skillstab__action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--pad-border);
+  background: var(--pad-card);
+  color: var(--pad-fg-tertiary);
+  border-radius: var(--pad-radius-sm, 4px);
+  cursor: pointer;
+  transition: all 0.15s;
+  padding: 0;
+  margin-top: 1px;
+}
+.pad-skillstab__action-btn:hover {
+  color: var(--pad-fg-primary);
+  border-color: var(--pad-accent, #6366f1);
+  background: var(--pad-bg-hover, rgba(0,0,0,0.04));
+}
+.pad-skillstab__action-btn--danger:hover {
+  color: var(--pad-fg-danger, #dc2626);
+  border-color: var(--pad-fg-danger, #dc2626);
+  background: var(--pad-bg-danger-soft, rgba(220,38,38,0.08));
 }
 .pad-skillstab__item-toggle {
   display: inline-flex;

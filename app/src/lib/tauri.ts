@@ -840,14 +840,30 @@ class PiTauriClient {
   }
 
   // ====== v0.4.4 Skills: 写自定义 SKILL.md (scope: 'workspace' | 'global') ======
+  // P0-1 fix: edit mode 传 filePath 精确覆盖, 不走 scope→路径推算 (避免 global scope
+  //   agentDir fallback 不一致导致写到新路径产生重复 skill)
   async writeSkillFile(args: {
     scope: 'workspace' | 'global';
     name: string;
     body: string;
     workspacePath?: string | null;
     agentDir?: string | null;
+    /** P0-1: 精确文件路径. 传了则 Rust 直接覆盖, 不推算路径. edit mode 必传. */
+    filePath?: string | null;
   }): Promise<string> {
     return (await invoke('write_skill_file', { args })) as string;
+  }
+
+  // ====== P0-1: 删除 skill 文件 (按精确路径) ======
+  async deleteSkillFile(filePath: string): Promise<void> {
+    await invoke('delete_skill_file', { filePath });
+  }
+
+  // ====== 2026-08-21: Skill 热重载 (Pi SDK reload 命令) ======
+  // 走 Pi SDK 内置 reload, 重建 runtime 并重新 loadSkills.
+  // session history 存在 JSONL 文件里, reload 后自动恢复. 下一条消息用新 skills.
+  async reloadSkills(sessionId: string): Promise<void> {
+    await invoke('reload_skills', { sessionId });
   }
 
   // ====== v0.4.4.3 Skill 导入: 读本地 .md 文件 + 解析 frontmatter ======

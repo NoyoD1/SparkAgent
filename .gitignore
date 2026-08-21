@@ -96,6 +96,17 @@ sidecar/smoke-test.jsonl
 .tauri-*.log
 .tauri-*.log.bak
 
+# ---- dev/build 临时产物 (D213+) ----
+# 跑 build / 写 commit-msg 时本地产生的临时文件, 不入 git
+.build*
+.cargo-build-*
+.tauri-build-*
+.commit-msg-*.txt
+.commit-v*.txt
+commit-msg-*.txt
+commit_msg_*.txt
+.bun-build
+
 # ---- 临时测试/调试产出 (按 P2-x 实施时跑过即删, .trash 是没删的 fallback) ----
 .trash/
 

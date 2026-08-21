@@ -426,17 +426,34 @@ async function send() {
   }
   // v0.4.7b: 解析 [[skill:xxx]] marker, 替换成 skill body 拼到 user prompt 前面 (D184 v9 ❹)
   //   一次性 @ 引用, 不写 system prompt (跟 v0.4.4 skills 切 enabled 完全不同)
+  // 2026-08-21 bug fix: 之前用 cached.description (只有一行说明), 改为读文件 body 实际内容
+  // D210 后续: 回退自然语言 skill 提及的 FE 端 auto-inject (D209 加的).
+  //   问题: word-boundary 硬编码检测无法枚举用户自定义 skill, 维护性差.
+  //   实测 hot reload + <skill_realtime> 约束已经覆盖自然语言场景
+  //   (用户实测 "再回复我一次试一下" 无关键词也能拿到 fresh body).
+  //   结论: 完全靠 hot reload + system prompt 约束, FE 不再做主动注入.
   const skillRefs: Array<{ name: string; body: string }> = [];
-  const markerRe = /\[\[skill:([A-Za-z0-9._-]+)\]\]/g;
+  // D211: 改用 Unicode 友好的正则 — 支持中文 / 含空格 / 含特殊字符的 skill name
+  //   旧正则 [A-Za-z0-9._-]+ 只能匹配 ASCII, 用户自定义的中文 skill (e.g. 数据清洗, 我的 skill)
+  //   会被静默忽略, 体验差. 新正则 [^\s\]]+ 匹配任意非空白非 ], 覆盖所有 Unicode 字符.
+  const markerRe = /\[\[skill:([^\s\]]+)\]\]/g;
   let m;
   while ((m = markerRe.exec(rawText)) !== null) {
     const skillName = m[1];
-    // 实际拿 skill body: 走 skills store 缓存 (listSkills emit) + 找 name
+    // 先从 skills store 拿 filePath, 再读文件 body
     const cached = skillsStore.skills.find((s: any) => s.name === skillName);
-    if (cached) {
-      skillRefs.push({ name: skillName, body: cached.description || '' });
-    } else {
+    if (!cached) {
       console.warn(`[Composer] skill reference not found: ${skillName}`);
+      continue;
+    }
+    try {
+      const parsed = await piTauri.readSkillFile(cached.filePath);
+      // 用 body (strip frontmatter) 而不是 raw 或 description
+      skillRefs.push({ name: skillName, body: parsed.body || parsed.description || '' });
+    } catch (e) {
+      console.warn(`[Composer] readSkillFile failed for ${skillName}:`, e);
+      // 回退: 用 description
+      skillRefs.push({ name: skillName, body: cached.description || '' });
     }
   }
   // 拼 skill references 到 user prompt 前面
@@ -698,7 +715,7 @@ onMounted(() => nextTick(autoResize));
                 <span class="pad-composer__perm-menu-item-hint">{{ opt.hint }}</span>
               </span>
               <Check
-                v-if="opt.value === configStore.permissionMode"
+                v-if="opt.value === currentPermissionMode"
                 :size="14"
                 :stroke-width="2"
                 class="pad-composer__perm-menu-item-check"

@@ -13,7 +13,7 @@ mod sidecar;
 
 use serde::Deserialize;
 use crate::sidecar::kill_sidecar;  // v0.4.6: register tauri command (force kill sidecar on abort)
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager, State};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 // v0.4.4.6: ClientConfig 用 sidecar::SkillsConfig / sidecar::ModelMetadataConfig
@@ -147,56 +147,90 @@ struct WriteSkillFileArgs {
     workspace_path: Option<String>,
     /// global scope 必填, workspace scope 不需要
     agent_dir: Option<String>,
+    /// P0-1 fix: 精确文件路径. 传了则直接覆盖该文件 (不走 scope→路径推算, 避免 global scope
+    ///   agentDir fallback 路径不一致导致写到新位置产生重复). edit mode 必传.
+    file_path: Option<String>,
+}
+
+// D212: skill name 公共校验 — 允许 Unicode 字母/数字 (含中文/日文/韩文等),
+//   + 允许 . _ -, 禁止路径分隔符 / Windows 保留字符 / 控制字符 / 单独的 "." 或 ".."
+//   跟 FE AddSkillForm.vue nameValid 保持一致 (双端不能各自一套).
+//   复用点: write_skill_file / import_skill_url / import_skill_zip.
+fn validate_skill_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.chars().count() > 64 {
+        return Err(format!(
+            "skill name 长度必须 1-64, got {}",
+            name.chars().count()
+        ));
+    }
+    if name == "." || name == ".." {
+        return Err("skill name 不能是 '.' 或 '..'".to_string());
+    }
+    if name.chars().any(|c| {
+        c.is_control()
+            || matches!(
+                c,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+            )
+    }) {
+        return Err(format!(
+            "skill name 包含非法字符 (路径分隔符 / Windows 保留字符 / 控制字符), got '{}'",
+            name
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
 async fn write_skill_file(args: WriteSkillFileArgs) -> Result<String, String> {
-    // 1. name 校验: 1-64 char, [a-zA-Z0-9._-], 不含路径分隔符 / .. 防 path traversal
-    if args.name.is_empty() || args.name.len() > 64 {
-        return Err(format!("skill name 长度必须 1-64, got {}", args.name.len()));
-    }
-    if !args.name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
-        return Err(format!(
-            "skill name 只能含 [a-zA-Z0-9._-], got '{}'",
-            args.name
-        ));
-    }
-    if args.name == "." || args.name == ".." {
-        return Err("skill name 不能是 '.' 或 '..'".to_string());
-    }
+    // 1. name 校验 — 走公共 validate_skill_name, 跟 FE AddSkillForm.vue 保持一致
+    validate_skill_name(&args.name)?;
     if args.body.is_empty() {
         return Err("skill body 不能为空 (至少要 frontmatter + 内容)".to_string());
     }
 
-    // 2. scope → 路径
-    let target_path: PathBuf = match args.scope.as_str() {
-        "workspace" => {
-            let ws = args.workspace_path.as_ref().ok_or("workspace scope 需要 workspacePath")?;
-            if ws.is_empty() {
-                return Err("workspace path 不能为空".to_string());
-            }
-            PathBuf::from(ws).join(".pi").join("skills").join(format!("{}.md", args.name))
+    // 2. file_path 优先 (P0-1 fix): edit mode 传精确路径, 直接覆盖不走推算
+    let target_path: PathBuf = if let Some(ref fp) = args.file_path {
+        let p = PathBuf::from(fp);
+        // 安全校验: 必须是绝对路径且是 .md 文件
+        if !p.is_absolute() {
+            return Err("file_path 必须是绝对路径".to_string());
         }
-        "global" => {
-            // global scope: agentDir 走 Pi SDK 0.84.2 getAgentDir() 默认路径
-            //   Windows: %USERPROFILE%/.pi/agent
-            //   macOS/Linux: $HOME/.pi/agent
-            // FE 可以不传 (None), Rust 端 fallback 算. 跟 sidecar 启动时 getAgentDir() 一致.
-            let dir = match args.agent_dir.as_ref().filter(|s| !s.is_empty()) {
-                Some(d) => PathBuf::from(d),
-                None => {
-                    // Fallback: USERPROFILE/HOME + .pi/agent (跟 Pi SDK 0.84.2 getAgentDir 一致)
-                    let home = std::env::var("USERPROFILE")
-                        .ok()
-                        .or_else(|| std::env::var("HOME").ok())
-                        .or_else(|| std::env::var("HOMEDRIVE").ok().zip(std::env::var("HOMEPATH").ok()).map(|(d, p)| format!("{}\\{}", d, p)))
-                        .ok_or("global scope 没传 agentDir, 也找不到 USERPROFILE/HOME env")?;
-                    PathBuf::from(home).join(".pi").join("agent")
+        if p.extension().map(|e| e != "md").unwrap_or(true) {
+            return Err("file_path 必须以 .md 结尾".to_string());
+        }
+        p
+    } else {
+        // 回退: scope → 路径推算 (原始 create 模式)
+        match args.scope.as_str() {
+            "workspace" => {
+                let ws = args.workspace_path.as_ref().ok_or("workspace scope 需要 workspacePath")?;
+                if ws.is_empty() {
+                    return Err("workspace path 不能为空".to_string());
                 }
-            };
-            dir.join("skills").join(format!("{}.md", args.name))
+                PathBuf::from(ws).join(".pi").join("skills").join(format!("{}.md", args.name))
+            }
+            "global" => {
+                // global scope: agentDir 走 Pi SDK 0.84.2 getAgentDir() 默认路径
+                //   Windows: %USERPROFILE%/.pi/agent
+                //   macOS/Linux: $HOME/.pi/agent
+                // FE 可以不传 (None), Rust 端 fallback 算. 跟 sidecar 启动时 getAgentDir() 一致.
+                let dir = match args.agent_dir.as_ref().filter(|s| !s.is_empty()) {
+                    Some(d) => PathBuf::from(d),
+                    None => {
+                        // Fallback: USERPROFILE/HOME + .pi/agent (跟 Pi SDK 0.84.2 getAgentDir 一致)
+                        let home = std::env::var("USERPROFILE")
+                            .ok()
+                            .or_else(|| std::env::var("HOME").ok())
+                            .or_else(|| std::env::var("HOMEDRIVE").ok().zip(std::env::var("HOMEPATH").ok()).map(|(d, p)| format!("{}\\{}", d, p)))
+                            .ok_or("global scope 没传 agentDir, 也找不到 USERPROFILE/HOME env")?;
+                        PathBuf::from(home).join(".pi").join("agent")
+                    }
+                };
+                dir.join("skills").join(format!("{}.md", args.name))
+            }
+            other => return Err(format!("scope 必须是 'workspace' 或 'global', got '{}'", other)),
         }
-        other => return Err(format!("scope 必须是 'workspace' 或 'global', got '{}'", other)),
     };
 
     // 3. 安全: target 必须在 base 之内 (防 path traversal 即使已经过滤 name)
@@ -211,6 +245,54 @@ async fn write_skill_file(args: WriteSkillFileArgs) -> Result<String, String> {
     // 5. 返回绝对路径
     let abs = std::fs::canonicalize(&target_path).unwrap_or(target_path);
     Ok(abs.to_string_lossy().to_string())
+}
+
+// ====== P0-1: 删除 skill 文件 (按精确路径) ======
+#[tauri::command]
+async fn delete_skill_file(file_path: String) -> Result<(), String> {
+    let path = PathBuf::from(&file_path);
+    // 安全校验: 必须是绝对路径且是 .md 文件
+    if !path.is_absolute() {
+        return Err("file_path 必须是绝对路径".to_string());
+    }
+    if path.extension().map(|e| e != "md").unwrap_or(true) {
+        return Err("file_path 必须以 .md 结尾".to_string());
+    }
+    if !path.exists() {
+        return Err(format!("文件不存在: {:?}", path));
+    }
+    std::fs::remove_file(&path).map_err(|e| format!("删除文件失败 {:?}: {}", path, e))
+}
+
+// ====== 2026-08-21: Skill 热重载 ======
+// 走 Pi SDK 内置 reload 命令 (rebuild runtime, 保持 session history 不丢).
+// reload 会重建 runtime 并重新 loadSkills, 下一轮 prompt 自然用新 skills.
+// 同时 emit skills_reloaded event → FE 刷新 skills store.
+#[tauri::command]
+async fn reload_skills(
+    app: AppHandle,
+    session_id: String,
+    active: State<'_, std::sync::Arc<sidecar::ActiveSidecars>>,
+) -> Result<(), String> {
+    debug_log(&format!("reload_skills: session={}", session_id));
+    let mut map = active.0.lock().await;
+    let child = map
+        .get_mut(&session_id)
+        .ok_or_else(|| format!("no active sidecar for session={}", session_id))?;
+    // Pi SDK 内置 reload 命令: rebuild runtime + reload skills + extensions + prompts + themes
+    let line = format!("{{\"type\":\"reload\"}}\n");
+    child
+        .write(line.as_bytes())
+        .map_err(|e| format!("write reload: {e}"))?;
+    // emit skills_reloaded event → FE 刷新 skills store (skills_snapshot 会重新 emit)
+    let event = serde_json::json!({
+        "type": "skills_reloaded",
+        "sessionId": session_id,
+    });
+    if let Err(e) = app.emit("chat:event", &event) {
+        log::error!("emit skills_reloaded failed: {e}");
+    }
+    Ok(())
 }
 
 // ====== v0.4.4.3 Skill 导入: 从本地 .md 文件读 + 解析 frontmatter ======
@@ -403,16 +485,8 @@ async fn import_skill_url(args: ImportSkillUrlArgs) -> Result<ImportedSkillUrl, 
         last.trim_end_matches(".md").trim_end_matches(".markdown").to_string()
     };
 
-    // 5. name 校验 (跟 write_skill_file 一致)
-    if name.is_empty() || name.len() > 64 {
-        return Err(format!("skill name 长度必须 1-64, got {} ({})", name.len(), name));
-    }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
-        return Err(format!("skill name 只能含 [a-zA-Z0-9._-], got '{}'", name));
-    }
-    if name == "." || name == ".." {
-        return Err("skill name 不能是 '.' 或 '..'".to_string());
-    }
+    // 5. name 校验 — 走公共 validate_skill_name (D212 改用 Unicode 友好版本)
+    validate_skill_name(&name)?;
 
     // 6. 拼 frontmatter + body (跟 AddSkillForm 行为一致)
     let body = if parsed.has_frontmatter {
@@ -571,16 +645,8 @@ async fn import_skill_zip(args: ImportSkillZipArgs) -> Result<ImportedSkillZip, 
             .unwrap_or_else(|| "skill".to_string())
     };
 
-    // 6. name 校验 (跟 write_skill_file 一致)
-    if name.is_empty() || name.len() > 64 {
-        return Err(format!("skill name 长度必须 1-64, got {} ({})", name.len(), name));
-    }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
-        return Err(format!("skill name 只能含 [a-zA-Z0-9._-], got '{}'", name));
-    }
-    if name == "." || name == ".." {
-        return Err("skill name 不能是 '.' 或 '..'".to_string());
-    }
+    // 6. name 校验 — 走公共 validate_skill_name (D212 改用 Unicode 友好版本)
+    validate_skill_name(&name)?;
 
     // 7. 决定 target 目录
     let target_base = match args.scope.as_str() {
@@ -2535,6 +2601,8 @@ pub fn run() {
             save_app_config,
             // v0.4.4 Skills: 写自定义 SKILL.md 到 workspace 或 global agentDir
             write_skill_file,
+            delete_skill_file,
+            reload_skills,
             // v0.4.4.3 Skill 导入: 读本地 .md 文件 + 解析 frontmatter
             read_skill_file,
             // v0.4.4.4 Skill 导入: 从 zip 压缩包导入 (支持多文件 skill pack)
