@@ -5,23 +5,88 @@
  * D214 v7: 用户点 chip 主体 (不是 × 按钮) → 弹这个浮层, 显示完整 body
  *   - 用 Teleport 到 body, 避开父容器 overflow:hidden / z-index 问题
  *   - 位置: 默认在 chip 下方, 下方空间不够时弹到 chip 上方
- *   - 内容: title (kind + name) + body (markdown / JSON 文本, 等宽字体)
+ *   - 内容: title (kind + name) + body (skill 走 markdown, tool/mcp 走 pretty JSON)
  *   - 关闭: × 按钮 / Escape / 点空白
  *   - App.vue 一次性 mount, 走 useChipPreview 全局状态
+ *
+ * D214 v8: skill body 剥 YAML frontmatter, 走 MarkdownContent 渲染
+ *   - 之前 `<pre>` 直接显示原文, frontmatter 跟正文糊在一起, 中间还有
+ *     空行 ("内容中间出现空白区域" 问题)
+ *   - 现在: frontmatter 单独显示 (key-value 小表格), 正文走 markdown 渲染
+ *   - tool/mcp body 走 JSON.stringify(body, null, 2) pretty print
+ *
+ * D214 v8: popover 高度 360→240, 更紧凑更贴 chip
+ *   - 之前 360 + chip 在底部 → popover 顶到 viewport 顶, 离 chip 太远
+ *   - 现在 240 → 离 chip 最多 240+22+6 = 268px, 跟 chip 视觉更近
+ *   - 超过 240 内部滚动, 不溢出 viewport
  */
-import { computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch, nextTick } from 'vue';
 import { X, FileText, Wrench, Plug } from 'lucide-vue-next';
 import { useChipPreview } from '@/composables/useChipPreview';
+import MarkdownContent from './ChatMain/MarkdownContent.vue';
 
 const { current, closeRef } = useChipPreview();
 
 // 是否显示
 const isOpen = computed(() => current.value !== null);
 
+/**
+ * 解析 body:
+ * - skill: 剥 frontmatter (--- 之间的 YAML), frontmatter 单独展示 (key-value),
+ *         正文走 markdown
+ * - tool/mcp: 尝试 JSON.parse + pretty print, parse 失败 fallback 原文
+ */
+interface ParsedBody {
+  /** frontmatter (skill 才有), key-value 形式, 排成小表格 */
+  frontmatter: Array<{ key: string; value: string }>;
+  /** 主体 markdown 文本 (skill) 或 pretty JSON (tool/mcp) */
+  body: string;
+  /** 主体类型, 模板按这个分支渲染 */
+  type: 'markdown' | 'json' | 'text';
+}
+
+const parsedBody = computed<ParsedBody | null>(() => {
+  if (!current.value || current.value.loading || current.value.error) return null;
+  const raw = current.value.body;
+  if (current.value.kind === 'skill') {
+    return parseSkillBody(raw);
+  }
+  // tool / mcp: body 是 JSON 字符串
+  try {
+    const obj = JSON.parse(raw);
+    return {
+      frontmatter: [],
+      body: JSON.stringify(obj, null, 2),
+      type: 'json',
+    };
+  } catch {
+    return { frontmatter: [], body: raw, type: 'text' };
+  }
+});
+
+function parseSkillBody(raw: string): ParsedBody {
+  // 匹配开头的 YAML frontmatter: ---\n...\n---\n (CRLF 也兼容)
+  const fmMatch = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!fmMatch) {
+    return { frontmatter: [], body: raw, type: 'markdown' };
+  }
+  const fmText = fmMatch[1];
+  const main = fmMatch[2];
+  // 解析 frontmatter: 一行一个 key: value, 简单支持 (name / description)
+  const frontmatter: Array<{ key: string; value: string }> = [];
+  for (const line of fmText.split(/\r?\n/)) {
+    const m = line.match(/^([a-zA-Z_][\w-]*)\s*:\s*(.*)$/);
+    if (m) {
+      frontmatter.push({ key: m[1], value: m[2].trim() });
+    }
+  }
+  return { frontmatter, body: main.trim(), type: 'markdown' };
+}
+
 // 浮层位置 (根据 chip 位置算)
 const popupStyle = computed(() => {
   if (!current.value) return {};
-  const POPUP_MAX_H = 360;
+  const POPUP_MAX_H = 240;          // D214 v8: 360→240, 跟 chip 视觉更近
   const POPUP_W = 480;
   const MARGIN = 6;
   const vw = window.innerWidth;
@@ -31,12 +96,15 @@ const popupStyle = computed(() => {
   let left = anchor.left + anchor.width / 2 - POPUP_W / 2;
   left = Math.max(8, Math.min(left, vw - POPUP_W - 8));
   // 纵向: 默认下方, 下方 < POPUP_MAX_H + 40 时翻到上方
+  //   D214 v8: 跟 chip 视觉对齐 — popover 顶端贴 chip 底端 (top = anchor.top + 22 + MARGIN)
+  //   而不是 360+chip 高度才往下放
   const spaceBelow = vh - (anchor.top + MARGIN);
   const spaceAbove = anchor.top - MARGIN;
   let top: number;
-  if (spaceBelow >= Math.min(POPUP_MAX_H, 200) || spaceBelow > spaceAbove) {
+  if (spaceBelow >= Math.min(POPUP_MAX_H, 180) || spaceBelow > spaceAbove) {
     top = anchor.top + 22 + MARGIN;  // 22 ≈ chip 高度
   } else {
+    // 翻到 chip 上方: popover 底端贴 chip 顶端, 而不是固定 240 高 (更贴 chip)
     top = anchor.top - POPUP_MAX_H - MARGIN;
     if (top < 8) top = 8;
   }
@@ -79,8 +147,6 @@ function onDocumentMouseUp(e: MouseEvent) {
 }
 
 const popupEl = ref<HTMLElement | null>(null);
-// Vue ref 替身 (script setup 里直接用 ref 会爆, 用 import)
-import { ref } from 'vue';
 
 onMounted(() => {
   document.addEventListener('keydown', onKeydown);
@@ -120,7 +186,23 @@ watch(isOpen, async (open) => {
       <div v-else-if="current.error" class="chip-preview__error">
         加载失败: {{ current.error }}
       </div>
-      <pre v-else class="chip-preview__body">{{ current.body }}</pre>
+      <div v-else-if="parsedBody" class="chip-preview__body">
+        <!-- D214 v8: frontmatter 单独排成小表格 (name + description),
+             正文走 markdown 渲染 (MarkdownContent 组件, 跟 chat 渲染一致).
+             之前 <pre> 直接显示原文 → frontmatter 跟正文糊一起, 中间大块空白 -->
+        <div v-if="parsedBody.frontmatter.length > 0" class="chip-preview__meta">
+          <div v-for="row in parsedBody.frontmatter" :key="row.key" class="chip-preview__meta-row">
+            <span class="chip-preview__meta-key">{{ row.key }}</span>
+            <span class="chip-preview__meta-val">{{ row.value }}</span>
+          </div>
+        </div>
+        <!-- 正文 -->
+        <div v-if="parsedBody.type === 'markdown' && parsedBody.body" class="chip-preview__content chip-preview__content--md">
+          <MarkdownContent :content="parsedBody.body" />
+        </div>
+        <pre v-else-if="parsedBody.type === 'json'" class="chip-preview__content chip-preview__content--json">{{ parsedBody.body }}</pre>
+        <pre v-else class="chip-preview__content chip-preview__content--text">{{ parsedBody.body }}</pre>
+      </div>
     </div>
   </Teleport>
 </template>
@@ -179,19 +261,99 @@ watch(isOpen, async (open) => {
   background: var(--pad-bg-hover, rgba(0, 0, 0, 0.06));
   color: var(--pad-fg-primary);
 }
+/* D214 v8: 整体 body 容器, padding 减半, 没有 monospace 强制 (markdown 跟 json 走不同字体) */
 .chip-preview__body {
   margin: 0;
-  padding: 10px 12px;
-  font-family: var(--pad-font-mono);
+  padding: 8px 10px;
+  /* D214 v8: flex 1 让 body 撑满剩余空间 (max-height 控高), 不再 overflow-y 在 body 自身.
+     内容多了由 .chip-preview__content 内部滚动. */
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+  background: var(--pad-bg-base, #fafafa);
+}
+
+/* D214 v8: frontmatter 小表格 (name / description 等) */
+.chip-preview__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.03));
+  border-radius: 4px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.chip-preview__meta-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.chip-preview__meta-key {
+  color: var(--pad-fg-tertiary);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  min-width: 80px;
+  flex-shrink: 0;
+}
+.chip-preview__meta-val {
+  color: var(--pad-fg-primary);
+  word-break: break-word;
+  flex: 1;
+}
+
+/* D214 v8: 内容区 (markdown / json / text 走不同样式) */
+.chip-preview__content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* markdown: 走 sans 字体, 跟 chat 一致. 顶部 margin 去掉避免空行 */
+.chip-preview__content--md {
+  font-family: var(--pad-font-sans);
   font-size: 12px;
+  line-height: 1.5;
+  color: var(--pad-fg-primary);
+}
+/* MarkdownContent 默认会给第一个元素加 margin-top, 在弹窗里不需要, 顶到 meta 表格下沿 */
+.chip-preview__content--md :deep(*) {
+  margin-top: 0 !important;
+}
+.chip-preview__content--md :deep(*:last-child) {
+  margin-bottom: 0 !important;
+}
+
+/* json: pretty print, 等宽字体 */
+.chip-preview__content--json {
+  margin: 0;
+  font-family: var(--pad-font-mono);
+  font-size: 11px;
   line-height: 1.5;
   color: var(--pad-fg-primary);
   white-space: pre-wrap;
   word-break: break-word;
-  overflow-y: auto;
-  flex: 1;
-  background: var(--pad-bg-base, #fafafa);
+  padding: 6px 8px;
+  background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.03));
+  border-radius: 4px;
 }
+.chip-preview__content--text {
+  margin: 0;
+  font-family: var(--pad-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--pad-fg-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 6px 8px;
+  background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.03));
+  border-radius: 4px;
+}
+
 .chip-preview__loading,
 .chip-preview__error {
   padding: 24px 12px;

@@ -644,6 +644,18 @@ function closeSlashPopover() {
   slashPopoverCursor.value = 0;
 }
 
+// D214 v8: 键盘 ↑↓ 选中项时 scroll 进可视区
+//   用 .is-active 找当前选中项, scrollIntoView({block: 'nearest'}) 只滚最小距离
+//   (顶部 / 底部已经在视区内就不滚, 避免抖动)
+function scrollActiveItemIntoView() {
+  const popover = slashPopoverRef.value;
+  if (!popover) return;
+  const active = popover.querySelector('.pad-composer__slash-item.is-active');
+  if (active && 'scrollIntoView' in active) {
+    (active as HTMLElement).scrollIntoView({ block: 'nearest' });
+  }
+}
+
 // D214: 在 contentEditable 模式下, 把 marker 插到光标位置
 //   marker 格式: [[ref:kind:name]] — 内部用, 显示成 kind:name 灰底 chip
 // D214 v5 修: 替换范围 = [last_trigger_char, cursor), 不再用 lastNl+1
@@ -789,10 +801,13 @@ function onRichKeydown(e: KeyboardEvent) {
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
       slashPopoverCursor.value = Math.min(slashPopoverCursor.value + 1, filteredSlashItems.value.length - 1);
+      // D214 v8: 让选中项 scroll 进可视区. 之前只能滚鼠标, 键盘按到底下面看不到
+      nextTick(() => scrollActiveItemIntoView());
       return;
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       slashPopoverCursor.value = Math.max(slashPopoverCursor.value - 1, 0);
+      nextTick(() => scrollActiveItemIntoView());
       return;
     } else if (e.key === 'Enter') {
       if (filteredSlashItems.value.length > 0 && slashPopoverCursor.value >= 0) {
@@ -1127,9 +1142,9 @@ function setText(text: string) {
 defineExpose({ setText });
 
 // ===== D214: contentEditable 自动高度 =====
-// 行为: 跟原 textarea 一样, 1 行起步, 多行按 scrollHeight 长高, 上限 200px.
+// 行为: 跟原 textarea 一样, 1 行起步, 多行按 scrollHeight 长高, 上限 400px (D214 v8: 200→400).
 // 超过 → 内部滚动. contentEditable 的 scrollHeight 计算跟 textarea 一致.
-const COMPOSER_MAX_H = 200;
+const COMPOSER_MAX_H = 400;
 function autoResize() {
   const el = richInputRef.value;
   if (!el) return;
@@ -1485,12 +1500,19 @@ onMounted(() => {
 /* D214 Phase 3: contentEditable rich input
    - 跟 textarea 视觉一致, 但支持 inline chip
    - :empty 伪元素实现 placeholder (contentEditable 不支持 placeholder 属性)
-   - D214 v6: min-height 44→28px, 1 行高, 不需要 2 行的空 padding (之前用户反映留白太大) */
+   - D214 v6: min-height 44→28px, 1 行高, 不需要 2 行的空 padding (之前用户反映留白太大)
+   - D214 v8: max-height 200→400px, 引多个 chip 时换行生长 (之前 200 太矮会卡住)
+   - D214 v8: 加 white-space: pre-wrap + overflow-wrap: anywhere, 让 chip 跟文字
+     能在 chip 边界自然换行, 不再溢出 composer */
 .pad-composer__input-rich {
   /* 跟 textarea 完全一致的尺寸/排版, 让切换零视觉差 */
   min-height: 28px;
-  max-height: 200px;
+  max-height: 400px;
   overflow-y: auto;
+  /* chip + 文字 都能换行. pre-wrap 保留所有空白 + 自动换行, overflow-wrap
+     anywhere 在长 chip 没法整体换行时强制 break */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   /* contentEditable 跟普通 div 一样, 需要 user-select: text 允许选中文本 */
   user-select: text;
   -webkit-user-select: text;
