@@ -172,6 +172,29 @@ function extractNewQuestion(content: string, quoteContent: string): string {
   return after;
 }
 
+// D214: 把 user message content 里的 [[ref:kind:name]] marker 转成 chip HTML, 在 chat 渲染
+//   - escape HTML 防 XSS
+//   - replace marker → <span class="pad-composer__ref-chip">...</span> (不带 × 按钮, 消息已发出不能删)
+//   - 换行 → <br>
+//   用 v-html 渲染, CSS 用 :deep() 穿透 scoped
+function renderMessageContent(content: string): string {
+  // 1. escape HTML 特殊字符 (先 escape, 再做 marker 替换, marker 替换回去是 HTML)
+  let result = content
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  // 2. 把 marker 替换成 chip HTML
+  //   注意: kind/name 已经是 escape 过的版本 (e.g. "<x>" → "&lt;x&gt;"), 浏览器会正确反解析显示
+  const REF_RE = /\[\[ref:(skill|tool|mcp):([^\s\]]+)\]\]/g;
+  result = result.replace(REF_RE, (_, kind, name) => {
+    return `<span class="pad-composer__ref-chip" data-ref-kind="${kind}" data-ref-name="${name}"><span class="pad-composer__ref-chip-label">${kind}</span><span class="pad-composer__ref-chip-name">${name}</span></span>`;
+  });
+  // 3. 换行 → <br>
+  result = result.replace(/\n/g, '<br>');
+  return result;
+}
+
 // v0.5.0-D 第20轮 (D207): user 消息气泡里引用的可折叠行为
 //   默认 collapsed, 显示首行 + "..." + chevron, 点击展开全文 / 收起
 //   短引用 (< 80 字符单行) 自动不折叠 (用 Quote icon 装饰, 没有 chevron)
@@ -459,11 +482,14 @@ const statusText = computed(() => {
         </div>
         <!-- 新问题部分: 从 message.content 去掉 quote 的 > 前缀行 + 空行 -->
         <div class="pad-msg__new-question">
-          <MarkdownContent :content="extractNewQuestion(message.content, message.quoteContent)" />
+          <!-- D214: 用 v-html 渲染, 让 [[ref:kind:name]] marker 显示成 chip
+               MarkdownContent 不认识 marker, 会当文本显示. chip CSS 用 :deep() 穿透 scoped -->
+          <div class="pad-msg__user-content" v-html="renderMessageContent(extractNewQuestion(message.content, message.quoteContent))" />
         </div>
       </template>
       <template v-else>
-        <MarkdownContent :content="message.content" />
+        <!-- D214: 同上 — v-html + renderMessageContent 渲染 chip -->
+        <div class="pad-msg__user-content" v-html="renderMessageContent(message.content)" />
       </template>
     </div>
   </div>
@@ -861,6 +887,59 @@ const statusText = computed(() => {
   /* 新问题部分: 普通 markdown 渲染, 跟原 user 气泡一致 */
   font-size: var(--pad-fs-14);
   line-height: var(--pad-lh-base, 1.5);
+}
+
+/* D214: user 消息气泡里 chip 渲染样式
+   跟 Composer 里的 chip 同款 (类名复用, 避免双套样式)
+   :deep() 穿透 scoped, 因为 chip 是 v-html 注入的 (没有 data-v-xxx 属性) */
+.pad-msg__user-content :deep(.pad-composer__ref-chip),
+.pad-msg__new-question :deep(.pad-composer__ref-chip) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px 1px 4px;
+  margin: 0 2px;
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: nowrap;
+  vertical-align: baseline;
+  background: #e8e8ed;
+  border: 1px solid #c8c8d0;
+  color: #2a2a35;
+}
+.pad-msg__user-content :deep(.pad-composer__ref-chip[data-ref-kind="skill"]),
+.pad-msg__new-question :deep(.pad-composer__ref-chip[data-ref-kind="skill"]) {
+  background: #e0e8f7;
+  border-color: #9bb4e6;
+  color: #1a3a7a;
+}
+.pad-msg__user-content :deep(.pad-composer__ref-chip[data-ref-kind="tool"]),
+.pad-msg__new-question :deep(.pad-composer__ref-chip[data-ref-kind="tool"]) {
+  background: #ede0f7;
+  border-color: #c89be6;
+  color: #5a1a7a;
+}
+.pad-msg__user-content :deep(.pad-composer__ref-chip[data-ref-kind="mcp"]),
+.pad-msg__new-question :deep(.pad-composer__ref-chip[data-ref-kind="mcp"]) {
+  background: #dff0e4;
+  border-color: #95c8a4;
+  color: #1a5a2a;
+}
+.pad-msg__user-content :deep(.pad-composer__ref-chip-label),
+.pad-msg__new-question :deep(.pad-composer__ref-chip-label) {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+  padding: 0 4px 0 4px;
+  border-right: 1px solid rgba(0, 0, 0, 0.15);
+}
+.pad-msg__user-content :deep(.pad-composer__ref-chip-name),
+.pad-msg__new-question :deep(.pad-composer__ref-chip-name) {
+  font-weight: 500;
+  padding: 0 4px 0 0;
 }
 
 /* ===== assistant 流 (左, 连续, 无背景) ===== */

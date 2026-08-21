@@ -9,7 +9,7 @@
  */
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
-import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck, Quote, X, Lock, ListOrdered } from 'lucide-vue-next';
+import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck, Quote, X, Lock, ListOrdered, Wrench, Plug } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
 import { useConfigStore, PROVIDER_OPTIONS, PERMISSION_MODE_OPTIONS, type PermissionMode } from '@/stores/config';
@@ -165,7 +165,11 @@ function renderRichInput(): void {
         if (lines[i]) html += `<span>${escapeHtml(lines[i])}</span>`;
       }
     } else {
-      html += `<span class="pad-composer__ref-chip" contenteditable="false" data-ref-kind="${p.refKind}" data-ref-name="${escapeHtml(p.refName || '')}">@${p.refKind}:${escapeHtml(p.refName || '')}<span class="pad-composer__ref-chip-x" data-remove="${escapeHtml(p.content)}">×</span></span>`;
+      // D214 v3 bug fix: chip 内部 span 全部显式 contenteditable="false"
+      //   某些浏览器 (尤其 WebView2) 不严格继承父级 false, 导致 Backspace 能进 chip 内部
+      //   删字, 跟 "整块删" 的预期不符. 显式标 false 确保整块不可编辑.
+      // D214 v2: 显示用 `kind:name` 格式 (不带 @ 前缀), 跟 Notion/Slack @ mention 一致
+      html += `<span class="pad-composer__ref-chip" contenteditable="false" data-ref-kind="${p.refKind}" data-ref-name="${escapeHtml(p.refName || '')}" data-text-length="${p.content.length}"><span class="pad-composer__ref-chip-label" contenteditable="false">${p.refKind}</span><span class="pad-composer__ref-chip-name" contenteditable="false">${escapeHtml(p.refName || '')}</span><span class="pad-composer__ref-chip-x" contenteditable="false" data-remove="${escapeHtml(p.content)}">×</span></span>`;
     }
   }
   // 只有内容真正变了才写 (避免无谓重渲染)
@@ -177,10 +181,12 @@ function renderRichInput(): void {
 }
 
 // 在 contentEditable 里, 把光标放到 text offset 位置
+// D214 bug fix: chip 用 data-text-length 记录 marker 在 inputText 里的实际长度
+//   (visible text "@skill:x" 是 8 字符, 但 marker "[[ref:skill:x]]" 是 16 字符)
+//   setCursor 必须用 data-text-length 减去, 才能跟 inputText 位置 1:1 对应
 function setCursorByTextOffset(offset: number): void {
   if (!richInputRef.value) return;
   const root = richInputRef.value;
-  // 跳过所有 ref-chip (它不参与 text offset)
   let remaining = offset;
   function visit(node: Node): { node: Node; offset: number } | null {
     if (node.nodeType === Node.TEXT_NODE) {
@@ -191,12 +197,16 @@ function setCursorByTextOffset(offset: number): void {
       remaining -= len;
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement;
-      // 跳过 chip 整段
       if (el.classList && el.classList.contains('pad-composer__ref-chip')) {
-        // 整段 chip 不占 text offset, 跳过
+        // chip 整段对应 marker 文本 (data-text-length), 减去后 cursor 跳到 chip 后
+        const chipTextLen = parseInt(el.dataset.textLength || '0', 10);
+        if (remaining <= chipTextLen) {
+          // cursor 在 chip 内部或刚好在 chip 末尾 — 都放到 chip 之后 (chip 不可编辑)
+          return { node: el.parentNode!, offset: Array.from(el.parentNode!.childNodes).indexOf(el) + 1 };
+        }
+        remaining -= chipTextLen;
         return null;
       }
-      // 处理 <br> 算 1 个换行符
       if (el.tagName === 'BR') {
         if (remaining === 0) return { node: el, offset: 0 };
         remaining -= 1;
@@ -219,12 +229,13 @@ function setCursorByTextOffset(offset: number): void {
     sel.removeAllRanges();
     sel.addRange(range);
   } catch (e) {
-    // 极端情况: 光标恢复失败, 不影响主要功能
     console.warn('[Composer] setCursorByTextOffset failed:', e);
   }
 }
 
 // 从 contentEditable 的当前 selection 计算 text offset
+// D214 bug fix: chip 用 data-text-length 记录 marker 实际长度, 累加时用它
+//   而不是 chip 显示文本长度 (display "@skill:x" ≠ marker "[[ref:skill:x]]")
 function getCursorOffsetInText(): number {
   if (!richInputRef.value) return inputText.value.length;
   const sel = window.getSelection();
@@ -233,7 +244,6 @@ function getCursorOffsetInText(): number {
   if (!richInputRef.value.contains(range.startContainer)) {
     return inputText.value.length;
   }
-  // 从 root 走到 startContainer, 累加 text 长度
   const root = richInputRef.value;
   let total = 0;
   function visit(node: Node, until: Node | null, untilOffset: number): boolean {
@@ -243,12 +253,19 @@ function getCursorOffsetInText(): number {
       } else if (node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).tagName === 'BR') {
         total += untilOffset;
       } else {
-        // 走到 element 的第 N 个 child
         for (let i = 0; i < untilOffset && i < node.childNodes.length; i++) {
           const c = node.childNodes[i];
-          if (c.nodeType === Node.TEXT_NODE) total += (c.textContent || '').length;
-          else if ((c as HTMLElement).tagName === 'BR') total += 1;
-          // chip 整段不算 text
+          if (c.nodeType === Node.TEXT_NODE) {
+            total += (c.textContent || '').length;
+          } else if (c.nodeType === Node.ELEMENT_NODE) {
+            const cel = c as HTMLElement;
+            if (cel.classList && cel.classList.contains('pad-composer__ref-chip')) {
+              // chip 用 data-text-length (marker 实际长度)
+              total += parseInt(cel.dataset.textLength || '0', 10);
+            } else if (cel.tagName === 'BR') {
+              total += 1;
+            }
+          }
         }
       }
       return true;
@@ -258,7 +275,8 @@ function getCursorOffsetInText(): number {
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement;
       if (el.classList && el.classList.contains('pad-composer__ref-chip')) {
-        // chip 整段不占 text offset
+        // chip: 累加 data-text-length (marker 长度), 不算 visible text
+        total += parseInt(el.dataset.textLength || '0', 10);
         return false;
       }
       if (el.tagName === 'BR') {
@@ -444,7 +462,9 @@ const { sendQueueBySession } = storeToRefs(chatStore);
 const currentSessionQueue = computed<string[]>(() => {
   const sid = activeSession.value?.id;
   if (!sid) return [];
-  return sendQueueBySession.value[sid] ?? [];
+  // D214 v5: 队列 item 改 {llm, user} 对象, UI 显示干净 user 文本 (不含 <reference> block)
+  const raw = sendQueueBySession.value[sid] ?? [];
+  return raw.map((it) => it.user);
 });
 const queueLength = computed(() => currentSessionQueue.value.length);
 const showQueuePanel = ref(false);
@@ -492,51 +512,59 @@ function removeQueueItem(index: number) {
 const slashPopoverRef = ref<HTMLElement | null>(null);
 
 function isSlashTriggerActive(): { active: boolean; trigger: '/' | '@' | null } {
-  // D214: 同时支持 "/" (行首命令) 和 "@" (任意位置引用, 跟 Notion/Slack 一致)
-  //   "/" 必须行首 (slash command 风格)
-  //   "@" 任意位置, 但不能在单词中间 (e.g. "email@" 不触发, " @" 触发)
+  // D214 v2: "/" 和 "@" 行为统一 — 都能在 chip 后/空白后/行首/标点后触发
+  //   之前 "/" 必须行首, 但用户在一个 chip 后打 "/", popover 永远空.
+  //   改: 跟 "@" 一样宽松, 任意非单词位置都能触发.
   const text = inputText.value;
   const cursor = getCursorOffsetInText();
   const before = text.slice(0, cursor);
   const after = text.slice(cursor);
 
-  // 先试 "@": 光标前最后一个非空字符是 @, 且 @ 前面是空白/行首/标点
-  const lastAt = before.lastIndexOf('@');
-  if (lastAt >= 0) {
-    const between = before.slice(lastAt + 1);
-    // @ 和光标之间不能有空白 (否则已经退出 @ 模式)
-    if (!/\s/.test(between)) {
-      const charBeforeAt = lastAt > 0 ? before[lastAt - 1] : '';
-      if (lastAt === 0 || /\s|[(\[]/.test(charBeforeAt)) {
-        // 后面也不能有 @
-        if (!after.startsWith('@')) {
-          return { active: true, trigger: '@' };
-        }
-      }
-    }
+  // 通用逻辑: 找最近一个 trigger char (@ 或 /), 检查它前面是不是英文单词中间
+  //   trigger char 必须在光标前, 之间没有空白
+  //   trigger char 前面不能是英文字母 (避免 "test/x" 这种单词中间触发)
+  //   但允许: 空白/行首/[/(/]/中文/数字/标点/... (中文打 / 应该能触发, chip 后打 / 也能触发)
+  //   后面不能直接是另一个 @ 或 /
+  function checkTrigger(ch: '@' | '/'): boolean {
+    const lastIdx = before.lastIndexOf(ch);
+    if (lastIdx < 0) return false;
+    const between = before.slice(lastIdx + 1);
+    if (/\s/.test(between)) return false;
+    const charBefore = lastIdx > 0 ? before[lastIdx - 1] : '';
+    // 关键: 只挡 ASCII 英文字母 (a-zA-Z), 其他 (中文/数字/标点/空白/[]) 都放行
+    if (lastIdx !== 0 && /[a-zA-Z]/.test(charBefore)) return false;
+    if (after.startsWith(ch)) return false;
+    return true;
   }
 
-  // 再试 "/": 必须行首 (slash command 风格保持不变)
-  const lastNl = before.lastIndexOf('\n');
-  const lineStart = lastNl + 1;
-  const lineBefore = before.slice(lineStart);
-  if (lineBefore.trim() === lineBefore && lineBefore.startsWith('/') && !after.startsWith('/')) {
-    return { active: true, trigger: '/' };
-  }
-
+  // @ 优先级稍高 (更常见), 但实际上谁先匹配都行
+  if (checkTrigger('@')) return { active: true, trigger: '@' };
+  if (checkTrigger('/')) return { active: true, trigger: '/' };
   return { active: false, trigger: null };
 }
 
 function getSlashQuery(): string {
-  // 取触发符到光标之间的文本作为过滤关键字
+  // D214 v4 bug fix: 不能简单 lineBefore.slice(1), 因为 chip 后的 "/" 前面是 "]"
+  //   (marker 末尾), 不是 "/" 字符. 改成找最近的 trigger char 位置, 取后面文本
   const text = inputText.value;
   const cursor = getCursorOffsetInText();
   const before = text.slice(0, cursor);
+
+  // 找最近的 / 或 @, 哪个在光标前更近用哪个
+  const lastSlash = before.lastIndexOf('/');
   const lastAt = before.lastIndexOf('@');
-  if (lastAt >= 0 && !/\s/.test(before.slice(lastAt + 1))) {
-    return before.slice(lastAt + 1);
+  let triggerIdx = -1;
+  if (lastSlash >= 0 && !/\s/.test(before.slice(lastSlash + 1))) {
+    triggerIdx = lastSlash;
   }
-  return before.slice(before.lastIndexOf('\n') + 1).slice(1);  // 去掉 "/"
+  if (lastAt >= 0 && !/\s/.test(before.slice(lastAt + 1))) {
+    if (lastAt > triggerIdx) {
+      triggerIdx = lastAt;
+    }
+  }
+
+  if (triggerIdx < 0) return '';
+  return before.slice(triggerIdx + 1);
 }
 
 // D214 Phase 3: watch inputText 触发 contentEditable re-render
@@ -548,12 +576,30 @@ watch(inputText, () => {
   nextTick(renderRichInput);
 });
 
+// D214: 主动 load 3 个 store, 确保 popover 里有数据
+//   之前完全靠 sidecar snapshot event, 启动时序问题 / 没访问 Tools/MCP tab
+//   都会导致 store 是空的. 现在 on popover open 时主动 refresh
+let _ensureLoadedPromise: Promise<void> | null = null;
+async function ensureResourcesLoaded() {
+  if (_ensureLoadedPromise) return _ensureLoadedPromise;
+  _ensureLoadedPromise = (async () => {
+    // Skills: 走 store 自己的 refreshFromTauri (Tauri list_skills, 不依赖 sidecar event)
+    try { await skillsStore.refreshFromTauri(); } catch (e) { console.warn('[Composer] skills refresh failed:', e); }
+    // User tools + MCP: 走 store 自带的 refresh
+    try { await userToolsStore.refresh(); } catch (e) { console.warn('[Composer] userTools refresh failed:', e); }
+    try { await mcpServersStore.refresh(); } catch (e) { console.warn('[Composer] mcpServers refresh failed:', e); }
+  })();
+  return _ensureLoadedPromise;
+}
+
 function openSlashPopover() {
   showSlashPopover.value = true;
   const trig = isSlashTriggerActive();
   slashPopoverTrigger.value = trig.trigger;
   slashPopoverQuery.value = getSlashQuery();
   slashPopoverCursor.value = 0;
+  // D214: 弹层打开时确保数据加载完成, 不阻塞 UI
+  ensureResourcesLoaded();
 }
 
 function closeSlashPopover() {
@@ -564,18 +610,20 @@ function closeSlashPopover() {
 }
 
 // D214: 在 contentEditable 模式下, 把 marker 插到光标位置
-//   marker 格式: [[ref:kind:name]] — 内部用, 显示成 @kind:name 灰底 chip
+//   marker 格式: [[ref:kind:name]] — 内部用, 显示成 kind:name 灰底 chip
+// D214 v5 修: 替换范围 = [last_trigger_char, cursor), 不再用 lastNl+1
+//   旧实现 "/" 用 lastNl+1, 单行场景 (chip + text + /skill2) 会把整行前面全删
+//   (issue 3: 第二个 slash 覆盖第一个 chip). 统一用 lastIndexOf(trigger),
+//   跟 getSlashQuery 保持一致 — trigger char 前面不管什么字符都放行.
 function insertMarkerAtCursor(marker: string): void {
   const text = inputText.value;
   const cursor = getCursorOffsetInText();
   const before = text.slice(0, cursor);
   let replaceFrom = cursor;
-  if (slashPopoverTrigger.value === '@') {
-    const lastAt = before.lastIndexOf('@');
-    if (lastAt >= 0) replaceFrom = lastAt;
-  } else if (slashPopoverTrigger.value === '/') {
-    const lastNl = before.lastIndexOf('\n');
-    replaceFrom = lastNl + 1;
+  const trigger = slashPopoverTrigger.value;
+  if (trigger) {
+    const lastTrigger = before.lastIndexOf(trigger);
+    if (lastTrigger >= 0) replaceFrom = lastTrigger;
   }
   const newText = text.slice(0, replaceFrom) + marker + text.slice(cursor);
   inputText.value = newText;
@@ -603,13 +651,42 @@ async function pickSlashItem(item: SlashItem) {
   console.log(`[Composer / popover] ${item.kind} reference inserted: ${item.name}`);
 }
 
+// D214 v3 bug fix: 用 innerText 提取会丢 chip marker (变成 "SKILL name ×" 字符串)
+//   改用 DOM walk, chip 元素用 marker 文本代替, 纯文本节点原样保留
+//   这样输入 `/` 后 chip 不会被 watch 重渲染抹掉
+function extractLogicalText(root: HTMLElement): string {
+  let result = '';
+  function visit(node: Node): void {
+    if (node.nodeType === Node.TEXT_NODE) {
+      result += (node.textContent || '').replace(/\u00A0/g, ' ');
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      const el = node as HTMLElement;
+      if (el.classList && el.classList.contains('pad-composer__ref-chip')) {
+        const kind = el.dataset.refKind;
+        const name = el.dataset.refName;
+        if (kind && name) {
+          result += `[[ref:${kind}:${name}]]`;
+        }
+        // chip 内部 text/span 都跳过 (chip 整体对应一个 marker)
+      } else if (el.tagName === 'BR') {
+        result += '\n';
+      } else {
+        for (const child of Array.from(node.childNodes)) {
+          visit(child);
+        }
+      }
+    }
+  }
+  visit(root);
+  // 统一换行符
+  return result.replace(/\r\n?/g, '\n');
+}
+
 // D214: contentEditable 输入处理 (替代 onTextareaInput)
 function onRichInput() {
   if (isComposing.value) return;  // IME 组合中不重算
   if (!richInputRef.value) return;
-  const newText = richInputRef.value.innerText
-    .replace(/\u00A0/g, ' ')
-    .replace(/\r\n?/g, '\n');
+  const newText = extractLogicalText(richInputRef.value);
   inputText.value = newText;
   const trig = isSlashTriggerActive();
   if (trig.active) {
@@ -622,6 +699,17 @@ function onRichInput() {
     if (showSlashPopover.value) closeSlashPopover();
   }
   nextTick(autoResize);
+}
+
+// D214 v5: IME compositionend 兜底
+//   WebView2 / 某些浏览器在 IME 完成 (compositionend) 后, input 事件可能不重新触发,
+//   导致 onRichInput 没机会跑, inputText.value 还停留在 composition 之前的状态.
+//   用户接着按 Enter 发消息时, send() 读到的 text 就少了刚输入的中文/日文/韩文等
+//   IME 文字 — 表现为"文字被吞".
+//   修法: compositionend 主动调 onRichInput 重新从 DOM 提取文本, 同步 inputText.
+function onCompositionEnd() {
+  isComposing.value = false;
+  onRichInput();
 }
 
 function onRichKeydown(e: KeyboardEvent) {
@@ -705,6 +793,19 @@ function openSettings() {
 }
 
 async function send() {
+  // D214 v5 兜底: send 前再 sync 一次, 防止 IME/慢输入场景下 inputText 落后于 DOM
+  //   (典型: WebView2 中文 IME compositionend 后 input 事件不重新触发).
+  //   主动从 DOM 重新提取, 保证 send 读到的 text 跟用户看到的一致.
+  if (richInputRef.value && !isComposing.value) {
+    const synced = extractLogicalText(richInputRef.value);
+    if (synced !== inputText.value) {
+      console.warn('[Composer] send: inputText was stale, refreshed from DOM', {
+        before: inputText.value.slice(0, 60),
+        after: synced.slice(0, 60),
+      });
+    }
+    inputText.value = synced;
+  }
   const rawText = inputText.value;
   const text = rawText.trim();
   if (!text) return;
@@ -779,17 +880,24 @@ async function send() {
     }
   }
 
-  let finalPrompt = text;
+  // D214 v5: 分离 LLM prompt 和 user bubble text
+  //   - LLM prompt 必须含 <reference>...</reference> section, 让 model 看到 user 引用了哪些内容
+  //   - user bubble text 只能含 user 自己打的内容 (chip 渲染, 不显示 reference block —
+  //     那是 LLM 内部协议, 不该展示给用户)
+  //   - 这两个走不同路径: llmText → piTauri.sendPrompt (发给 LLM),
+  //                       userText → message.content (ChatMessage v-html 渲染成 user 气泡)
+  let llmText = text;
   if (refs.length > 0) {
     const refSection = refs
       .map((r) => `<reference type="${r.kind}" name="${r.name}">\n${r.body}\n</reference>`)
       .join('\n\n');
-    finalPrompt = `${refSection}\n\n---\n\n${text}`;
-    console.log(`[Composer] embedded ${refs.length} reference(s): ${refs.map((r) => `${r.kind}:${r.name}`).join(', ')}`);
+    llmText = `${refSection}\n\n---\n\n${text}`;
+    console.log(`[Composer] embedded ${refs.length} reference(s) into LLM prompt: ${refs.map((r) => `${r.kind}:${r.name}`).join(', ')}`);
   }
   inputText.value = '';
   if (richInputRef.value) richInputRef.value.innerHTML = '';
-  await chatStore.sendPrompt(finalPrompt);
+  // userText = text (无 reference section, 但有 [[ref:...]] marker, chat 渲染时转 chip)
+  await chatStore.sendPrompt(llmText, { userText: text });
 }
 
 /**
@@ -923,7 +1031,7 @@ onMounted(() => {
       @input="onRichInput"
       @keydown="onRichKeydown"
       @compositionstart="isComposing = true"
-      @compositionend="isComposing = false"
+      @compositionend="onCompositionEnd"
       @click="onRichClick"
     ></div>
 
@@ -973,7 +1081,8 @@ onMounted(() => {
         <span>没有匹配的项</span>
       </div>
       <div v-else class="pad-composer__slash-list">
-        <template v-for="group in ['Skills', '扩展']" :key="group">
+        <!-- D214: 改用 'Skills' | 'Tools' | 'MCP' 三组, 旧 '扩展' group 已删 -->
+        <template v-for="group in ['Skills', 'Tools', 'MCP']" :key="group">
           <div v-if="filteredSlashItems.some((it) => it.group === group)" class="pad-composer__slash-group-label">
             {{ group }}
           </div>
@@ -984,8 +1093,16 @@ onMounted(() => {
             :class="{ 'is-active': filteredSlashItems.indexOf(it) === slashPopoverCursor, 'is-placeholder': it.isPlaceholder }"
             @click="pickSlashItem(it)"
           >
-            <span class="pad-composer__slash-slug">{{ it.slug }}</span>
-            <span class="pad-composer__slash-desc">{{ it.description }}</span>
+            <!-- D214: Notion/Slack 风格 — 左侧图标 + 右侧 stack (名称粗体, 描述灰) -->
+            <span class="pad-composer__slash-item-icon">
+              <FileText v-if="it.group === 'Skills'" :size="14" :stroke-width="1.75" />
+              <Wrench v-else-if="it.group === 'Tools'" :size="14" :stroke-width="1.75" />
+              <Plug v-else-if="it.group === 'MCP'" :size="14" :stroke-width="1.75" />
+            </span>
+            <span class="pad-composer__slash-item-body">
+              <span class="pad-composer__slash-item-name">{{ it.label }}</span>
+              <span class="pad-composer__slash-item-desc">{{ it.description }}</span>
+            </span>
           </button>
         </template>
       </div>
@@ -1257,54 +1374,73 @@ onMounted(() => {
 }
 
 /* D214 Phase 3: 灰底 inline chip 样式
+   ⚠️ 关键: chip 是通过 renderRichInput 的 innerHTML 注入, 不是 Vue template 渲染.
+     Vue scoped CSS 的 data-v-xxx 属性只加给 template 元素, innerHTML 加的 span
+     没有这个属性, 必须用 :deep() 穿透 scoped, 否则 chip 完全没有 CSS 样式
    - [[ref:kind:name]] 在 contentEditable 里渲染成这个 span
    - 灰底 + 圆角 + inline-block, 跟普通文字混排
    - contenteditable="false" 防止用户改 chip 内部文字
    - data-ref-kind 区分样式颜色 (skill=蓝, tool=紫, mcp=绿) */
-.pad-composer__ref-chip {
+:deep(.pad-composer__ref-chip) {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  padding: 1px 6px;
+  gap: 4px;
+  padding: 2px 8px 2px 4px;
   margin: 0 2px;
-  background: var(--pad-bg-tertiary);
-  border: 1px solid var(--pad-border);
+  background: #e8e8ed;
+  border: 1px solid #c8c8d0;
   border-radius: 4px;
-  font-size: 0.92em;
+  font-size: 13px;
   line-height: 1.4;
-  color: var(--pad-fg-secondary);
+  color: #2a2a35;
   white-space: nowrap;
   user-select: none;
   -webkit-user-select: none;
-  /* 不让 chip 被拆分删除 — 整个 chip 一起被 backspace 删 */
   cursor: default;
   vertical-align: baseline;
 }
-.pad-composer__ref-chip[data-ref-kind="skill"] {
-  background: rgba(99, 130, 220, 0.12);
-  border-color: rgba(99, 130, 220, 0.35);
-  color: rgb(60, 90, 180);
+:deep(.pad-composer__ref-chip[data-ref-kind="skill"]) {
+  background: #e0e8f7;
+  border-color: #9bb4e6;
+  color: #1a3a7a;
 }
-.pad-composer__ref-chip[data-ref-kind="tool"] {
-  background: rgba(160, 100, 220, 0.12);
-  border-color: rgba(160, 100, 220, 0.35);
-  color: rgb(120, 60, 180);
+:deep(.pad-composer__ref-chip[data-ref-kind="tool"]) {
+  background: #ede0f7;
+  border-color: #c89be6;
+  color: #5a1a7a;
 }
-.pad-composer__ref-chip[data-ref-kind="mcp"] {
-  background: rgba(80, 170, 120, 0.12);
-  border-color: rgba(80, 170, 120, 0.35);
-  color: rgb(40, 130, 90);
+:deep(.pad-composer__ref-chip[data-ref-kind="mcp"]) {
+  background: #dff0e4;
+  border-color: #95c8a4;
+  color: #1a5a2a;
 }
-.pad-composer__ref-chip-x {
-  margin-left: 4px;
+:deep(.pad-composer__ref-chip-label) {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+  padding: 0 2px 0 4px;
+  border-right: 1px solid rgba(0, 0, 0, 0.15);
+  line-height: 1.2;
+}
+:deep(.pad-composer__ref-chip-name) {
+  font-weight: 500;
+  line-height: 1.2;
+}
+:deep(.pad-composer__ref-chip-x) {
+  margin-left: 2px;
+  padding: 0 2px;
   cursor: pointer;
-  opacity: 0.6;
-  font-size: 1.1em;
+  opacity: 0.5;
+  font-size: 14px;
   line-height: 1;
   user-select: none;
+  border-radius: 2px;
 }
-.pad-composer__ref-chip-x:hover {
+:deep(.pad-composer__ref-chip-x:hover) {
   opacity: 1;
+  background: rgba(0, 0, 0, 0.1);
 }
 /* v0.6+: 文件引用 (file reference) chip — 跟 skill ref 类似的 chip 风格, 蓝色 (FileText icon) */
 .pad-composer__file-refs {
@@ -1483,10 +1619,15 @@ onMounted(() => {
   color: var(--pad-fg-danger, #dc2626);
 }
 
-/* v0.4.7a: Composer / popover (skill / agent / mcp, 不含 builtin 22) */
+/* v0.4.7a: Composer / popover (skill / agent / mcp, 不含 builtin 22)
+   D214: 改 absolute 定位, 从输入框上方弹出, 跟 permission menu 一样浮在上面 */
 .pad-composer__slash-popover {
-  position: relative;
-  margin-top: var(--pad-sp-2);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 320px;
+  overflow-y: auto;
   background: var(--pad-card, #fff);
   border: 1px solid var(--pad-border, rgba(0,0,0,0.1));
   border-radius: var(--pad-radius-md, 8px);
@@ -1512,26 +1653,65 @@ onMounted(() => {
 }
 .pad-composer__slash-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   width: 100%;
-  padding: 8px 10px;
+  padding: 8px 12px;
   font-size: var(--pad-fs-12);
   color: var(--pad-fg-secondary);
   background: transparent;
   border: none;
-  border-radius: var(--pad-radius-sm, 4px);
+  border-radius: var(--pad-radius-sm, 6px);
   cursor: pointer;
   text-align: left;
-  transition: background var(--pad-dur-fast) ease, color var(--pad-dur-fast) ease;
+  transition: background var(--pad-dur-fast) ease;
 }
 .pad-composer__slash-item:hover,
 .pad-composer__slash-item.is-active {
   background: var(--pad-bg-hover, rgba(0,0,0,0.06));
-  color: var(--pad-fg-primary);
 }
 .pad-composer__slash-item.is-placeholder { opacity: 0.5; cursor: not-allowed; }
 .pad-composer__slash-item.is-placeholder:hover { background: transparent; }
+
+/* D214: Notion/Slack 风格 — 左侧图标 + 右侧 vertical stack */
+.pad-composer__slash-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  background: var(--pad-bg-secondary, rgba(0,0,0,0.04));
+  color: var(--pad-fg-tertiary);
+  margin-top: 1px;
+}
+.pad-composer__slash-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.pad-composer__slash-item-name {
+  font-size: 13px;
+  font-weight: var(--pad-fw-medium, 500);
+  color: var(--pad-fg-primary);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pad-composer__slash-item-desc {
+  font-size: 11px;
+  color: var(--pad-fg-tertiary);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* D214: 旧 slug 样式保留但无视觉影响 (兼容老 build) */
 .pad-composer__slash-slug {
   font-family: var(--pad-font-mono);
   font-size: 12px;

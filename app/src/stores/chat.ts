@@ -180,7 +180,10 @@ export const useChatStore = defineStore('chat', () => {
   //   所以消息先进队, 等当前 turn 走完 (agent_end willRetry=false) 再自动出队发送.
   // 设计选择: 不在内存里限上限 (用户连发 100 条也允许), session 切换 / force stop 都不清空 (用户随时能看到).
   //   session 删除 (removeSession) 才清队列, 防内存泄漏.
-  const sendQueueBySession = ref<Record<string, string[]>>({});
+  // D214 v5: 队列 item 改 {llm, user} 对象 — llm 是发给 LLM 的完整 prompt (含 <reference> block),
+  //   user 是给 user 气泡显示的干净文本 (无 reference section, 但有 [[ref:...]] marker 转 chip).
+  //   之前 string[] 没法同时存两个, 会让 user 气泡显示 reference 块 (issue 2).
+  const sendQueueBySession = ref<Record<string, Array<{ llm: string; user: string }>>>({});
 
   /** 取某 session 队列长度, UI 用来显示 "队列中 N 条" 徽标. */
   function getQueueLength(sessionId: string): number {
@@ -880,9 +883,12 @@ export const useChatStore = defineStore('chat', () => {
    * - 没 workspace → 用 piTauri.ensureDefaultWorkspace() (<home>/PiAgent) 建 workspace + session, 再发
    *   (用户可手动通过 sidebar / tab strip 的"本地"下拉选别的路径)
    */
-  async function sendPrompt(content: string, opts: { fromQueue?: boolean } = {}) {
+  async function sendPrompt(content: string, opts: { fromQueue?: boolean; userText?: string } = {}) {
     const text = content.trim();
     if (!text) return;
+    // D214 v5: userText = 干净 user 文本 (无 <reference> section, 但有 [[ref:...]] marker),
+    //   用于 user 气泡渲染. 不传则 fallback 到 text (旧行为, reference 块会显示在 user 气泡).
+    const userBaseText = (opts.userText ?? text).trim();
     // 0.3: 切 workspace in-flight 期间拒绝发. sidecar 还没就绪, 发过去会用旧 cwd 写到错位置.
     if (sessionStore.isSwitchingWorkspace) {
       const msg = '[chat] sendPrompt rejected: workspace 切换中, 等切换完成再发';
@@ -900,9 +906,9 @@ export const useChatStore = defineStore('chat', () => {
       const list = sendQueueBySession.value[targetSessionIdForQueue] ?? [];
       sendQueueBySession.value = {
         ...sendQueueBySession.value,
-        [targetSessionIdForQueue]: [...list, text],
+        [targetSessionIdForQueue]: [...list, { llm: text, user: userBaseText }],
       };
-      console.log('[chat] sendPrompt: enqueued (streaming), session=', targetSessionIdForQueue, 'queueLen=', list.length + 1, 'preview=', text.slice(0, 40));
+      console.log('[chat] sendPrompt: enqueued (streaming), session=', targetSessionIdForQueue, 'queueLen=', list.length + 1, 'preview=', userBaseText.slice(0, 40));
       return;
     }
     console.log('[chat] sendPrompt: contentLen=', text.length, 'activeSession=', sessionStore.activeSessionId, 'fromQueue=', !!opts.fromQueue);
@@ -926,7 +932,7 @@ export const useChatStore = defineStore('chat', () => {
           return;
         }
       }
-      const sess = sessionStore.addSession(wid, text.slice(0, 30) || '新任务');
+      const sess = sessionStore.addSession(wid, userBaseText.slice(0, 30) || '新任务');
       sessionId = sess.id;
       wasNewlyCreated = true;
       console.log('[chat] sendPrompt: created new session', sessionId);
@@ -957,39 +963,47 @@ export const useChatStore = defineStore('chat', () => {
     //   不加 [标签] (D201/D203 那种角色标签 — 大模型冗余小模型更乱)
     //   不剥离 <think> (D203 那种 — 副作用多, 改回让 model 看到原文)
     const quote = quoteBySession.value[sessionId];
-    let fullUserText = text;
+    const fileRefs = fileRefsBySession.value[sessionId] ?? [];
     let quoteContent: string | null = null;
+    let quotedLines = '';
+    let refsBlock = '';
+    let refsHeader = '';
     if (quote && quote.content.trim()) {
       // markdown blockquote 标记: 每行加 "> " 前缀
       //   保留原文 (不剥离 think), model 自己处理
-      const quotedLines = quote.content
+      quotedLines = quote.content
         .split('\n')
         .map((line) => line.trim() ? `> ${line}` : '>')
         .join('\n');
-      fullUserText = `${quotedLines}\n\n${text}`;
       quoteContent = quote.content;
-      console.log('[chat] sendPrompt: with quote (messageId=', quote.messageId, ', len=', quote.content.length, ', fullLen=', fullUserText.length, ')');
-      // 调试: 打印实际发送的 user message 全文, F12 console 可验证
+    }
+    if (fileRefs.length > 0) {
+      // v0.6+ 文件引用 (file reference) — sidebar 文件树点文件收集的 refs
+      //   拼成 markdown code block 放在 quote 之后, user text 之前. LLM 看到路径能直接 read.
+      refsBlock = fileRefs.map((r) => `\`${r.path}\``).join('\n');
+      refsHeader = '以下文件被引用 (来自当前工作区):';
+    }
+    // D214 v5: 拆 LLM text 和 user bubble text
+    //   - llmText = quote + file refs + text (text 含 <reference> section, 给 LLM 看到完整 context)
+    //   - fullUserText = quote + file refs + userBaseText (userBaseText 不含 reference section, 给 user 看)
+    //   顺序一致: quote 在前, file refs 在中, base text 在后
+    let llmText = text;
+    let fullUserText = userBaseText;
+    if (quote) {
+      llmText = `${quotedLines}\n\n${llmText}`;
+      fullUserText = `${quotedLines}\n\n${fullUserText}`;
+    }
+    if (fileRefs.length > 0) {
+      llmText = `${quotedLines}\n\n${refsHeader}\n${refsBlock}\n\n${text}`;
+      fullUserText = `${quotedLines}\n\n${refsHeader}\n${refsBlock}\n\n${userBaseText}`;
+    }
+    if (quote) {
+      console.log('[chat] sendPrompt: with quote (messageId=', quote.messageId, ', len=', quote.content.length, ', llmLen=', llmText.length, ', userLen=', fullUserText.length, ')');
+      // 调试: 打印实际发送的两份文本, F12 console 可验证
+      console.log('[chat] sendPrompt: llmText =\n', llmText);
       console.log('[chat] sendPrompt: fullUserText =\n', fullUserText);
     }
-    // v0.6+ 文件引用 (file reference) — sidebar 文件树点文件收集的 refs
-    //   拼成 markdown code block 放在 quote 之后, user text 之前. LLM 看到路径能直接 read.
-    //   没 quote 时直接拼在最前面. 不引号 quoteContent 单独存 (file refs 不是 "历史消息引用",
-    //   是当前 workspace 内的资源; 不需要 ChatMessage 单独 blockquote 样式, markdown 已经够清晰).
-    const fileRefs = fileRefsBySession.value[sessionId] ?? [];
     if (fileRefs.length > 0) {
-      const refsBlock = fileRefs.map((r) => `\`${r.path}\``).join('\n');
-      const refsHeader = '以下文件被引用 (来自当前工作区):';
-      if (fullUserText === text) {
-        fullUserText = `${refsHeader}\n${refsBlock}\n\n${text}`;
-      } else {
-        // 有 quote 在前面, refs 插 quote 之后
-        const quotedLines = quote!.content
-          .split('\n')
-          .map((line) => line.trim() ? `> ${line}` : '>')
-          .join('\n');
-        fullUserText = `${quotedLines}\n\n${refsHeader}\n${refsBlock}\n\n${text}`;
-      }
       console.log('[chat] sendPrompt: with fileRefs (count=', fileRefs.length, ', paths=', fileRefs.map((r) => r.path).join(', '), ')');
     }
     appendUserMessage(sessionId, fullUserText, quoteContent);
@@ -1212,9 +1226,9 @@ export const useChatStore = defineStore('chat', () => {
             const next = queue[0];
             const remaining = queue.slice(1);
             sendQueueBySession.value = { ...sendQueueBySession.value, [sessionId]: remaining };
-            console.log('[chat] agent_end: dequeue sendPrompt, remaining=', remaining.length, 'preview=', next.slice(0, 40));
+            console.log('[chat] agent_end: dequeue sendPrompt, remaining=', remaining.length, 'preview=', next.user.slice(0, 40));
             queueMicrotask(() => {
-              void sendPrompt(next, { fromQueue: true });
+              void sendPrompt(next.llm, { fromQueue: true, userText: next.user });
             });
           }
           return;
@@ -1686,14 +1700,15 @@ export const useChatStore = defineStore('chat', () => {
           reasoning: effectiveModel.reasoning,
         },
       });
-      await piTauri.sendPrompt(sessionId, fullUserText, cfgFn);
+      await piTauri.sendPrompt(sessionId, llmText, cfgFn);
       console.log('[chat] sendPrompt: piTauri.sendPrompt resolved');
 
       // Phase 6: fire-and-forget ghost title prompt (仅 first message, 不阻塞主流程)
       if (isFirstMessageForGhost) {
         ghostTriggeredForSession.add(sessionId);
         const baseCfg = cfgFn();
-        triggerGhostTitlePrompt(sessionId, text, baseCfg).catch((e) => {
+        // D214 v5: ghost title 用 userBaseText (干净 user 文本), 不用 text (含 reference block)
+        triggerGhostTitlePrompt(sessionId, userBaseText, baseCfg).catch((e) => {
           console.warn('[chat] ghost: trigger failed (ignored)', e);
         });
       }
@@ -1957,9 +1972,9 @@ export const useChatStore = defineStore('chat', () => {
       const next = queue[0];
       const remaining = queue.slice(1);
       sendQueueBySession.value = { ...sendQueueBySession.value, [sessionId]: remaining };
-      console.log('[chat] forceStopStreaming: dequeue sendPrompt, remaining=', remaining.length, 'preview=', next.slice(0, 40));
+      console.log('[chat] forceStopStreaming: dequeue sendPrompt, remaining=', remaining.length, 'preview=', next.user.slice(0, 40));
       queueMicrotask(() => {
-        void sendPrompt(next, { fromQueue: true });
+        void sendPrompt(next.llm, { fromQueue: true, userText: next.user });
       });
     }
   }
