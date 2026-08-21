@@ -241,30 +241,71 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
   }
 
   /**
-   * v0.6.3-rc1 P2-1.3: 拼装 MCP server body (form 模式用, 接受 type + env).
+   * v0.6.3-rc1 P2-1.3 + P2-3: 拼装 MCP server body (form 模式用, 接受 type + env).
    *   - type 必填, 必须是 stdio | http | sse
-   *   - HTTP/SSE 暂时不实现 (sidecar 只接 stdio), 但 UI 允许写 (P2.3 接上)
+   *   - type=stdio: command 必填, args 可选
+   *   - type=http|sse: url 必填, command/args 不传 (P2-1.8 sidecar 实际支持)
+   *   - env 复用: stdio 时是子进程环境变量, http/sse 时映射成 HTTP request headers
+   *   - timeout 可选
    *
-   * @param params 含 type/name/command/args/env/timeout
+   * @param params 含 type/name/command|url/args/env/timeout
    * @returns 完整 JSON body string
    */
   function buildBodyFromForm(params: {
     type: 'stdio' | 'http' | 'sse';
     name: string;
-    command: string;
-    args: string[];
-    env: Record<string, string>;
+    command?: string;
+    url?: string;
+    args?: string[];
+    env?: Record<string, string>;
     timeout?: number;
   }): string {
     const body: Record<string, unknown> = {
       type: params.type,
       name: params.name,
-      command: params.command,
-      args: params.args,
-      env: params.env,
     };
+    if (params.type === 'stdio') {
+      if (params.command !== undefined) body.command = params.command;
+      if (params.args !== undefined) body.args = params.args;
+    } else {
+      // http / sse
+      if (params.url !== undefined) body.url = params.url;
+    }
+    if (params.env !== undefined) body.env = params.env;
     if (params.timeout !== undefined) body.timeout = params.timeout;
     return JSON.stringify(body, null, 2);
+  }
+
+  /**
+   * v0.6.3-rc1 P2-3: 反解 JSON body 到 form 字段 (form tab 显示用, 切 tab 时调).
+   *   - 拿不到 type 默认 stdio (向后兼容旧 stdio-only config)
+   *   - 解析失败抛错, 上层 catch 后让 user 留在 JSON tab 修
+   *
+   * @param bodyStr 完整 JSON body
+   * @returns form 字段
+   */
+  function parseBodyToForm(bodyStr: string): {
+    type: 'stdio' | 'http' | 'sse';
+    command: string;
+    url: string;
+    args: string;
+    env: string;
+    timeout: number;
+  } {
+    const obj = JSON.parse(bodyStr);
+    const t = (typeof obj.type === 'string' && ['stdio', 'http', 'sse'].includes(obj.type))
+      ? obj.type
+      : 'stdio';
+    return {
+      type: t as 'stdio' | 'http' | 'sse',
+      command: typeof obj.command === 'string' ? obj.command : '',
+      url: typeof obj.url === 'string' ? obj.url : '',
+      args: Array.isArray(obj.args) ? obj.args.join(' ') : '',
+      env: obj.env && typeof obj.env === 'object' && !Array.isArray(obj.env)
+        ? JSON.stringify(obj.env, null, 2)
+        : '{}',
+      timeout: typeof obj.timeout === 'number' ? obj.timeout : 30000,
+    };
   }
 
   return {
@@ -281,6 +322,7 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
     importServers,
     buildDefaultBody,
     buildBodyFromForm,  // v0.6.3-rc1 P2-1.3: form 模式拼 body
+    parseBodyToForm,  // v0.6.3-rc1 P2-3: JSON body 反解到 form 字段 (切 tab 用)
     ensureActiveWorkspace,  // v0.6.3-rc1 P2-1.2: UI 用来同步 ws path 显示 + 排查
     // 暴露给 UI
     BUILTIN_TOOL_NAMES_MCP,
