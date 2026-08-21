@@ -134,14 +134,18 @@
 3. 切不同 session → 自动滚到底 (不再需要手动跳底)
 4. 短消息 chat → 底部留白明显减少 (120→24px)
 
+### D214 v7 chip UX + 性能 (bbe25bf)
+1. 点 chip (Composer 或 ChatMessage 气泡里) → 浮层弹出, 显示完整 body (Teleport 到 body)
+2. 同一 skill 连续发 5 条消息 → 第 2-5 条应该都从 cache 读 (Rust 端走 REF_BODY_CACHE, mtime 一致返)
+3. user 上句引用 huashu-design, 下句"再分析一下" (没 chip) → LLM 还能看到 huashu-design 内容
+   (走 `<recent_refs>` section, D214 v7 隐式续接支持)
+
 ## 已知问题 / 技术债
 
 - 🟡 **D165 system prompt 不可动态改**: 切 skill / 改 skill 内容要重启 sidecar (~150-300ms). `<skill_realtime>` 已在 v0.6.3-rc1 走 user message 注入缓解, 但 system prompt 段仍需重启
 - 🟡 **没 builtin 22 个 slash 的展示**: 隐藏了 (跟 user 14:33 反馈), 但有些有用的看不到
-- 🟡 **Chip × 删除按钮在 mobile 太小**: 14×14px 鼠标好点, 触屏不行 (后续 P1 polish)
-- 🟡 **ChatMessage chip CSS 跟 Composer chip 重复**: 两处都定义 `:deep(.pad-composer__ref-chip)`, 后续可以提到全局 SCSS 复用
-- 🟡 **没 last-mentioned tracking**: 隐式续接 (e.g. "再回复我一次" 没关键词) 仍 fall through 到 cache. 后续 P1 走 last-mentioned tracking 或每次 inject 所有 enabled (token 成本高)
-- 🟡 **Send 时 ref body 重新 read 磁盘**: 每次 send 读 3 类资源 = 高频 IO. 后续可加 in-memory cache + invalidation (skill 改文件 → reload)
+- 🟡 **last-mentioned tracking token 成本**: v7 cap 3 条, 长文件 × 3 = 几十 KB per turn. 后续可加 "短消息才 inject" 启发式降成本
+- 🟡 **last-mentioned 不感知 chip 删除**: user 点 × 删 chip 后, recent refs 不会自动移出 (不像 addRecentRef 那样反向). 后续 P1 polish
 
 ## 后续规划
 
@@ -156,13 +160,20 @@
 - ✅ Composer 留白 + chat 底部留白压缩
 - ✅ Session 切换自动滚底
 
+### P0 (v0.6.3-rc1 已完成, bbe25bf D214 v7)
+- ✅ Chip 点击预览浮层 (P0-2/P0-3)
+- ✅ Chip × 按钮触屏友好 (14→18px)
+- ✅ Chip CSS 提到全局 (assets/styles/chip.css, Composer/ChatMessage 重复规则删掉)
+- ✅ Rust 端 ref body 内存 cache (mtime 校验 + write/delete 主动 invalidate)
+- ✅ Last-mentioned tracking (chat store 维护 recentRefs, 隐式续接 inject recent_refs)
+
 ### P1 (v0.7 候选)
-- Chip × 按钮触屏友好
-- ChatMessage chip CSS 提到全局复用
-- last-mentioned tracking (隐式续接)
-- Send ref body 内存 cache + invalidation
+- Last-mentioned "短消息才 inject" 启发式 (降 token 成本)
+- Last-mentioned 感知 chip 删除 (addRecentRef 配 removeRecentRef)
 
 ### P2 (v0.7+)
 - Skill 分享 / 导出
 - Skill marketplace
 - D165 根因排查 (Pi SDK 0.85+ 是否有 dynamic system prompt API)
+- MCP HTTP / SSE transport
+- MCP config 热更新 (Hot reload)
