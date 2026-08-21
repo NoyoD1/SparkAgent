@@ -163,10 +163,16 @@ function tryBuildServerFromObject(
     return { server: null, error: `${where}: name '${name}' 跟 builtin tool 重名` };
   }
 
-  // 2. command
+  // 2. v0.6.3-rc1 P2-1.8: type 决定必填字段, 提前读出来给后面校验
+  const serverType = typeof obj.type === 'string' ? obj.type : 'stdio';
+  if (!['stdio', 'http', 'sse'].includes(serverType)) {
+    return { server: null, error: `${where}: type 必须是 'stdio' | 'http' | 'sse', got '${serverType}'` };
+  }
+
+  // 2.5. command (stdio 必填, http/sse 必填 url, 选一)
   const command = typeof obj.command === 'string' ? obj.command.trim() : '';
-  if (!command) {
-    return { server: null, error: `${where}: 缺 command 字段或为空` };
+  if (serverType === 'stdio' && !command) {
+    return { server: null, error: `${where}: type=stdio 缺 command 字段或为空` };
   }
 
   // 3. args (可选)
@@ -203,6 +209,16 @@ function tryBuildServerFromObject(
     return { server: null, error: `${where}: timeout 必须是 number` };
   }
 
+  // 7. url (可选, http/sse 必填) v0.6.3-rc1 P2-1.8
+  if (obj.url !== undefined) {
+    if (typeof obj.url !== 'string' || !obj.url) {
+      return { server: null, error: `${where}: url 必须是 string` };
+    }
+    if (!obj.url.startsWith('http://') && !obj.url.startsWith('https://')) {
+      return { server: null, error: `${where}: url 必须是 http:// 或 https:// 开头` };
+    }
+  }
+
   // 7. type (可选, 默认 stdio) v0.6.3-rc1 P2-1.3
   if (obj.type !== undefined) {
     if (typeof obj.type !== 'string') {
@@ -213,9 +229,12 @@ function tryBuildServerFromObject(
     }
   }
 
-  // 构造完整 body (跟用户填的等价, 含 name / type / command / args / env / cwd / timeout)
-  const body: Record<string, unknown> = { name, command };
+  // 构造完整 body (跟用户填的等价, 含 name / type / url / command / args / env / cwd / timeout)
+  // v0.6.3-rc1 P2-1.8: 兼容 stdio (用 command) 和 http/sse (用 url) — 至少有一个非空
+  const body: Record<string, unknown> = { name };
   if (obj.type !== undefined) body.type = obj.type;  // 不传时 Rust 端默认 stdio
+  if (obj.url !== undefined) body.url = obj.url;
+  if (obj.command !== undefined) body.command = obj.command;
   if (obj.args !== undefined) body.args = obj.args;
   if (obj.env !== undefined) body.env = obj.env;
   if (obj.cwd !== undefined) body.cwd = obj.cwd;

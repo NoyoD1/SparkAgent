@@ -1014,7 +1014,7 @@ export interface TauriUserToolInfo {
 export interface TauriMcpServerInfo {
   /** MCP server 名, 跟文件名 sans .json 一致, LLM 看到的 tool 名前缀 mcp_<name>_<tool> */
   name: string;
-  /** 启动命令 (e.g. npx / node / .exe 绝对路径), 必填 */
+  /** stdio 启动命令 (e.g. npx / node / .exe 绝对路径), http/sse 时为空字符串 */
   command: string;
   /** 完整 JSON body (跟 file 内容一致, 方便 FE 不重复读) */
   body: string;
@@ -1022,8 +1022,10 @@ export interface TauriMcpServerInfo {
   filePath: string;
   /** 'workspace' | 'global' */
   scope: 'workspace' | 'global';
-  /** v0.6.3-rc1 P2-1.3: transport 类型. stdio (默认, 已实现) | http (P2.3) | sse (P2.3) */
+  /** v0.6.3-rc1 P2-1.3 + P2-1.8: transport 类型. stdio (默认) | http (P2-1.8 实现) | sse (P2-1.8 实现) */
   serverType: 'stdio' | 'http' | 'sse';
+  /** v0.6.3-rc1 P2-1.8: http/sse 用的 URL. stdio 时为 null. */
+  url: string | null;
 }
 // 模块加载时立即启动 listener (fire-and-forget), 加速首次 sendPrompt
 void piTauri.waitForListener();

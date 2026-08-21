@@ -327,7 +327,13 @@ function validateBody(body: string) {
     throw new Error("mcp server body 缺 'name' 字段或为空");
   }
   if (typeof obj.command !== 'string' || !obj.command) {
-    throw new Error("mcp server body 缺 'command' 字段或为空");
+    // v0.6.3-rc1 P2-1.8: type=http/sse 时允许没 command (改用 url)
+    const t = obj.type;
+    if (t === 'http' || t === 'sse') {
+      // 允许 command 缺失 (http/sse 走 url)
+    } else {
+      throw new Error("mcp server body (type=stdio) 缺 'command' 字段或为空");
+    }
   }
   if (obj.args !== undefined) {
     if (!Array.isArray(obj.args)) {
@@ -362,6 +368,26 @@ function validateBody(body: string) {
     }
     if (!['stdio', 'http', 'sse'].includes(obj.type)) {
       throw new Error("mcp server body 'type' 必须是 'stdio' | 'http' | 'sse'");
+    }
+    // v0.6.3-rc1 P2-1.8: 跨字段校验 — http/sse 必填 url, stdio 必填 command
+    if (obj.type === 'http' || obj.type === 'sse') {
+      const url = obj.url;
+      if (typeof url !== 'string' || !url) {
+        throw new Error(`mcp server body (type=${obj.type}) 缺 'url' 字段或不是 string`);
+      }
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        throw new Error(`mcp server body 'url' 必须是 http:// 或 https:// 开头, got '${url}'`);
+      }
+    } else if (obj.type === 'stdio') {
+      if (typeof obj.command !== 'string' || !obj.command) {
+        throw new Error("mcp server body (type=stdio) 缺 'command' 字段或为空");
+      }
+    }
+  }
+  // v0.6.3-rc1 P2-1.8: url 字段类型校验 (兜底, type 缺失时也能识别)
+  if (obj.url !== undefined) {
+    if (typeof obj.url !== 'string') {
+      throw new Error("mcp server body 'url' 字段必须是 string");
     }
   }
 }

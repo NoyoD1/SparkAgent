@@ -1408,7 +1408,8 @@ struct ReadDeleteMcpServerArgs {
 #[serde(rename_all = "camelCase")]
 struct McpServerInfo {
     name: String,
-    /// 启动命令 (e.g. npx / node / .exe 绝对路径)
+    /// stdio 启动命令 (e.g. npx / node / .exe 绝对路径)
+    /// http/sse 时为空字符串 (走 url 字段)
     command: String,
     /// 完整 JSON body (跟 file 内容一致, 方便 FE 不重复读)
     body: String,
@@ -1417,12 +1418,15 @@ struct McpServerInfo {
     /// 'workspace' | 'global'
     scope: String,
     /// v0.6.3-rc1 P2-1.3: transport 类型 (stdio | http | sse). 跟 P1-5 user tool 区分.
-    ///   - stdio: 子进程走 JSON-RPC over stdio (默认, 唯一已实现)
-    ///   - http: HTTP POST (P2.3 实现)
-    ///   - sse:  Server-Sent Events (P2.3 实现)
+    ///   - stdio: 子进程走 JSON-RPC over stdio (P2-1.0 实现)
+    ///   - http: HTTP POST (P2-1.8 实现, StreamableHTTPClientTransport)
+    ///   - sse:  Server-Sent Events (P2-1.8 实现, SSEClientTransport)
     /// 旧配置没 type 字段时 fallback 到 "stdio" (向后兼容)
     #[serde(rename = "type")]
     server_type: String,
+    /// v0.6.3-rc1 P2-1.8: http/sse 用的 URL. stdio 时为 null.
+    /// FE 在 type=http/sse 时显示, stdio 时隐藏
+    url: Option<String>,
 }
 
 fn parse_mcp_server_name(name: &str) -> Result<String, String> {
@@ -1493,12 +1497,36 @@ fn validate_mcp_server_body(body: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("mcp server body 'name' 字段不能为空".to_string());
     }
-    let command = obj.get("command").and_then(|v| v.as_str())
-        .ok_or("mcp server body 缺 'command' 字段或不是 string")?;
-    if command.is_empty() {
-        return Err("mcp server body 'command' 字段不能为空".to_string());
+    // 解析 type (先解析, 后面按 type 分支校验必填字段)
+    let server_type = obj.get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("stdio");
+    if !matches!(server_type, "stdio" | "http" | "sse") {
+        return Err(format!("mcp server body 'type' 必须是 'stdio' | 'http' | 'sse', got '{}'", server_type));
     }
-    // args: 可选, 但如果有必须是 array of string
+
+    // 按 type 分支校验必填字段:
+    //   stdio: command 必填
+    //   http/sse: url 必填, command/args/cwd 不需要
+    if server_type == "stdio" {
+        let command = obj.get("command").and_then(|v| v.as_str())
+            .ok_or("mcp server body (type=stdio) 缺 'command' 字段或不是 string")?;
+        if command.is_empty() {
+            return Err("mcp server body 'command' 字段不能为空".to_string());
+        }
+    } else {
+        // http / sse
+        let url = obj.get("url").and_then(|v| v.as_str())
+            .ok_or(format!("mcp server body (type={}) 缺 'url' 字段或不是 string", server_type))?;
+        if url.is_empty() {
+            return Err("mcp server body 'url' 字段不能为空".to_string());
+        }
+        // 简单 URL 格式校验: 必须是 http:// 或 https://
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(format!("mcp server body 'url' 必须是 http:// 或 https:// 开头, got '{}'", url));
+        }
+    }
+    // args: 可选 (stdio 才有意义), 但如果有必须是 array of string
     if let Some(args) = obj.get("args") {
         if !args.is_array() {
             return Err("mcp server body 'args' 字段必须是 array".to_string());
@@ -1510,6 +1538,8 @@ fn validate_mcp_server_body(body: &str) -> Result<(), String> {
         }
     }
     // env: 可选, 但如果有必须是 object of string
+    //   - stdio: 子进程环境变量
+    //   - http/sse: HTTP request headers (e.g., "Authorization: Bearer xxx")
     if let Some(env) = obj.get("env") {
         let env_obj = env.as_object()
             .ok_or("mcp server body 'env' 字段必须是 object")?;
@@ -1519,7 +1549,7 @@ fn validate_mcp_server_body(body: &str) -> Result<(), String> {
             }
         }
     }
-    // cwd: 可选, 但如果有必须是 string
+    // cwd: 可选 (stdio 才有意义), 但如果有必须是 string
     if let Some(cwd) = obj.get("cwd") {
         if !cwd.is_string() {
             return Err("mcp server body 'cwd' 字段必须是 string".to_string());
@@ -1531,9 +1561,10 @@ fn validate_mcp_server_body(body: &str) -> Result<(), String> {
             return Err("mcp server body 'timeout' 字段必须是 number".to_string());
         }
     }
-    // v0.6.3-rc1 P2-1.3: type 字段 (可选, 默认 "stdio")
-    //   - stdio: 子进程 JSON-RPC over stdio (唯一已实现)
-    //   - http/sse: schema 接受, 但 sidecar 暂时不实现 (P2.3)
+    // v0.6.3-rc1 P2-1.3 + P2-1.8: type 字段 (可选, 默认 "stdio")
+    //   - stdio: 子进程 JSON-RPC over stdio (P2-1.0 实现)
+    //   - http: StreamableHTTPClientTransport (P2-1.8 实现, 新 MCP 标准)
+    //   - sse:  SSEClientTransport (P2-1.8 实现, 旧 MCP 标准, 兼容老 server)
     //   旧配置没 type 时默认 stdio, 行为不变 (向后兼容)
     if let Some(t) = obj.get("type") {
         let type_str = t.as_str()
@@ -1557,10 +1588,16 @@ fn extract_mcp_server_info(name: &str, body: &str, file_path: &str, scope: &str)
         .filter(|t| matches!(*t, "stdio" | "http" | "sse"))
         .unwrap_or("stdio")
         .to_string();
+    // v0.6.3-rc1 P2-1.8: 读 url 字段 (http/sse 必填, stdio 时为 None)
+    let url = obj.get("url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     Some(McpServerInfo {
         name: name.to_string(),
         command: obj.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         server_type,
+        url,
         body: body.to_string(),
         file_path: file_path.to_string(),
         scope: scope.to_string(),

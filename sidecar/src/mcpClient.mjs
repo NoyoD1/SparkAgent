@@ -17,6 +17,8 @@
 //   - 不支持 MCP sampling (LLM 主动调用由 server 发起, 桌面端少见)
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { Type } from '@sinclair/typebox';
 
 // MCP server 配置 schema (跟 .pi/mcp/*.json 一致, 跟 Rust 端 validate 同步).
@@ -56,7 +58,11 @@ export class McpServerError extends Error {
 }
 
 // MCP server client wrapper.
-// 封装 1 个 MCP server 子进程的 lifecycle: spawn → connect → listTools → callTool → stop
+// 封装 1 个 MCP server 的 lifecycle: connect → initialize → listTools → callTool → stop
+//  v0.6.3-rc1 P2-1.8: 不再是"子进程" lifecycle — 改成"transport" lifecycle.
+//   - stdio: 子进程 (StdioClientTransport)
+//   - http: 长连接 HTTP (StreamableHTTPClientTransport, MCP 新标准)
+//   - sse:  长连接 SSE  (SSEClientTransport, MCP 旧标准, 兼容老 server)
 //
 // 不持有 LLM 上下文 / permission 状态, 这些由 sidecar/src/index.mjs 的 extension
 //   在 ToolDefinition.execute 闭包里注入.
@@ -66,28 +72,24 @@ export class McpServerClient {
     this.client = null;
     this.transport = null;
     this.tools = [];
-    // server 启动耗时 ms (从 spawn 到 initialize 完成), 留作 log + 排查.
+    // server 启动耗时 ms (从 connect 到 initialize 完成), 留作 log + 排查.
     this.startDurationMs = 0;
-    // 子进程 PID (用于 log / 排查僵尸). transport 不暴露, 走 SDK 内部.
+    // 子进程 PID (仅 stdio, 用于 log / 排查僵尸). transport 不暴露, 走 SDK 内部.
     this.childPid = null;
+    // v0.6.3-rc1 P2-1.8: transport 类型 (stdio | http | sse, 默认 stdio)
+    this.type = config.type ?? 'stdio';
   }
 
   get toolCount() { return this.tools.length; }
 
-  // 启动子进程 + JSON-RPC initialize + 拉 tools/list.
+  // 启动: 按 type dispatch 创建 transport + JSON-RPC initialize + 拉 tools/list.
   // 失败 throw McpServerError (phase = 'spawn' | 'init' | 'list_tools'),
   //   上层 catch 决定降级 (log + 跳过这个 server, 不影响 sidecar 其它部分).
   async start() {
     const startTime = Date.now();
     try {
-      // 1. spawn 子进程 + 接管 stdio
-      this.transport = new StdioClientTransport({
-        command: this.config.command,
-        args: this.config.args ?? [],
-        env: { ...process.env, ...(this.config.env ?? {}) },
-        cwd: this.config.cwd,
-        // SDK 内部会 spawn child_process, 走 stdio line-delimited JSON
-      });
+      // 1. 创建 transport (按 type dispatch)
+      this.transport = this.createTransport();
 
       // 2. JSON-RPC initialize (包一层 timeout)
       this.client = new Client(
@@ -108,6 +110,73 @@ export class McpServerClient {
       const phase = this.diagnosePhase(e);
       throw new McpServerError(this.config.name, phase, e instanceof Error ? e.message : String(e));
     }
+  }
+
+  // v0.6.3-rc1 P2-1.8: 按 type dispatch 创建对应 transport.
+  //   - stdio: 走 child_process spawn + JSON-RPC over stdin/stdout (原 P2-1 行为)
+  //   - http:  StreamableHTTPClientTransport (MCP 新标准, 推荐)
+  //   - sse:  SSEClientTransport (MCP 旧标准, 兼容老 server)
+  createTransport() {
+    if (this.type === 'http') {
+      const url = this.requireUrl();
+      return new StreamableHTTPClientTransport(url, {
+        requestInit: { headers: this.buildHttpHeaders() },
+      });
+    }
+    if (this.type === 'sse') {
+      const url = this.requireUrl();
+      return new SSEClientTransport(url, {
+        requestInit: { headers: this.buildHttpHeaders() },
+      });
+    }
+    // stdio (default, 包含 type=stdio 和 type 缺失)
+    return new StdioClientTransport({
+      command: this.config.command,
+      args: this.config.args ?? [],
+      env: { ...process.env, ...(this.config.env ?? {}) },
+      cwd: this.config.cwd,
+      // SDK 内部会 spawn child_process, 走 stdio line-delimited JSON
+    });
+  }
+
+  // 解析 + 校验 url 字段 (http/sse 必填)
+  requireUrl() {
+    const urlStr = this.config.url;
+    if (!urlStr) {
+      throw new McpServerError(
+        this.config.name, 'spawn',
+        `type=${this.type} 必填 'url' 字段 (如 "https://api.example.com/mcp")`,
+      );
+    }
+    let url;
+    try {
+      url = new URL(urlStr);
+    } catch (e) {
+      throw new McpServerError(
+        this.config.name, 'spawn',
+        `type=${this.type} 的 'url' 字段不是合法 URL: ${urlStr}`,
+      );
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new McpServerError(
+        this.config.name, 'spawn',
+        `type=${this.type} 的 'url' 必须是 http:// 或 https://, got '${url.protocol}'`,
+      );
+    }
+    return url;
+  }
+
+  // 把 env + headers 合并成 HTTP request headers
+  //   - env: stdio 是子进程 env var; http/sse 时把每条 env 当 HTTP header (如 Authorization)
+  //   - 后续可加独立 'headers' 字段 (P2-1.8 先用 env 兜住, 简单)
+  buildHttpHeaders() {
+    const headers = {};
+    if (this.config.env) {
+      for (const [k, v] of Object.entries(this.config.env)) {
+        if (typeof v === 'string') headers[k] = v;
+      }
+    }
+    return headers;
   }
 
   // 走 SDK 的 connect(), 但包一层 timeout (SDK 0.84.2 自身不强制 timeout, 我们手动控制).
