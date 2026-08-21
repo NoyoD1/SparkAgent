@@ -211,3 +211,72 @@ global scope:     <agentDir>/mcp/<name>.json
 - ❌ HTTP / SSE transport 实现 (P2-3)
 - ❌ 热重载 (P1-5.2)
 - 端到端测试已通过 (offline-mcp-test 4 tool 全部能调)
+
+---
+
+## 后续 Review (2026-08-21, v0.6.3-rc1 二阶段 P2 全部完成)
+
+> 二阶段定义: 7-item 计划 (HTTP/SSE + 热重载 + UI 字段 + 复杂 schema + 错误 sanitize + Session 4 件套审计)
+> 全部推进到代码就绪 + build 验证 + 端到端可测状态. user 后续人工验证后归档.
+
+### 二阶段 P2 全部 6 个 item 完成 (P2-1.8 ~ P2-6)
+
+| Commit | Item | 状态 | 核心改动 |
+|---|---|---|---|
+| `07f3774` | **P2-1.8** HTTP/SSE transport 真正实现 | ✅ | sidecar 抽 `createTransport` 按 type dispatch: stdio (Stdio) / http (StreamableHTTP) / sse (SSE). env 字段复用 (stdio = 子进程 env, http/sse = request headers). no OAuth (user 明示). 4 文件 + 1 binary. |
+| `80dbf6e` | **P2-1.8.1** mcpImport 加 map 格式 (hotfix) | ✅ | 加第 4 种 import 格式 `{name: {config}}` (workspace 风格, 跟 Claude Desktop 区别是没 mcpServers 包裹). 同时放宽 format ① 探测 (name + url 也算, http config 不被拒). |
+| (P2-2 一并修) | **P2-1.8 oversite** tryParseMcpServerJson 适足 type=url | ✅ | sidecar 读 config 时仍要求 command 必填, http/sse 会被静默 reject. 跟 P2-2 一起修了, 按 type 分支校验必填字段. |
+| `0f7c3fa` | **P2-2** MCP 热重载 (fs.watch + debounce) | ✅ | sidecar-side `fs.watch` 双 config dir, 300ms debounce. **不重建 Pi SDK agent session** (重 = 丢对话状态, 跟 user 原话"重启 sidecar agent session"略偏, 选了"reload MCP subsystem"路径, 跟 Claude Code / Cursor 体验一致). in-place close + re-spawn, LLM 下一轮 turn 看到新 tool. |
+| `b77c9fa` | **P2-3** dialog 恢复 form/JSON tab + type/url 字段 | ✅ | P2-1.4 砍 JSON tab 留下"HTTP/SSE 在 form 没法配 url"洞. P2-3 恢复思路: form 仍为主 (保留降低门槛), JSON tab 作 escape hatch. 加 type radio + url 字段 + env 字段按 type 切语义. 2 文件, 496+/138- 行. |
+| `b9c7c6b` | **P2-4** 复杂 schema 升级 (oneOf/anyOf/allOf/$ref/递归) | ✅ | 重写 jsonSchemaToTypeBox, 加 convertSchema(schema, root, visited) 递归 + $ref 解析 (支持 #/definitions, #/$defs, #/components/schemas). 循环引用检测用 visited Set + 回溯删除. const → Literal, format/minimum/maximum 透传. 12/12 smoke test passed. |
+| `3cd5632` | **P2-6** Tool 错误 sanitize (401/403/429/5xx 分类) | ✅ | 新增 errorSanitizer.mjs, classifyToolError + formatToolError. 输出格式 `[<emoji> <category>] <hint>\n原始: <original>`. user 一眼看出问题类型 + 知道下一步怎么修. 16/16 smoke test passed. 关键 bug fix: port 数字 (1:443) 不再被误判 4xx (用 lookbehind/lookahead 排除). |
+| `5337a46` | **P2-final** .gitignore 加 .trash/ | ✅ | 临时测试/调试产出 fallback 目录. |
+
+### Item 5 跳过 (per 原计划)
+
+- ❌ **MCP per-tool timeout**: 不做. 保持 30s 全局. 远期: per-tool 覆盖.
+
+### Item 7 审计: 3/3 已实现 (导出按计划跳过)
+
+- ✅ **Session 标题自动生成** (Phase 6 / `app/src/stores/chat.ts:1978-2085`): ghost prompt 走独立 sidecar session, LLM 返回 1-8 字标题写回 `s.autoTitle`
+- ✅ **Session 删除二次确认** (Phase 3 / `WorkspaceTree.vue:488-499`): 走 showConfirm + ConfirmDialog, danger=true, 文案含 session 名 + 不可撤销
+- ✅ **Session 搜索** (Phase 5 / `WorkspaceTree.vue:503-532`): sidebar 顶部 🔍 input, 跨 workspace + 跨 archive, 本地同步 < 10ms
+- ❌ **Session 导出**: 按 user 原话"除了导出" 跳过
+
+### 关键设计决策 (二阶段)
+
+- **HTTP 走 StreamableHTTPClientTransport** (MCP 新标准) 而非 SSEClientTransport, SSE 走 SSEClientTransport 兼容老 server
+- **env 字段语义复用**: stdio = 子进程环境变量, http/sse = HTTP request headers (避免再加独立 headers 字段)
+- **不实现 OAuth** (user 明示), auth 走 header (`Authorization: Bearer xxx` 塞 env 字段)
+- **reload MCP subsystem 不重建 agent session** (user 原话"重启 sidecar agent session" 略偏, 选了 in-place reload 保留对话状态)
+- **form/JSON tab 切换 form 为主** (P2-1.4 简化原则保留, JSON 是 escape hatch 不是主入口)
+- **allOf 优先 object 合并** (跟 Type.Intersect 比起来 LLM 更易理解)
+- **错误兜底保持 Type.Any() / unknown category** (任何解析失败不 crash, LLM 看到空 schema 总比 stack trace 好)
+- **复杂 schema 测试不引入真 MCP server**: 12 case 全部是 ad-hoc JSON Schema, sidecar 启动时 unit test 跑一遍就够
+
+### 端到端验证清单 (user 后续人工验)
+
+- [ ] P2-1.8: 配 HTTP MCP server → 调 tool 能跑
+- [ ] P2-1.8.1: 4 种 JSON 格式都能导入 (flat / array / Claude Desktop / map)
+- [ ] P2-2: 编辑 .pi/mcp/*.json → 300ms 内 sidecar stderr 有 reload log
+- [ ] P2-3: 编辑 dialog 顶部有 "表单 / JSON" tab, 选 http 切 URL 字段
+- [ ] P2-4: 复杂 schema MCP tool 调通, LLM 一次填对参数
+- [ ] P6: 配故意错 API key → 看到 `[🔐 auth_expired] 鉴权失败 (401)...`
+- [ ] Item 7: 删 session 弹二次确认 / 搜索 sidebar 顶部 🔍 / 新 session 首条消息后自动命名
+
+### 远期 backlog (commit message 里已记)
+
+- P2-1.8.1: 独立 `headers` 字段 (跟 env 拆开)
+- P2-2.1: Tauri event 推送给 FE, McpTab 实时显示 reload 提示
+- P2-3.1: type=http/sse 时 env 字段做更友好的 headers 编辑 UI
+- P2-4.1: TypeBox schema cache (per-tool 启动时 build 一次)
+- P2-6.1: builtin tool (read/write/bash) 错误也走 sanitizer
+
+### 产物
+
+| 文件 | 大小 | 时间戳 |
+|---|---|---|
+| `src-tauri/target/debug/pi-agent-desktop.exe` | 27.27MB | 14:40 (含全部最新 FE + bundled sidecar) |
+| `sidecar/dist/pi-agent-sidecar.exe` | 109.26MB | 14:01 (P2-6 build) |
+| `src-tauri/binaries/pi-agent-sidecar-x86_64-pc-windows-msvc.exe` | 109.26MB | 14:01 (Tauri externalBin) |
+
