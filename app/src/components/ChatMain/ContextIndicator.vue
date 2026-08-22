@@ -32,9 +32,28 @@ import { storeToRefs } from 'pinia';
 import { BarChart3, ChevronDown, Archive, Loader2 } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
+import { useConfigStore } from '@/stores/config';
 
 const chatStore = useChatStore();
 const sessionStore = useSessionStore();
+const configStore = useConfigStore();
+const { activeSessionId } = storeToRefs(sessionStore);
+// v0.6 (Bug1 fix): popover 显示当前 session 用的 model, 不是 configStore.activeModel
+//   原因: Composer 切 model 改的是 session.modelId (per-session), configStore.activeModel 是全局默认值
+//   user 反馈: 切到 MiniMax-M3 后, popover 顶部还显示 deepseek-v4-flash (上次的 model)
+//   修法: getSessionModelId 优先取 session.modelId, fallback 到全局 activeModelId
+const { allEnabledModels } = storeToRefs(configStore);
+const currentModelLabel = computed<string>(() => {
+  const sid = activeSessionId.value;
+  if (!sid) return '—';
+  const modelId = sessionStore.getSessionModelId(sid);
+  if (!modelId) return '—';
+  // 在 allEnabledModels 里找 (跨 provider 找)
+  const found = allEnabledModels.value.find((x) => x.model.id === modelId);
+  if (found) return found.model.label || found.model.id;
+  // 找不到 (e.g. model id 不在 enabled 列表里, 可能用户删了), 直接显示 id
+  return modelId;
+});
 const { activeSession } = storeToRefs(sessionStore);
 
 const showPopover = ref(false);
@@ -68,10 +87,8 @@ const isStreaming = computed(() => {
   return chatStore.isStreamingSession(sid);
 });
 
-// v0.5.0-D 第22轮 (D209) 重构: 删 6 分类 FE 估算 (不准, user 不要)
-//   保留 REAL 4 分类 (Pi SDK 实测, D209 改成累加)
-//   6 分类相关 computed (breakdown / breakdownPct) 全删, ContextIndicator 只用 4 分类
-// v0.5.0-D 第21轮 (D208) + 第22轮 (D209): REAL 4 分类 (Pi SDK lastUsage 实测, D209 累加)
+// v0.5.0-D 第21轮 (D208) + 第22轮 (D209) + v0.6 (N3): REAL 4 分类 (Pi SDK lastUsage 实测, per-turn 覆盖)
+//   D209 改累加, v0.6 N4 改回 per-turn 覆盖 (跟 Claude Code 主流算法一致)
 const realBreakdown = computed(() => {
   const sid = activeSession.value?.id;
   if (!sid) {
@@ -80,6 +97,21 @@ const realBreakdown = computed(() => {
   return chatStore.getContextBreakdownReal(sid);
 });
 const realPct = computed(() => chatStore.getContextBreakdownRealPercent(realBreakdown.value));
+
+// v0.6 (N3): 6 分类 FE 估算 (跟图 1/图 2 用户期望的细分项一致: 消息/工具/系统提示词/记忆/技能/其他)
+//   跟 4 分类 REAL 是两个维度, 互补:
+//   - 4 分类: "用了多少" (input/output/cacheRead/cacheWrite, LLM 端实测)
+//   - 6 分类: "用在哪里" (消息/工具/系统提示词/技能/记忆/其他, FE 估算)
+//   6 分类数据源: chatStore.getContextBreakdown (chat.ts:799), 函数完整, 之前只是没渲染
+//   dot-* 颜色 CSS (D209 注释说删了) 实际还在, 直接复用
+const breakdown = computed(() => {
+  const sid = activeSession.value?.id;
+  if (!sid) {
+    return { messages: 0, tools: 0, systemPrompts: 0, skills: 0, memory: 0, other: 0 };
+  }
+  return chatStore.getContextBreakdown(sid);
+});
+const breakdownPct = computed(() => chatStore.getContextBreakdownPercent(breakdown.value));
 
 // ======== 工具 ========
 
@@ -160,6 +192,26 @@ const buttonTitle = computed(() => {
 
     <!-- Popover 二级展开 (Claude Code 风格) -->
     <div v-if="showPopover" class="pad-ctx-popover" @click.stop>
+      <!-- v0.6 (N6): 总合计 + 容量 + 占比 + model 名 (高亮 summary 行, 让 user 一眼看清)
+           跟 user 反馈 "不显示总合计用了多少, 模型可处理量占比多少也不准" 对应
+           主数字: 用了多少 (formatTokens contextTokens)
+           次数字: / 容量 (formatTokens contextWindow, 跟 activeModel 绑)
+           meta: 占比 (percent) + model 名 (activeModel.label || id)
+           颜色: 70% 高亮 (走 is-high class) -->
+      <div class="pad-ctx-popover-summary" :class="{ 'is-high': isHigh }">
+        <div class="pad-ctx-popover-summary-main">
+          <span class="pad-ctx-popover-summary-tokens">{{ formatTokens(contextTokens) }}</span>
+          <span class="pad-ctx-popover-summary-divider">/</span>
+          <span class="pad-ctx-popover-summary-window">{{ formatTokens(contextWindow) }}</span>
+        </div>
+        <div class="pad-ctx-popover-summary-meta">
+          <span class="pad-ctx-popover-summary-percent">{{ percent }}%</span>
+          <span class="pad-ctx-popover-summary-dot">·</span>
+          <span class="pad-ctx-popover-summary-model" :title="currentModelLabel">
+            {{ currentModelLabel }}
+          </span>
+        </div>
+      </div>
       <div class="pad-ctx-popover-head">
         <span class="pad-ctx-popover-title">上下文窗口</span>
         <!-- v0.4.3.2.5 (user 原话 2026-08-18 02:30): 压缩按钮紧跟 "上下文窗口" 标题 x 轴后面
@@ -243,9 +295,77 @@ const buttonTitle = computed(() => {
           ({{ formatTokens(realBreakdown.input + realBreakdown.cacheRead) }} context)
         </span>
       </div>
-      <!-- 累加说明: 跨 turn 求和, compaction 成功后清零重计 -->
+      <!-- v0.6 (N3): 6 分类 FE 估算 (来源构成) - 跟图 1/图 2 用户期望一致
+           在 4 分类 REAL 下面, 用 section 分隔, 标注 "FE 估算" 跟 4 区分开
+           跟 4 分类互补: 4 分类是"用了多少 token" (LLM 实测), 6 分类是"用在哪里" (FE 估算) -->
+      <div class="pad-ctx-popover-section-divider"></div>
+      <div class="pad-ctx-popover-section-title">来源构成（FE 估算）</div>
+      <div class="pad-ctx-popover-rows">
+        <div class="pad-ctx-popover-row">
+          <span class="pad-ctx-popover-row-left">
+            <span class="pad-ctx-dot dot-messages"></span>
+            <span>消息</span>
+          </span>
+          <span class="pad-ctx-popover-row-right">
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.messages) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.messages }}%</span>
+          </span>
+        </div>
+        <div class="pad-ctx-popover-row">
+          <span class="pad-ctx-popover-row-left">
+            <span class="pad-ctx-dot dot-tools"></span>
+            <span>工具</span>
+          </span>
+          <span class="pad-ctx-popover-row-right">
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.tools) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.tools }}%</span>
+          </span>
+        </div>
+        <div class="pad-ctx-popover-row">
+          <span class="pad-ctx-popover-row-left">
+            <span class="pad-ctx-dot dot-system"></span>
+            <span>系统提示词</span>
+          </span>
+          <span class="pad-ctx-popover-row-right">
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.systemPrompts) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.systemPrompts }}%</span>
+          </span>
+        </div>
+        <div class="pad-ctx-popover-row">
+          <span class="pad-ctx-popover-row-left">
+            <span class="pad-ctx-dot dot-memory"></span>
+            <span>记忆</span>
+          </span>
+          <span class="pad-ctx-popover-row-right">
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.memory) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.memory }}%</span>
+          </span>
+        </div>
+        <div class="pad-ctx-popover-row">
+          <span class="pad-ctx-popover-row-left">
+            <span class="pad-ctx-dot dot-skills"></span>
+            <span>技能</span>
+          </span>
+          <span class="pad-ctx-popover-row-right">
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.skills) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.skills }}%</span>
+          </span>
+        </div>
+        <div class="pad-ctx-popover-row">
+          <span class="pad-ctx-popover-row-left">
+            <span class="pad-ctx-dot dot-other"></span>
+            <span>其他</span>
+          </span>
+          <span class="pad-ctx-popover-row-right">
+            <span class="pad-ctx-popover-val">{{ formatTokens(breakdown.other) }}</span>
+            <span class="pad-ctx-popover-pct">{{ breakdownPct.other }}%</span>
+          </span>
+        </div>
+      </div>
+      <!-- 累加说明: v0.6 (N4) 改 per-turn 覆盖, 跨 turn 数字自然增长 (history 越来越长, totalTokens 也越来越大)
+           跟 Claude Code 主流算法一致, 跟 Pi SDK 0.84.2 trigger 逻辑一致 -->
       <div class="pad-ctx-popover-estimate-note">
-        累加跨 turn · 主动压缩后清零重计
+        本次 turn 实测 · 主动压缩后清零重计
       </div>
     </div>
   </div>
@@ -310,6 +430,72 @@ const buttonTitle = computed(() => {
 /* 压缩中 */
 .pad-ctx-indicator.is-loading .pad-ctx-btn {
   color: var(--pad-accent-primary, #6366f1);
+}
+
+/* v0.6 (N6): popover 顶部高亮 summary 行 (用了多少 / 容量 / 占比 / model 名) */
+.pad-ctx-popover-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.03));
+  border-radius: var(--pad-radius-md, 8px);
+  border: 1px solid transparent;
+  transition: border-color var(--pad-dur-fast, 0.15s) ease;
+}
+.pad-ctx-popover-summary.is-high {
+  border-color: var(--pad-fg-warning, #d97706);
+  background: var(--pad-bg-warning-soft, rgba(217, 119, 6, 0.08));
+}
+.pad-ctx-popover-summary-main {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+}
+.pad-ctx-popover-summary-tokens {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--pad-fg-primary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.pad-ctx-popover-summary-divider {
+  font-size: 14px;
+  color: var(--pad-fg-tertiary, #71717a);
+  font-weight: 400;
+  margin: 0 5px;
+}
+.pad-ctx-popover-summary-window {
+  font-size: 13px;
+  color: var(--pad-fg-secondary, #52525b);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.pad-ctx-popover-summary-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--pad-fg-tertiary, #71717a);
+}
+.pad-ctx-popover-summary-percent {
+  font-weight: 600;
+  color: var(--pad-fg-primary);
+  font-variant-numeric: tabular-nums;
+}
+.pad-ctx-popover-summary.is-high .pad-ctx-popover-summary-percent {
+  color: var(--pad-fg-warning, #d97706);
+}
+.pad-ctx-popover-summary-dot {
+  opacity: 0.5;
+}
+.pad-ctx-popover-summary-model {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
 }
 
 /* ======== Popover (二级展开, minimalist 风格, 跟整体 token 配) ======== */
@@ -469,6 +655,21 @@ const buttonTitle = computed(() => {
   font-variant-numeric: tabular-nums;
   min-width: 36px;
   text-align: right;
+}
+
+/* v0.6 (N3): 6 分类 section 分隔 + 标题 */
+.pad-ctx-popover-section-divider {
+  height: 1px;
+  background: var(--pad-border-subtle, rgba(0, 0, 0, 0.06));
+  margin: 10px 0 8px;
+}
+.pad-ctx-popover-section-title {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--pad-fg-tertiary, #71717a);
+  margin-bottom: 6px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 /* 估算说明 (popover 底部) */

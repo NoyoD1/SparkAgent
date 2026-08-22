@@ -96,6 +96,16 @@ const hasContent = computed(() => {
 });
 
 /**
+ * v0.6 (P0-C): 格式化 compact 节省的 tokens 数字 (跟 ContextIndicator.vue 里的 formatTokens 一致)
+ *   0 → "0", 1000+ → "X.XK" (1 位小数)
+ */
+function formatCompactionTokens(n: number): string {
+  if (!n || n === 0) return '0';
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return `${n}`;
+}
+
+/**
  * v0.5.0-D 第4轮: per-step collapse state.
  *   - Set<stepId> 记录被 user 手动 collapse 的 step (toggle 用)
  *   - 默认 (没有 user 偏好): 已完成的 step 折叠, 当前正在 streaming 的 step 展开
@@ -541,7 +551,13 @@ const statusText = computed(() => {
       </template>
       <template v-else-if="message.compactionMarker.state === 'success'">
         <Check :size="12" :stroke-width="1.75" />
-        <span>上下文已压缩</span>
+        <span>
+          上下文已压缩
+          <!-- v0.6 (P0-C): 显示释放 tokens 数字, 手动 compact 成功时才有 -->
+          <template v-if="message.compactionMarker.freedTokens && message.compactionMarker.freedTokens > 0">
+            （释放 {{ formatCompactionTokens(message.compactionMarker.freedTokens) }} tokens）
+          </template>
+        </span>
       </template>
       <template v-else-if="message.compactionMarker.state === 'failure'">
         <AlertTriangle :size="12" :stroke-width="1.75" />

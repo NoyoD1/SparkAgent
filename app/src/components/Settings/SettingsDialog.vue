@@ -49,7 +49,7 @@ interface TabDef {
 }
 
 const TABS: TabDef[] = [
-  { id: 'general',    label: '通用',     icon: markRaw(Settings2), component: markRaw(GeneralTab),    group: '基础设置', implemented: false },
+  { id: 'general',    label: '通用',     icon: markRaw(Settings2), component: markRaw(GeneralTab),    group: '基础设置', implemented: true  },
   { id: 'appearance', label: '外观',     icon: markRaw(Palette),    component: markRaw(AppearanceTab), group: '基础设置', implemented: false },
   { id: 'provider',   label: 'Provider', icon: markRaw(KeyRound),   component: markRaw(ProviderTab),   group: '基础设置', implemented: true  },
   { id: 'shortcuts',  label: '快捷键',   icon: markRaw(Keyboard),   component: markRaw(ShortcutsTab),  group: 'Agent 能力', implemented: false },

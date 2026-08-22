@@ -2468,6 +2468,77 @@ async fn get_agent_dir(app: AppHandle) -> Result<String, String> {
     Ok(agent_dir.to_string_lossy().to_string())
 }
 
+/// v0.6 (Bug2 修): 读写 Pi SDK 0.84.2 settings.json 里的 compaction.enabled
+///   文件路径: <agentDir>/settings.json (跟 Pi SDK 0.84.2 FileSettingsStorage 一致)
+///   不走 sidecar RPC (依赖 active sidecar, 闲置 session 调不通 — 跟 compact 一样的坑)
+///   限制: Pi SDK 启动时加载 settings, 不热更新. 改了要等下次 session 重启才生效.
+fn pi_settings_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|e| format!("home_dir: {e}"))?;
+    Ok(home.join(".pi").join("agent").join("settings.json"))
+}
+
+#[tauri::command]
+async fn get_compaction_enabled(app: AppHandle) -> Result<bool, String> {
+    let path = pi_settings_path(&app)?;
+    if !path.exists() {
+        // Pi SDK 0.84.2 DEFAULT_COMPACTION_SETTINGS.enabled = true
+        return Ok(true);
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read settings.json: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("parse settings.json: {e}"))?;
+    Ok(value
+        .get("compaction")
+        .and_then(|c| c.get("enabled"))
+        .and_then(|e| e.as_bool())
+        .unwrap_or(true))
+}
+
+#[tauri::command]
+async fn set_compaction_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let path = pi_settings_path(&app)?;
+    // 1. 确保 agent_dir 存在
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create_dir_all({}): {e}", parent.display()))?;
+    }
+    // 2. 读现有 settings (可能不存在)
+    let mut value: serde_json::Value = if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read settings.json: {e}"))?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    // 3. 设置 compaction.enabled (保留其他字段)
+    if !value.is_object() {
+        value = serde_json::json!({});
+    }
+    let obj = value.as_object_mut().unwrap();
+    let comp = obj
+        .entry("compaction".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !comp.is_object() {
+        *comp = serde_json::json!({});
+    }
+    comp["enabled"] = serde_json::Value::Bool(enabled);
+    // 4. 写回 (用 pretty 格式, 跟 Pi SDK 自己写的一致)
+    let pretty = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings: {e}"))?;
+    std::fs::write(&path, pretty)
+        .map_err(|e| format!("write settings.json: {e}"))?;
+    debug_log(&format!(
+        "set_compaction_enabled: enabled={} written to {}",
+        enabled,
+        path.display()
+    ));
+    Ok(())
+}
+
 // ====== 2.1: 文件树浏览器 ======
 //   读 workspace 目录树, 给 sidebar UI 用. 不走 sidecar (UI-only, 不需要 LLM 介入).
 //   - 限制 max_depth (默认 2 层, 防 node_modules 把 UI 撑爆)
@@ -2686,6 +2757,10 @@ pub fn run() {
             migrate_from_env,
             ensure_default_workspace,
             get_agent_dir,  // v0.6.3-rc1 P2-1.4: 全局 MCP 目录路径 (FE 显示用)
+            // v0.6 (Bug2 修): 读写 Pi SDK settings.json 里的 compaction.enabled
+            //   不走 sidecar RPC, 直接改 ~/.pi/agent/settings.json
+            get_compaction_enabled,
+            set_compaction_enabled,
             // 2.1: 文件树浏览器 (UI-only, 不走 sidecar)
             list_workspace_tree,
             // 2.2: workspace 模板 (空目录 / git clone)

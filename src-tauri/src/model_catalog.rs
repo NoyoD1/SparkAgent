@@ -159,9 +159,11 @@ fn groq_catalog() -> HashMap<String, ModelMetadata> {
 }
 
 /// MiniMax. 256K / 64K / 8K.
+///   M2.7 = M2 衍生 (user 2026-08-22 确认: 跟 M2 同样 256K context, 等同处理)
 fn minimax_catalog() -> HashMap<String, ModelMetadata> {
     let mut c = HashMap::new();
     c.insert("MiniMax-M2".into(),  m(262_144, 16_384, false, false));
+    c.insert("MiniMax-M2.7".into(), m(262_144, 16_384, false, false));
     c.insert("MiniMax-M1".into(),  m(65_536,  16_384, false, false));
     c.insert("abab6.5s-chat".into(), m(8_192, 8_192, false, false));
     c

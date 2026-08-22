@@ -73,6 +73,18 @@ export interface ChatMessage {
     state: 'in_progress' | 'success' | 'failure';
     /** 仅 failure 状态有, 压缩失败的错误信息 */
     errorMessage?: string;
+    /**
+     * v0.6 (P0-C): 压缩前 contextTokens (仅手动 compact 记录, auto-compaction 路径无).
+     *   用来在 success divider 上显示"释放 X tokens".
+     *   压缩成功后 contextTokens 清零, freedTokens = beforeCompact (因为 after = 0).
+     */
+    beforeCompact?: number;
+    /**
+     * v0.6 (P0-C): 释放的 tokens (仅 manual compact + success 时记录).
+     *   Pi SDK 0.84.2 不直接报"压缩节省 token", 我们在 handleCompactionEnd 时算:
+     *   freedTokens = beforeCompact - 0 (因为 compaction_end 成功时 contextTokens 清零).
+     */
+    freedTokens?: number;
   };
   /**
    * v0.5.0-D 第29轮 (D212): LLM 异常错误分界线.

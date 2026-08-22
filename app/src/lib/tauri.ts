@@ -823,6 +823,18 @@ class PiTauriClient {
     return (await invoke('get_agent_dir')) as string;
   }
 
+  // v0.6 (Bug2 修): 读 Pi SDK settings.json 里的 compaction.enabled
+  //   Pi SDK 默认 enabled=true. 改完下次 Pi SDK 启动生效 (启动时加载 settings).
+  async getCompactionEnabled(): Promise<boolean> {
+    return (await invoke('get_compaction_enabled')) as boolean;
+  }
+
+  // v0.6 (Bug2 修): 改 Pi SDK settings.json 里的 compaction.enabled
+  //   不走 sidecar RPC (闲置 session 调不通). 改完下次 Pi SDK 启动生效.
+  async setCompactionEnabled(enabled: boolean): Promise<void> {
+    await invoke('set_compaction_enabled', { enabled });
+  }
+
   // ====== 2.1: 文件树浏览器 ======
   //   读 workspace 目录树, UI 用. 不走 sidecar, 走 Tauri 直 invoke.
   async listWorkspaceTree(path: string, maxDepth = 2): Promise<WorkspaceTreeNode[]> {

@@ -277,17 +277,15 @@ export const useChatStore = defineStore('chat', () => {
         at: Date.now(),
       },
     };
-    // v0.5.0-D 第22轮 (D209): 压缩成功时重置累加的 token count
+    // v0.6 (N4): 压缩成功时只清 contextTokens (4 分类不清, 下次 message_end 覆盖)
+    //   之前 D209 清 4 分类 + contextTokens, 修后只清 contextTokens
+    //   4 分类由 per-turn 覆盖, 压缩后下一轮 LLM 报的 usage 会重写, 没必要现在清
     if (!event.aborted && !event.errorMessage) {
-      cumulativeUsageBySession.value = {
-        ...cumulativeUsageBySession.value,
-        [sessionId]: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
-      };
       contextTokensBySession.value = {
         ...contextTokensBySession.value,
         [sessionId]: 0,
       };
-      console.log(`[chat] compaction_end: reset cumulative usage (compaction freed context)`);
+      console.log(`[chat] compaction_end: reset contextTokens (compaction freed context, 4 分类下次 message_end 覆盖)`);
     }
     // v0.5.0-D 第27轮 (D210.4) 改 UX: 不再用 toast 弹窗, 全部走分隔线
     //   user 反馈: "压缩失败要在上面提示, 包括压缩进行中都不要通过弹窗形式提示,
@@ -309,17 +307,22 @@ export const useChatStore = defineStore('chat', () => {
       const finalState: 'success' | 'failure' = (event.aborted || event.errorMessage) ? 'failure' : 'success';
       const errorMessage = event.errorMessage || (event.aborted ? '压缩已中止' : undefined);
       if (updateIdx >= 0) {
+        // v0.6 (P0-C): 算 freedTokens (success 时 = beforeCompact, 因为 contextTokens 已清零)
+        //   失败时 freedTokens = 0 (没释放)
+        const beforeCompact = d2.messages[updateIdx].compactionMarker?.beforeCompact ?? 0;
+        const freedTokens = finalState === 'success' ? Math.max(0, beforeCompact) : 0;
         // 原地更新 marker (不要 push 新消息)
         d2.messages[updateIdx] = {
           ...d2.messages[updateIdx],
-          compactionMarker: { state: finalState, errorMessage },
+          compactionMarker: { state: finalState, errorMessage, freedTokens },
         };
-        console.log(`[chat] compaction divider updated: in_progress → ${finalState}${errorMessage ? ' (' + errorMessage.slice(0, 60) + ')' : ''}`);
+        console.log(`[chat] compaction divider updated: in_progress → ${finalState}${errorMessage ? ' (' + errorMessage.slice(0, 60) + ')' : ''} (freed=${freedTokens})`);
       } else {
         // 兜底: 找不到 in_progress marker (Pi SDK 内部自动 compaction, 没经过 compact()
         // 推过 in_progress), 直接 push 一条 success / failure
+        // 注意: auto-compaction 路径没有 beforeCompact, freedTokens 不算 (Pi SDK 自身不报"释放量")
         d2.messages.push({
-          id: `sys-compact-${Date.now()}`,
+          id: `sys-compact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           role: 'system',
           content: '__COMPACTION_DIVIDER__',
           createdAt: new Date().toISOString(),
@@ -1463,46 +1466,41 @@ export const useChatStore = defineStore('chat', () => {
               //   顶层**无 usage**, 用 event.message.usage (AssistantMessage 必填字段).
               //   v0.4.3.2 修对了, 不动.
               //   写到 assistant message.usage (持久化到 store), 切别的 session / 切回能读回
-              //   v0.5.0-D 第22轮 (D209): 累加 usage
-              //     之前: contextTokensBySession = finalUsage.input + finalUsage.cacheRead
-              //       (单次 turn, 每次新 turn 覆盖. user 反馈 "上下文窗口的计数应该是累加的")
-              //     现在: 累加 (input + cacheRead 总和), 跨 turn 求和
-              //     lastUsageBySession 仍 per-turn (单次 turn 调试用, 不影响显示)
-              //     cumulativeUsageBySession 累加 4 字段 (input/output/cacheRead/cacheWrite)
-              //     只有 user 主动 compaction 才会"消减" (compaction_end 成功时清零重计)
+              //   v0.6 (N4+N7): 取消 D209 跨 turn 累加, per-turn 覆盖
+              //     之前 D209: cumulativeUsageBySession 跨 turn 累加 input/output/cacheRead/cacheWrite,
+              //       contextTokensBySession 累加 input + cacheRead. 修后: 全部 per-turn 覆盖.
+              //     根因: Pi SDK 0.84.2 各 provider usage.input/cacheRead/cacheWrite 是 per-request (LLM 视角),
+              //       cacheRead 跨 turn 是同一批 cache 命中, 累加会重复计算. 数字虚高, 跟真实 context 不符.
+              //     修后: contextTokens = input + cacheRead + cacheWrite (不含 output, LLM 报的最准).
+              //       跟 Claude Code 主流算法一致, 跟 Pi SDK 0.84.2 trigger 逻辑一致.
+              //     跨 turn "累加" 的效果天然发生 (history 越来越长, totalTokens 自然变大), 不需要 FE 累加.
+              //   lastUsageBySession / cumulativeUsageBySession 字段保留 (popover 4 分类展示用),
+              //     改成 per-turn 覆盖 (跟 N4 一致).
+              //   user 反馈: "上下文窗口的计数应该是累加的" — 修复后跨 turn 数字还是会越来越大
+              //     (因为 history 越来越长), 只不过不是手动累加, 是 LLM 视角的真实 current context.
               if (event.message?.usage && idx >= 0) {
                 const finalUsage = event.message.usage;
                 // per-turn (单次, 覆盖) - 调试 / 单次显示用
                 lastUsageBySession.value = { ...lastUsageBySession.value, [sessionId]: finalUsage };
-                // 累加 (跨 turn 求和) - UI 主显示
-                const prevCum = cumulativeUsageBySession.value[sessionId];
-                const newCum: import('@/lib/mock/types').MessageUsage = {
-                  input: (prevCum?.input ?? 0) + (finalUsage.input ?? 0),
-                  output: (prevCum?.output ?? 0) + (finalUsage.output ?? 0),
-                  cacheRead: (prevCum?.cacheRead ?? 0) + (finalUsage.cacheRead ?? 0),
-                  cacheWrite: (prevCum?.cacheWrite ?? 0) + (finalUsage.cacheWrite ?? 0),
-                  cost: {
-                    input: (prevCum?.cost?.input ?? 0) + (finalUsage.cost?.input ?? 0),
-                    output: (prevCum?.cost?.output ?? 0) + (finalUsage.cost?.output ?? 0),
-                    cacheRead: (prevCum?.cost?.cacheRead ?? 0) + (finalUsage.cost?.cacheRead ?? 0),
-                    cacheWrite: (prevCum?.cost?.cacheWrite ?? 0) + (finalUsage.cost?.cacheWrite ?? 0),
-                  },
-                };
+                // v0.6 (N4): 4 分类 per-turn 覆盖 (跟 N4 一致, popover 4 分类展示用)
                 cumulativeUsageBySession.value = {
                   ...cumulativeUsageBySession.value,
-                  [sessionId]: newCum,
+                  [sessionId]: finalUsage,
                 };
-                // contextTokens 累加 (input + cacheRead 总和)
-                const prevCtx = contextTokensBySession.value[sessionId] ?? 0;
+                // v0.6 (N4): current context = input + cacheRead + cacheWrite (Claude Code 主流算法)
+                //   不含 output (output 是回复不在 context 里), per-turn 覆盖不跨 turn 累加
+                //   跨 turn 数字会自然增长 (history 越来越长 LLM 报 totalTokens 也越来越大)
+                const totalCtx = (finalUsage.input ?? 0) + (finalUsage.cacheRead ?? 0) + (finalUsage.cacheWrite ?? 0);
                 contextTokensBySession.value = {
                   ...contextTokensBySession.value,
-                  [sessionId]: prevCtx + (finalUsage.input ?? 0) + (finalUsage.cacheRead ?? 0),
+                  [sessionId]: totalCtx,
                 };
                 // v0.4.3: 写到 assistant message.usage, 后续从 store 读
                 assistant.usage = finalUsage;
+                // v0.6 (N4): 改 per-turn 覆盖, cumulative 字段名保留但语义是 "per-turn" (跟 D209 反向)
                 console.log(
                   `[chat] message_end: turn usage=${finalUsage.input}+${finalUsage.cacheRead} (cache) + ${finalUsage.cacheWrite} (write); ` +
-                  `cumulative context=${contextTokensBySession.value[sessionId]} (input=${newCum.input}, output=${newCum.output}, cacheRead=${newCum.cacheRead}, cacheWrite=${newCum.cacheWrite})`
+                  `context=${contextTokensBySession.value[sessionId]} (current turn, formula=input+cacheRead+cacheWrite)`
                 );
                 // v0.5.0-D 第29轮 (D212): LLM 异常错误分界线
                 //   之前 (D204 前): message_end 带 errorMessage + stopReason='error' 时
@@ -1785,8 +1783,12 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * v0.4.3: 手动触发 context 压缩 (走 Pi SDK compact RpcCommand).
    *
-   * - 自动场景: Pi SDK 内部 `shouldCompact()` 检测到 context 超过 70% window, 走 auto compaction
-   *   (event.reason = 'threshold' / 'overflow'). FE 不用管.
+   * - 自动场景: Pi SDK 内部 `shouldCompact(ctx, win, settings)` 检测到
+   *   `ctx > win - reserveTokens` (默认 reserveTokens=16384, 200K 窗口下约 92% 触发), 走 auto
+   *   compaction (event.reason = 'threshold' / 'overflow'). FE 不用管, 也改不了阈值 (Pi SDK 0.84.2
+   *   settingsManager 只暴露 enabled setter, reserveTokens/keepRecentTokens 是只读 getter).
+   *   ⚠️ 注意: 70% 是 `isContextHigh()` 的 UI 高亮阈值, 不是 auto-compaction 触发阈值.
+   *   自动压缩走的是 Pi SDK settings, 不是 isContextHigh.
    * - 手动场景: user 点 Composer 上的 "压缩" 按钮, 主动触发, event.reason = 'manual'.
    *
    * Pi SDK 0.84.2 compact RpcCommand 走 sidecar runRpcMode → sidecar 调 AgentSession.compact()
@@ -1816,6 +1818,8 @@ export const useChatStore = defineStore('chat', () => {
       return;
     }
     console.log(`[chat] compact: triggering manual compaction for session=${sid}, currentContextTokens=${getContextTokens(sid)}`);
+    // v0.6 (P0-C): 记录压缩前 contextTokens, 用来在 success divider 上显示"释放 X tokens"
+    const beforeCompact = getContextTokens(sid);
     // Bug #2 修: 走 force-spawn 路径 (compact_session invoke), 不依赖 active sidecar
     const config = useConfigStore();
     const active = config.activeProvider;
@@ -1897,17 +1901,18 @@ export const useChatStore = defineStore('chat', () => {
       // v0.5.0-D 第27轮 (D210.4) 改 UX: 不用 toast, 走分隔线
       //   推一条 in_progress system message, handleCompactionEnd 时原地更新成 success / failure.
       //   user 反馈: "压缩进行中不要通过弹窗形式提示, 而是统一使用分隔线的形式, 做的整体一些"
+      //   v0.6 (P0-C): 推 in_progress 时带 beforeCompact, 压缩成功时算 freedTokens = beforeCompact
       const dInProg = getSessionData(sid);
       if (dInProg) {
         dInProg.messages.push({
-          id: `sys-compact-${Date.now()}`,
+          id: `sys-compact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           role: 'system',
           content: '__COMPACTION_DIVIDER__',
           createdAt: new Date().toISOString(),
-          compactionMarker: { state: 'in_progress' },
+          compactionMarker: { state: 'in_progress', beforeCompact },
         } as ChatMessage);
         chatData.value = { ...chatData.value, [sid]: { ...dInProg } };
-        console.log(`[chat] compaction divider pushed: in_progress (manual, session=${sid})`);
+        console.log(`[chat] compaction divider pushed: in_progress (manual, session=${sid}, beforeCompact=${beforeCompact})`);
       }
     } catch (e) {
       console.error('[chat] compactSession invoke failed', e);
