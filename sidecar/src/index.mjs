@@ -799,74 +799,57 @@ function loadUserTools(cwd, agentDir) {
     console.error('[sidecar] P0-1: bash shell: (unset in settings, fallback to Pi SDK auto-discovery)');
   }
 
-  // ====== ADR-0019 P0-2 (2026-08-23): bash 沙箱 ======
-  //   1) commandPrefix 强制每次 invocation 先 cd 回 workspace (防 user 在前一次 cd 出去后,
-  //      后续命令在错误 cwd 跑). Pi SDK 0.84.2 bash.ts:345 用 `${prefix}\n${command}` 追加.
-  //   2) wrapBashWithSandbox 加 deny list 检查, 匹配危险模式直接返回错误结果, 不执行.
-  //      危险模式: rm -rf / format / del /f / dd if= / mkfs / pipe-to-shell / fork bomb
-  //   3) 不做"path detection" (解析命令里的绝对路径判定是否出 workspace), 复杂度太高,
-  //      user 权限 (ask/smart mode 弹窗) 是主防线, deny list 是兜底.
-  //   4) P0-1 的 userBashShellPath 仍生效, commandPrefix 在用户 shell 上跑, 不依赖特定 shell
-  const BASH_DENY_LIST = [
-    // 通用: 危险删除
-    /\brm\s+(-[a-zA-Z]*[rRfF][a-zA-Z]*|--recursive)\b/,   // rm -rf / rm -fr / rm -r
-    /\brmdir\s+\/s\b/i,                                    // Windows rmdir /s
-    /\bdel\s+\/[a-z]*f[a-z]*\b/i,                          // Windows del /f
-    /\brd\s+\/s(\s+\/q)?\b/i,                              // Windows rd /s /q
-    // 磁盘级
-    /\bformat(\.com)?\b/i,                                 // format C: / mkfs
-    /\bmkfs(\.[a-z0-9]+)?\b/i,                             // mkfs.ext4 etc.
-    /\bdd\s+if=/i,                                         // dd if=/dev/zero of=/dev/sda
-    // Fork bomb (经典)
-    /:\(\)\s*\{.*:\|:.*&\s*\}\s*;\s*:/,                   // :(){ :|:& };:
-    // Pipe-to-shell (下载执行)
-    /\b(wget|curl)\s+[^|]*\|\s*(ba)?sh\b/i,                // wget/curl | bash
-    // 远程代码执行
-    /\b(sh|bash)\s+<\s*(\(|curl|wget)/i,                   // sh <(curl ...) 等
-    // 系统关停
-    /\bshutdown\s+(-h|-r\s+now)/i,                         // shutdown -h now
-    /\b(init\s+0|init\s+6)\b/,                             // init 0/6
-    // /dev/sda 直接写
-    />\s*\/dev\/(sda|nvme|hd)/i,
-  ];
-  const BASH_DENY_LIST_RE = new RegExp(BASH_DENY_LIST.map(r => r.source).join('|'), 'i');
-
-  function wrapBashWithSandbox(realBash) {
-    return {
-      ...realBash,
-      description: `Execute a bash command. cwd is reset to workspace each invocation (前一次 cd 不会污染后续). ` +
-        `Output truncated. Dangerous commands (rm -rf / format / del /f / dd if= / mkfs / pipe-to-shell / fork bomb) ` +
-        `are blocked by sandbox deny list. Optionally provide a timeout in seconds.`,
-      execute: async (...args) => {
-        const toolCall = args[0];
-        const cmd = toolCall?.input?.command;
-        if (typeof cmd === 'string' && BASH_DENY_LIST_RE.test(cmd)) {
-          console.error(`[sidecar] P0-2: bash blocked by deny list: ${cmd.slice(0, 120)}`);
-          return {
-            content: [{
-              type: 'text',
-              text: `[🛡️ bash_dangerous] 命令被沙箱 deny list 拦截.\n` +
-                `匹配的危险模式: rm -rf / format / del /f / dd if= / mkfs / pipe-to-shell / fork bomb.\n` +
-                `建议: 拆成安全的单条命令执行, 或临时到 Settings → Permission Mode = 'allow' 放开 (高风险).\n` +
-                `原始命令前 200 字: ${cmd.slice(0, 200)}`,
-            }],
-            details: { blocked: true, reason: 'deny_list', commandPreview: cmd.slice(0, 200) },
-          };
+  // ====== ADR-0019 P0-2 (2026-08-23): bash 沙箱 - settings.shellCommandPrefix 路径 ======
+  //   Pi SDK 0.84.2 agent-session.ts:2562-2574 启动时读 settings.shellCommandPrefix + settings.shellPath,
+  //   注入到 createBashToolDefinition 的 options. 我们这里 mirror 我自己写的 bash.path 到 Pi SDK
+  //   标准字段, 让 Pi SDK 自动用. 改动 settings.json 后, 现有 sidecar 进程不重新读 (Pi SDK 已经在
+  //   内存里 load 了), 需重启 sidecar 才生效.
+  if (userBashShellPath) {
+    try {
+      const settingsPath = join(agentDir || process.cwd(), 'settings.json');
+      if (existsSync(settingsPath)) {
+        const raw = readFileSync(settingsPath, 'utf-8');
+        const s = JSON.parse(raw);
+        let changed = false;
+        // 1) shellPath: mirror 我的 bash.path 到 Pi SDK 标准字段
+        if (s.shellPath !== userBashShellPath) {
+          s.shellPath = userBashShellPath;
+          changed = true;
         }
-        return realBash.execute(...args);
-      },
-    };
+        // 2) shellCommandPrefix: 强制每次 cd 回 workspace cwd (cwdResolved)
+        //    Pi SDK bash.ts:345 用 `${prefix}\n${command}` 追加, 每次 invocation 自动 cd 回 workspace
+        //    Pi SDK agent-session.ts:2573 在 bash tool 创建时设: bash: { commandPrefix: shellCommandPrefix, shellPath }
+        const desiredPrefix = `cd "${cwdResolved}" &&`;
+        if (s.shellCommandPrefix !== desiredPrefix) {
+          s.shellCommandPrefix = desiredPrefix;
+          changed = true;
+        }
+        if (changed) {
+          const pretty = JSON.stringify(s, null, 2);
+          writeFileSync(settingsPath, pretty, 'utf-8');
+          console.error(`[sidecar] P0-2: mirrored bash.path to settings.shellPath + settings.shellCommandPrefix (cwd=${cwdResolved})`);
+        }
+      }
+    } catch (e) {
+      console.error(`[sidecar] P0-2: failed to mirror bash config to Pi SDK fields: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
+
+  // ====== ADR-0019 P0-2 (2026-08-23): bash 沙箱 (settings.shellCommandPrefix 路径) ======
+  //   重要设计纠正 (2026-08-23): 我之前 wrapBashWithSandbox 写在了 builtinToolDefs 对象里,
+  //   但 Pi SDK 0.84.2 内部有自己的 _baseToolDefinitions (agent-session.ts:348, 2564),
+  //   不会用我传进去的 builtinToolDefs. wrap 函数是 dead code.
+  //   正确路径: Pi SDK 从 settings.json 读 shellCommandPrefix + shellPath (agent-session.ts:2562-2574,
+  //   bash.ts:345), 把这两个字段写进 settings.json 即可生效.
+  //
+  //   deny list 之前 wrap 路径到不了, 走 Pi SDK 的 Extension API (tool_call event) 才能实现.
+  //   Extension 改造比 P0-2 范围大, 留 P1 (P0-2 退化为只做 cwd 限定, 不做硬 deny).
 
   const builtinToolDefs = {
     read: createReadToolDefinition(cwdResolved),
     write: createWriteToolDefinition(cwdResolved),
     edit: createEditToolDefinition(cwdResolved),
-    bash: wrapBashWithSandbox(createBashToolDefinition(cwdResolved, {
-      shellPath: userBashShellPath,
-      // 沙箱 1/2: 强制每次 cd 回 workspace (见 ADR-0019 P0-2)
-      commandPrefix: `cd "${cwdResolved}" &&`,
-    })),
+    bash: createBashToolDefinition(cwdResolved, userBashShellPath ? { shellPath: userBashShellPath } : undefined),
     ls: createLsToolDefinition(cwdResolved),
     find: createFindToolDefinition(cwdResolved),
     grep: createGrepToolDefinition(cwdResolved),

@@ -315,7 +315,7 @@ Pi Agent Desktop v0.6.3-rc1 已拉通 LLM 配置 / Skill / MCP / userSendMessage
 
 - ❌ bash 不能跑 (用户痛点, P0-1 必修, 根因已澄清 2026-08-23) → ✅ **P0-1 已修 (commit 0db984f)**
 - ❌ 无联网 tool (P0-3 必修)
-- ✅ bash 沙箱不完整 (P0-2 已修) → 命令前缀 cd workspace + deny list (rm -rf / format / 等)
+- 🟡 bash 沙箱不完整 (P0-2 部分修) → 只做了 cwd 限定 (settings.shellCommandPrefix), deny list 没做 (需要 Extension API, 留 P1)
 - 🟡 Permission 弹窗偶发 lost (沿 0014 P0, 未修)
 - 🟡 `smart` 分类 hardcoded (沿 0014 P1, 未修)
 - 🟡 没 per-tool remember decision (沿 0014 P0, 未修, S-1 可解)
@@ -574,18 +574,20 @@ const BASH_NOT_FOUND_HINTS = [
 
 **意外修**: sidecar .mjs 文件里掺 TS 语法 (bun 1.3.14 strict 不认), 写 `scripts/build-sidecar-stage1.mjs` 用 TypeScript transpileModule 预处理
 
-**P0-2 bash 沙箱** (Q2-A 拍板路径):
-- `sidecar/src/index.mjs`:
-  - `commandPrefix: 'cd "<workspacePath>" &&'` 每次 invocation 强制回 workspace cwd (防 user 前一次 cd 出去污染)
-  - `wrapBashWithSandbox()` 包 bash tool 的 execute, 加 12 条 deny list regex 检查 (rm -rf / format / del /f / dd if= / mkfs / pipe-to-shell / fork bomb / shutdown / 写 /dev/sda)
-  - 匹配 deny list 直接返回 result (不抛异常), LLM 看到清晰提示
-- `sidecar/src/errorSanitizer.mjs`: +bash_dangerous category (一致性, wrap 实际不抛)
+**P0-2 bash 沙箱** (Q2-A 拍板路径, **设计纠正 2026-08-23**):
+- **第一版设计错了** — 我在 sidecar 里写了 `wrapBashWithSandbox` 包 bash tool, 但 Pi SDK 0.84.2 内部用 `_baseToolDefinitions` (agent-session.ts:348, 2564), 根本不用我传进去的 `builtinToolDefs` 对象, wrap 函数是 dead code
+- **正确路径** — Pi SDK 启动时读 `settings.shellCommandPrefix` + `settings.shellPath` (agent-session.ts:2562-2574, bash.ts:345), 把这两个字段写进 settings.json 即可生效
+- `sidecar/src/index.mjs`: 撤掉 wrapBashWithSandbox, 加 mirror 逻辑 — 启动时读自己的 `settings.bash.path` 字段, mirror 到 `settings.shellPath` (Pi SDK 用) 和 `settings.shellCommandPrefix` (`cd "<workspacePath>" &&` 让每次 bash invocation 强制 cd 回 workspace cwd)
+- `sidecar/src/errorSanitizer.mjs`: +bash_dangerous category (留作 P1 Extension API 用, 当前不触发)
+- **deny list 暂不实现** — 之前 wrap 路径根本到不了 agent 调用的 tool, 走 Pi SDK 的 Extension API (tool_call event) 才能拦截, 改造比 P0-2 范围大, 留 P1
 
 **端到端核验 (P0-1 7 步 + P0-2 验证)** — 待 user 跑:
 - P0-1: 7 步 smoke (1-7) 同 ADR P0-1 端到端核验段
-- P0-2: 跑 `cd / && pwd` (应回 workspace) + 跑 `rm -rf /` (应被 deny list 拦截)
+- P0-2: 跑 `pwd` (应回 workspace, 跟之前一样) + 跑 `cd /tmp && pwd` (第二条 pwd 应回 workspace, 这次该生效)
+  ⚠️ **deny list 不验证** — P0-2 实际只做了 cwd 限定, 没 deny list
 
 **已知遗留 (进 P1 backlog)**:
-- bash path 检测 (命令里的绝对路径判定是否出 workspace) — 复杂度高, deny list 兜底即可
-- workspace 切换时 bash tool 不会自动重建 (cwd 缓存) — P1 阶段一并处理
+- ~~bash deny list (P0-2 已修)~~ → ❌ 实际未做, 走 Extension API 重做
+- bash path 检测 (命令里的绝对路径判定是否出 workspace) — 复杂度高
+- workspace 切换时 bash tool 不会自动重建 (cwd 缓存)
 - smart 模式分类 hardcoded (沿 0014 已知问题)
