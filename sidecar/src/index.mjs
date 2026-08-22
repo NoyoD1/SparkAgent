@@ -799,11 +799,74 @@ function loadUserTools(cwd, agentDir) {
     console.error('[sidecar] P0-1: bash shell: (unset in settings, fallback to Pi SDK auto-discovery)');
   }
 
+  // ====== ADR-0019 P0-2 (2026-08-23): bash 沙箱 ======
+  //   1) commandPrefix 强制每次 invocation 先 cd 回 workspace (防 user 在前一次 cd 出去后,
+  //      后续命令在错误 cwd 跑). Pi SDK 0.84.2 bash.ts:345 用 `${prefix}\n${command}` 追加.
+  //   2) wrapBashWithSandbox 加 deny list 检查, 匹配危险模式直接返回错误结果, 不执行.
+  //      危险模式: rm -rf / format / del /f / dd if= / mkfs / pipe-to-shell / fork bomb
+  //   3) 不做"path detection" (解析命令里的绝对路径判定是否出 workspace), 复杂度太高,
+  //      user 权限 (ask/smart mode 弹窗) 是主防线, deny list 是兜底.
+  //   4) P0-1 的 userBashShellPath 仍生效, commandPrefix 在用户 shell 上跑, 不依赖特定 shell
+  const BASH_DENY_LIST = [
+    // 通用: 危险删除
+    /\brm\s+(-[a-zA-Z]*[rRfF][a-zA-Z]*|--recursive)\b/,   // rm -rf / rm -fr / rm -r
+    /\brmdir\s+\/s\b/i,                                    // Windows rmdir /s
+    /\bdel\s+\/[a-z]*f[a-z]*\b/i,                          // Windows del /f
+    /\brd\s+\/s(\s+\/q)?\b/i,                              // Windows rd /s /q
+    // 磁盘级
+    /\bformat(\.com)?\b/i,                                 // format C: / mkfs
+    /\bmkfs(\.[a-z0-9]+)?\b/i,                             // mkfs.ext4 etc.
+    /\bdd\s+if=/i,                                         // dd if=/dev/zero of=/dev/sda
+    // Fork bomb (经典)
+    /:\(\)\s*\{.*:\|:.*&\s*\}\s*;\s*:/,                   // :(){ :|:& };:
+    // Pipe-to-shell (下载执行)
+    /\b(wget|curl)\s+[^|]*\|\s*(ba)?sh\b/i,                // wget/curl | bash
+    // 远程代码执行
+    /\b(sh|bash)\s+<\s*(\(|curl|wget)/i,                   // sh <(curl ...) 等
+    // 系统关停
+    /\bshutdown\s+(-h|-r\s+now)/i,                         // shutdown -h now
+    /\b(init\s+0|init\s+6)\b/,                             // init 0/6
+    // /dev/sda 直接写
+    />\s*\/dev\/(sda|nvme|hd)/i,
+  ];
+  const BASH_DENY_LIST_RE = new RegExp(BASH_DENY_LIST.map(r => r.source).join('|'), 'i');
+
+  function wrapBashWithSandbox(realBash) {
+    return {
+      ...realBash,
+      description: `Execute a bash command. cwd is reset to workspace each invocation (前一次 cd 不会污染后续). ` +
+        `Output truncated. Dangerous commands (rm -rf / format / del /f / dd if= / mkfs / pipe-to-shell / fork bomb) ` +
+        `are blocked by sandbox deny list. Optionally provide a timeout in seconds.`,
+      execute: async (...args) => {
+        const toolCall = args[0];
+        const cmd = toolCall?.input?.command;
+        if (typeof cmd === 'string' && BASH_DENY_LIST_RE.test(cmd)) {
+          console.error(`[sidecar] P0-2: bash blocked by deny list: ${cmd.slice(0, 120)}`);
+          return {
+            content: [{
+              type: 'text',
+              text: `[🛡️ bash_dangerous] 命令被沙箱 deny list 拦截.\n` +
+                `匹配的危险模式: rm -rf / format / del /f / dd if= / mkfs / pipe-to-shell / fork bomb.\n` +
+                `建议: 拆成安全的单条命令执行, 或临时到 Settings → Permission Mode = 'allow' 放开 (高风险).\n` +
+                `原始命令前 200 字: ${cmd.slice(0, 200)}`,
+            }],
+            details: { blocked: true, reason: 'deny_list', commandPreview: cmd.slice(0, 200) },
+          };
+        }
+        return realBash.execute(...args);
+      },
+    };
+  }
+
   const builtinToolDefs = {
     read: createReadToolDefinition(cwdResolved),
     write: createWriteToolDefinition(cwdResolved),
     edit: createEditToolDefinition(cwdResolved),
-    bash: createBashToolDefinition(cwdResolved, userBashShellPath ? { shellPath: userBashShellPath } : undefined),
+    bash: wrapBashWithSandbox(createBashToolDefinition(cwdResolved, {
+      shellPath: userBashShellPath,
+      // 沙箱 1/2: 强制每次 cd 回 workspace (见 ADR-0019 P0-2)
+      commandPrefix: `cd "${cwdResolved}" &&`,
+    })),
     ls: createLsToolDefinition(cwdResolved),
     find: createFindToolDefinition(cwdResolved),
     grep: createGrepToolDefinition(cwdResolved),

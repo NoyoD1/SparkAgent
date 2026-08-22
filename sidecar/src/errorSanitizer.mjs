@@ -31,6 +31,7 @@ const ICON_BY_CATEGORY = {
   aborted: '⏹️',            // AbortError - 操作被中止 (含 timeout)
   spawn_failed: '🚫',       // stdio 子进程 spawn 失败 (ENOENT 等)
   bash_not_found: '🔧',     // ADR-0019 P0-1: bash shell 没装或没配置, 跟 spawn_failed 区分
+  bash_dangerous: '🛡️',    // ADR-0019 P0-2: bash 命令匹配沙箱 deny list (rm -rf / format / 等)
   unknown: '❓',
 };
 

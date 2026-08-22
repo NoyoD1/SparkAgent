@@ -313,9 +313,9 @@ Pi Agent Desktop v0.6.3-rc1 已拉通 LLM 配置 / Skill / MCP / userSendMessage
 
 ## 已知问题 / 技术债 (现状)
 
-- ❌ bash 不能跑 (用户痛点, P0-1 必修, 根因已澄清 2026-08-23)
+- ❌ bash 不能跑 (用户痛点, P0-1 必修, 根因已澄清 2026-08-23) → ✅ **P0-1 已修 (commit 0db984f)**
 - ❌ 无联网 tool (P0-3 必修)
-- 🟡 bash 沙箱不完整 (P0-2 必修, 仅 write/edit 有沙箱)
+- ✅ bash 沙箱不完整 (P0-2 已修) → 命令前缀 cd workspace + deny list (rm -rf / format / 等)
 - 🟡 Permission 弹窗偶发 lost (沿 0014 P0, 未修)
 - 🟡 `smart` 分类 hardcoded (沿 0014 P1, 未修)
 - 🟡 没 per-tool remember decision (沿 0014 P0, 未修, S-1 可解)
@@ -562,9 +562,30 @@ const BASH_NOT_FOUND_HINTS = [
 - ✅ ADR 状态: Accepted, 待执行
 - 待 user 给"开干"信号后按 [待执行变更清单](#待执行变更清单-p0-1-阶段-1-半天到一天) 执行 P0-1
 
-### 落地后追加 (P0-1 实施后)
+### 2026-08-23 落地 P0-1 + P0-2 (commit 0db984f + 后续 P0-2 commit)
 
-- 实施过程中遇到的偏差 / 文件位置 / 行数差异
-- 7 步 smoke 验证结果 (1-7)
-- 端到端测试中发现的 Pi SDK 0.84.2 兼容性问题
-- 后续 P0-2 / P0-3 / P1 阶段的执行记录
+**P0-1 修通 bash** — 5-component 修法:
+- `src-tauri/src/lib.rs`: +5 Tauri command (get/set/verify/clear/detect) + 2 struct (BashConfig/ShellInfo) + invoke_handler 注册
+- `app/src/lib/tauri.ts`: +5 invoke wrapper + 2 interface
+- `app/src/components/Settings/tabs/GeneralTab.vue`: +Bash 路径 section (input + 自动检测 + 测试 + 清除)
+- `sidecar/src/index.mjs`: 读 settings.bash.path 传 createBashToolDefinition({shellPath})
+- `sidecar/src/errorSanitizer.mjs`: +bash_not_found category
+- `doc/04-adr/0019-feature-tools-diversity.md` + `0019-plain-summary.md`: 新 ADR + 白话版
+
+**意外修**: sidecar .mjs 文件里掺 TS 语法 (bun 1.3.14 strict 不认), 写 `scripts/build-sidecar-stage1.mjs` 用 TypeScript transpileModule 预处理
+
+**P0-2 bash 沙箱** (Q2-A 拍板路径):
+- `sidecar/src/index.mjs`:
+  - `commandPrefix: 'cd "<workspacePath>" &&'` 每次 invocation 强制回 workspace cwd (防 user 前一次 cd 出去污染)
+  - `wrapBashWithSandbox()` 包 bash tool 的 execute, 加 12 条 deny list regex 检查 (rm -rf / format / del /f / dd if= / mkfs / pipe-to-shell / fork bomb / shutdown / 写 /dev/sda)
+  - 匹配 deny list 直接返回 result (不抛异常), LLM 看到清晰提示
+- `sidecar/src/errorSanitizer.mjs`: +bash_dangerous category (一致性, wrap 实际不抛)
+
+**端到端核验 (P0-1 7 步 + P0-2 验证)** — 待 user 跑:
+- P0-1: 7 步 smoke (1-7) 同 ADR P0-1 端到端核验段
+- P0-2: 跑 `cd / && pwd` (应回 workspace) + 跑 `rm -rf /` (应被 deny list 拦截)
+
+**已知遗留 (进 P1 backlog)**:
+- bash path 检测 (命令里的绝对路径判定是否出 workspace) — 复杂度高, deny list 兜底即可
+- workspace 切换时 bash tool 不会自动重建 (cwd 缓存) — P1 阶段一并处理
+- smart 模式分类 hardcoded (沿 0014 已知问题)
