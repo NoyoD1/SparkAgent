@@ -9,7 +9,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
-    "build:debug": "node ../scripts/build-debug.mjs"
+    "build:debug": "node ../scripts/build-debug.mjs",
+    "build:release": "node ../scripts/build-release.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",
