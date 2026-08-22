@@ -11,7 +11,7 @@ mod keyring;
 mod model_catalog;  // v0.5.0-D D213: 静态 model metadata catalog
 mod sidecar;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use crate::sidecar::kill_sidecar;  // v0.4.6: register tauri command (force kill sidecar on abort)
 use tauri::{AppHandle, Emitter, Manager, State};
 use std::path::{Path, PathBuf};
@@ -2539,6 +2539,488 @@ async fn set_compaction_enabled(app: AppHandle, enabled: bool) -> Result<(), Str
     Ok(())
 }
 
+// ====== ADR-0019 P0-1 (2026-08-23): Bash 路径配置 + 自动检测 ======
+//   根因: Pi SDK 0.84.2 shell.ts:67-107 只搜 %ProgramFiles%\Git\bin\bash.exe + %ProgramFiles(x86)%\Git\bin\bash.exe + where.exe
+//         miss 场景: Git for Windows 用户级安装 (e.g. C:\Users\你\AppData\Local\Programs\Git\bin\bash.exe) 跟非常规路径安装
+//                    (e.g. D:\DevTools\Git\bin\bash.exe, user 真实情况)
+//   修法: 5 个 Tauri command, 把 bash 路径写进 ~/.pi/agent/settings.json 的 bash 字段
+//         - get_bash_config: 读
+//         - set_bash_config: 写 (校验 + 跑 --version 拿 version)
+//         - detect_bash_candidates: 自动检测 (PATH + 注册表 + 常见位置 + WSL)
+//         - verify_bash_path: 单次测试, 给"测试"按钮用
+//         - clear_bash_config: 删字段, 下次启动 fallback Pi SDK 自带 search
+//   Sidecar 那边 sidecar/src/index.mjs:782 启动时读 settings.bash.path, 传给 createBashToolDefinition 的 shellPath 选项
+//   Source of truth 是 settings.bash.path 字段, auto + manual 都是合法写入路径 (source 字段区分)
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BashConfig {
+    path: String,
+    /// 'auto' = 自动检测写入, 'manual' = 用户手填写入, 排查用, 不影响行为
+    source: String,
+    /// Unix epoch ms, 上次跑 bash --version 成功时间
+    last_verified: Option<u64>,
+    /// bash --version 输出第一行解析的版本字符串 (e.g. "5.2.21")
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellInfo {
+    /// 'bash' | 'wsl' | 'pwsh' | 'powershell'
+    shell_type: String,
+    path: String,
+    /// 'PATH' | 'registry' | 'common' | 'wsl', 排查用
+    source: String,
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetBashConfigArgs {
+    path: String,
+    /// 'auto' | 'manual'
+    source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifyBashResult {
+    ok: bool,
+    version: Option<String>,
+    error: Option<String>,
+}
+
+/// 读 settings.json 的 bash 字段 (跟 get_compaction_enabled 走同一文件, 同 pattern)
+fn read_bash_config_from_settings(value: &serde_json::Value) -> Option<BashConfig> {
+    let bash = value.get("bash")?.as_object()?;
+    let path = bash.get("path")?.as_str()?.to_string();
+    let source = bash
+        .get("source")
+        .and_then(|s| s.as_str())
+        .unwrap_or("manual")
+        .to_string();
+    let last_verified = bash.get("lastVerified").and_then(|v| v.as_u64());
+    let version = bash
+        .get("version")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+    Some(BashConfig {
+        path,
+        source,
+        last_verified,
+        version,
+    })
+}
+
+#[tauri::command]
+async fn get_bash_config(app: AppHandle) -> Result<Option<BashConfig>, String> {
+    let path = pi_settings_path(&app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read settings.json: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("parse settings.json: {e}"))?;
+    Ok(read_bash_config_from_settings(&value))
+}
+
+/// 跑 <path> --version, 拿第一行作为 version, 5s timeout.
+/// 同步阻塞 IO, 包在 spawn_blocking 里不阻塞 tokio runtime.
+fn run_bash_version_sync(path: &str) -> Result<String, String> {
+    use std::process::Command;
+    let output = Command::new(path)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("spawn `{path} --version`: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`{path} --version` exit code {:?}, stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // 拿第一行 (GNU bash 输出 "GNU bash, version 5.2.21(1)-release ...")
+    let first_line = stdout.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return Err(format!(
+            "`{path} --version` returned empty stdout"
+        ));
+    }
+    Ok(first_line.to_string())
+}
+
+#[tauri::command]
+async fn set_bash_config(
+    app: AppHandle,
+    args: SetBashConfigArgs,
+) -> Result<BashConfig, String> {
+    let path = pi_settings_path(&app)?;
+
+    // 1. 校验 path 存在 + 是 file
+    let p = std::path::Path::new(&args.path);
+    if !p.exists() {
+        return Err(format!("bash path 不存在: {}", args.path));
+    }
+    if !p.is_file() {
+        return Err(format!("bash path 不是 file: {}", args.path));
+    }
+
+    // 2. 跑 --version 拿 version
+    let path_clone = args.path.clone();
+    let version_line = tokio::task::spawn_blocking(move || run_bash_version_sync(&path_clone))
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"))??;
+
+    // 3. 解析 version (e.g. "GNU bash, version 5.2.21(1)-release ..." → "5.2.21")
+    //    简单策略: 抓第一个 \d+\.\d+\.\d+
+    let version = regex_extract_version(&version_line);
+
+    // 4. 写 settings.json
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create_dir_all({}): {e}", parent.display()))?;
+    }
+    let mut value: serde_json::Value = if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read settings.json: {e}"))?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !value.is_object() {
+        value = serde_json::json!({});
+    }
+    let obj = value.as_object_mut().unwrap();
+    let now_ms = now_epoch_ms();
+    let bash_obj = serde_json::json!({
+        "path": args.path,
+        "source": args.source,
+        "lastVerified": now_ms,
+        "version": version,
+    });
+    obj.insert("bash".to_string(), bash_obj);
+
+    let pretty = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings: {e}"))?;
+    std::fs::write(&path, pretty)
+        .map_err(|e| format!("write settings.json: {e}"))?;
+
+    debug_log(&format!(
+        "set_bash_config: path={} source={} version={}",
+        args.path, args.source, version.as_deref().unwrap_or("(unknown)")
+    ));
+
+    Ok(BashConfig {
+        path: args.path,
+        source: args.source,
+        last_verified: Some(now_ms),
+        version,
+    })
+}
+
+/// 简单版本号提取: 抓第一个 \d+\.\d+(\.\d+)?  跟当前真实情况够用.
+/// e.g. "GNU bash, version 5.2.21(1)-release (x86_64-pc-msys)" → "5.2.21"
+fn regex_extract_version(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            // 收集数字序列
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            // 期待 .digit
+            if i < bytes.len() && bytes[i] == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                i += 1; // 跳过 .
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                // 可选第 3 段
+                if i < bytes.len() && bytes[i] == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                    i += 1;
+                    while i < bytes.len() && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                }
+                return Some(s[start..i].to_string());
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 生成当前时间戳 (Unix epoch milliseconds), 存 settings.json 供排查.
+fn now_epoch_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[tauri::command]
+async fn verify_bash_path(path: String) -> Result<VerifyBashResult, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Ok(VerifyBashResult {
+            ok: false,
+            version: None,
+            error: Some(format!("路径不存在: {}", path)),
+        });
+    }
+    let path_clone = path.clone();
+    let result = tokio::task::spawn_blocking(move || run_bash_version_sync(&path_clone))
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"));
+    match result {
+        Ok(Ok(version_line)) => Ok(VerifyBashResult {
+            ok: true,
+            version: regex_extract_version(&version_line),
+            error: None,
+        }),
+        Ok(Err(e)) => Ok(VerifyBashResult {
+            ok: false,
+            version: None,
+            error: Some(e),
+        }),
+        Err(e) => Ok(VerifyBashResult {
+            ok: false,
+            version: None,
+            error: Some(e),
+        }),
+    }
+}
+
+#[tauri::command]
+async fn clear_bash_config(app: AppHandle) -> Result<(), String> {
+    let path = pi_settings_path(&app)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read settings.json: {e}"))?;
+    let mut value: serde_json::Value =
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("bash");
+    }
+    let pretty = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings: {e}"))?;
+    std::fs::write(&path, pretty)
+        .map_err(|e| format!("write settings.json: {e}"))?;
+    debug_log("clear_bash_config: removed bash field from settings.json");
+    Ok(())
+}
+
+/// 在 PATH 各目录里找可执行文件, 找到返回绝对路径, 否则 None.
+/// Windows 上 PATH 分隔符是 ';' (走 std::env::var 拿到的就是 ; 分隔, 跟 Unix 同 delimiter 字段).
+fn search_path_for(basename: &str) -> Option<String> {
+    let path_var = std::env::var_os("PATH")?;
+    let path_str = path_var.to_string_lossy();
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(basename);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+    let _ = path_str; // suppress unused warning if any
+    None
+}
+
+/// 读 Windows 注册表, 找 Git for Windows 安装路径.
+/// 优先 HKLM (机器级), 失败 fallback HKCU (用户级).
+/// 用 winreg = "0.2" crate, 但本项目没引 winreg, 走 reg.exe 子进程 fallback.
+#[cfg(windows)]
+fn read_git_for_windows_install_path() -> Option<String> {
+    use std::process::Command;
+    // 优先 HKLM
+    for hkey in &["HKLM\\SOFTWARE\\GitForWindows", "HKCU\\SOFTWARE\\GitForWindows"] {
+        let output = Command::new("reg")
+            .args(["query", hkey, "/v", "InstallPath"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // 解析 "    InstallPath    REG_SZ    C:\Program Files\Git"
+        for line in stdout.lines() {
+            if line.contains("InstallPath") {
+                // 最后一个 REG_SZ 后的就是值
+                if let Some(value) = line.split("REG_SZ").nth(1) {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        // 拼 bin\bash.exe
+                        let bash = std::path::Path::new(trimmed).join("bin").join("bash.exe");
+                        if bash.is_file() {
+                            return Some(bash.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn read_git_for_windows_install_path() -> Option<String> {
+    None
+}
+
+#[tauri::command]
+async fn detect_bash_candidates() -> Result<Vec<ShellInfo>, String> {
+    let mut candidates: Vec<ShellInfo> = Vec::new();
+
+    // 1. PATH 搜索 (各 shell 命令的常见 basename)
+    for (basename, stype) in &[
+        ("bash.exe", "bash"),
+        ("wsl.exe", "wsl"),
+        ("pwsh.exe", "pwsh"),
+        ("powershell.exe", "powershell"),
+    ] {
+        if let Some(p) = search_path_for(basename) {
+            // 跑 --version 拿 version (best-effort, 失败也不影响列候选)
+            let version = tokio::task::spawn_blocking({
+                let p = p.clone();
+                move || -> Option<String> {
+                    use std::process::Command;
+                    let out = Command::new(&p).arg("--version").output().ok()?;
+                    if !out.status.success() {
+                        return None;
+                    }
+                    let first = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
+                    regex_extract_version(&first)
+                }
+            })
+            .await
+            .ok()
+            .flatten();
+            candidates.push(ShellInfo {
+                shell_type: stype.to_string(),
+                path: p,
+                source: "PATH".to_string(),
+                version,
+            });
+        }
+    }
+
+    // 2. Git for Windows 注册表
+    if let Some(p) = read_git_for_windows_install_path() {
+        let version = tokio::task::spawn_blocking({
+            let p = p.clone();
+            move || -> Option<String> {
+                use std::process::Command;
+                let out = Command::new(&p).arg("--version").output().ok()?;
+                if !out.status.success() {
+                    return None;
+                }
+                let first = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
+                regex_extract_version(&first)
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        candidates.push(ShellInfo {
+            shell_type: "bash".to_string(),
+            path: p,
+            source: "registry".to_string(),
+            version,
+        });
+    }
+
+    // 3. 常见位置扫描 (stat, 不存在静默跳过)
+    let common_paths: &[&str] = &[
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+        // 用户级安装 (Git for Windows 较新版本默认)
+        // 没法硬编码 username, 让 PATH / 注册表覆盖, 但 %LOCALAPPDATA% 跟 %ProgramFiles% 也用 env var
+    ];
+    for cp in common_paths {
+        if std::path::Path::new(cp).is_file() {
+            // 避免跟已有的 path 重复
+            if !candidates.iter().any(|c| c.path == *cp) {
+                candidates.push(ShellInfo {
+                    shell_type: "bash".to_string(),
+                    path: cp.to_string(),
+                    source: "common".to_string(),
+                    version: None,
+                });
+            }
+        }
+    }
+    // 用户级 Git for Windows 走 env var 展开 (不硬编码 username)
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let user_git = std::path::Path::new(&local_app_data)
+            .join("Programs")
+            .join("Git")
+            .join("bin")
+            .join("bash.exe");
+        if user_git.is_file() {
+            let p = user_git.to_string_lossy().to_string();
+            if !candidates.iter().any(|c| c.path == p) {
+                candidates.push(ShellInfo {
+                    shell_type: "bash".to_string(),
+                    path: p,
+                    source: "common".to_string(),
+                    version: None,
+                });
+            }
+        }
+    }
+
+    // 4. WSL 探测 (仅 Windows, 走 wsl -l -q)
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        if let Ok(out) = Command::new("wsl").args(["-l", "-q"]).output() {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                for line in stdout.lines() {
+                    let distro = line.trim().trim_start_matches('\u{0}').trim();
+                    if distro.is_empty() || distro.contains("Windows Subsystem") {
+                        continue;
+                    }
+                    let bash_path = format!(r"\\wsl$\{}\bin\bash", distro);
+                    // 没法直接 stat UNC 路径, 先记下来
+                    if !candidates.iter().any(|c| c.path == bash_path) {
+                        candidates.push(ShellInfo {
+                            shell_type: "wsl".to_string(),
+                            path: bash_path,
+                            source: "wsl".to_string(),
+                            version: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 排序: bash > wsl > pwsh > powershell
+    candidates.sort_by(|a, b| {
+        let order = |t: &str| match t {
+            "bash" => 0,
+            "wsl" => 1,
+            "pwsh" => 2,
+            "powershell" => 3,
+            _ => 99,
+        };
+        order(&a.shell_type).cmp(&order(&b.shell_type))
+    });
+
+    debug_log(&format!(
+        "detect_bash_candidates: found {} candidate(s)",
+        candidates.len()
+    ));
+    Ok(candidates)
+}
+
 // ====== 2.1: 文件树浏览器 ======
 //   读 workspace 目录树, 给 sidebar UI 用. 不走 sidecar (UI-only, 不需要 LLM 介入).
 //   - 限制 max_depth (默认 2 层, 防 node_modules 把 UI 撑爆)
@@ -2761,6 +3243,14 @@ pub fn run() {
             //   不走 sidecar RPC, 直接改 ~/.pi/agent/settings.json
             get_compaction_enabled,
             set_compaction_enabled,
+            // ADR-0019 P0-1 (2026-08-23): bash 路径配置 + 自动检测
+            //   写 ~/.pi/agent/settings.json 的 bash 字段
+            //   Sidecar 启动时读, 传给 createBashToolDefinition 的 shellPath 选项
+            get_bash_config,
+            set_bash_config,
+            verify_bash_path,
+            clear_bash_config,
+            detect_bash_candidates,
             // 2.1: 文件树浏览器 (UI-only, 不走 sidecar)
             list_workspace_tree,
             // 2.2: workspace 模板 (空目录 / git clone)

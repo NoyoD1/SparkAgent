@@ -30,6 +30,7 @@ const ICON_BY_CATEGORY = {
   fetch_failed: '🔌',       // fetch failed - 通用 fetch 失败
   aborted: '⏹️',            // AbortError - 操作被中止 (含 timeout)
   spawn_failed: '🚫',       // stdio 子进程 spawn 失败 (ENOENT 等)
+  bash_not_found: '🔧',     // ADR-0019 P0-1: bash shell 没装或没配置, 跟 spawn_failed 区分
   unknown: '❓',
 };
 
@@ -129,6 +130,17 @@ export function classifyToolError(err, ctx = {}) {
     hint: '子进程启动失败 (ENOENT): command 路径错或文件不存在, 检查 .pi/mcp/<name>.json 里的 command 字段',
     original,
   };
+
+  // ADR-0019 P0-1: bash tool 找不到 shell (跟 MCP 的 spawn_failed 区分, 这里专指 bash tool)
+  //   Pi SDK 抛 "No bash shell found. Options: 1. Install Git for Windows..."
+  //   或 user 配的 shellPath 文件不存在
+  if (lower.includes('no bash shell found') || lower.includes('custom shell path not found')) {
+    return {
+      category: 'bash_not_found',
+      hint: 'bash shell 不可用: 1) 安装 Git for Windows (https://git-scm.com/download/win)  2) 或到 Settings → Bash 路径手动指定 bash.exe 绝对路径',
+      original,
+    };
+  }
 
   // 4. 未知 — 原样返回, user 看到原始消息自己排查
   return {

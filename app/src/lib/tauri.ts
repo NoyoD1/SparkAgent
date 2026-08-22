@@ -835,6 +835,35 @@ class PiTauriClient {
     await invoke('set_compaction_enabled', { enabled });
   }
 
+  // ====== ADR-0019 P0-1 (2026-08-23): Bash 路径配置 + 自动检测 ======
+  //   写 ~/.pi/agent/settings.json 的 bash 字段
+  //   Sidecar 启动时读 settings.bash.path, 传给 createBashToolDefinition 的 shellPath 选项
+  //   Source of truth = settings.bash.path, auto + manual 都是合法写入路径 (source 字段区分)
+  //   改完要等下次启动 sidecar 才生效 (Pi SDK 不热更新 shellPath, 保 session 状态)
+  async getBashConfig(): Promise<TauriBashConfig | null> {
+    return (await invoke('get_bash_config')) as TauriBashConfig | null;
+  }
+
+  async setBashConfig(args: { path: string; source: 'auto' | 'manual' }): Promise<TauriBashConfig> {
+    return (await invoke('set_bash_config', { args })) as TauriBashConfig;
+  }
+
+  async verifyBashPath(path: string): Promise<{ ok: boolean; version?: string; error?: string }> {
+    return (await invoke('verify_bash_path', { path })) as {
+      ok: boolean;
+      version?: string;
+      error?: string;
+    };
+  }
+
+  async clearBashConfig(): Promise<void> {
+    await invoke('clear_bash_config');
+  }
+
+  async detectBashCandidates(): Promise<TauriShellInfo[]> {
+    return (await invoke('detect_bash_candidates')) as TauriShellInfo[];
+  }
+
   // ====== 2.1: 文件树浏览器 ======
   //   读 workspace 目录树, UI 用. 不走 sidecar, 走 Tauri 直 invoke.
   async listWorkspaceTree(path: string, maxDepth = 2): Promise<WorkspaceTreeNode[]> {
@@ -998,6 +1027,33 @@ export interface TauriCommandInfo {
 }
 
 export const piTauri = new PiTauriClient();
+
+/**
+ * ADR-0019 P0-1 (2026-08-23): Tauri 端 get_bash_config / set_bash_config 返回的 bash 配置
+ *   写到 ~/.pi/agent/settings.json 的 bash 字段
+ *   source: 'auto' = 自动检测写入, 'manual' = 用户手填写入, 排查用, 不影响行为
+ */
+export interface TauriBashConfig {
+  path: string;
+  source: 'auto' | 'manual';
+  /** Unix epoch ms, 上次跑 bash --version 成功时间 */
+  lastVerified?: number;
+  /** bash --version 输出第一行解析的版本字符串 (e.g. "5.2.21") */
+  version?: string;
+}
+
+/**
+ * ADR-0019 P0-1 (2026-08-23): Tauri 端 detect_bash_candidates 返回的单个 shell 候选
+ *   给 Settings → Bash 路径的 "自动检测" 按钮 + 首次启动静默 auto-pick 用
+ */
+export interface TauriShellInfo {
+  /** 'bash' | 'wsl' | 'pwsh' | 'powershell' */
+  shellType: 'bash' | 'wsl' | 'pwsh' | 'powershell';
+  path: string;
+  /** 'PATH' | 'registry' | 'common' | 'wsl', 排查用 */
+  source: 'PATH' | 'registry' | 'common' | 'wsl';
+  version?: string;
+}
 
 /**
  * 2026-08-20 P1-5: Tauri 端 list_user_tools 返回的单个 user-defined tool

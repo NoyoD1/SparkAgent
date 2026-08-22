@@ -775,11 +775,35 @@ function loadUserTools(cwd, agentDir) {
   //   走 createAgentSessionFromServices 时它内部也是按名字查 ToolName union 创建.
   //   这里我们自己组装一个 dict, 跟 createAllToolDefinitions 等价.
   const cwdResolved = cwd || process.cwd();
+
+  // ====== ADR-0019 P0-1 (2026-08-23): 读 user-configured bash 路径 ======
+  //   优先用 settings.bash.path (FE 端 Settings → Bash 路径配置, user 手动填 / 自动检测写入)
+  //   没设 → fallback Pi SDK 自带 search (3 路径 + PATH, 跟旧行为一致)
+  //   shellPath 设了但文件不存在 → Pi SDK 内部 throw, sidecar 走 errorSanitizer
+  let userBashShellPath = null;
+  try {
+    const settingsPath = join(agentDir || process.cwd(), 'settings.json');
+    if (existsSync(settingsPath)) {
+      const raw = readFileSync(settingsPath, 'utf-8');
+      const settings = JSON.parse(raw);
+      const bashCfg = settings?.bash;
+      if (bashCfg && typeof bashCfg.path === 'string' && bashCfg.path) {
+        userBashShellPath = bashCfg.path;
+        console.error(`[sidecar] P0-1: bash shell from settings: ${userBashShellPath} (source=${bashCfg.source ?? '?'}, version=${bashCfg.version ?? '?'})`);
+      }
+    }
+  } catch (e) {
+    console.error(`[sidecar] P0-1: failed to read settings.bash, fallback to Pi SDK auto-discovery: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!userBashShellPath) {
+    console.error('[sidecar] P0-1: bash shell: (unset in settings, fallback to Pi SDK auto-discovery)');
+  }
+
   const builtinToolDefs = {
     read: createReadToolDefinition(cwdResolved),
     write: createWriteToolDefinition(cwdResolved),
     edit: createEditToolDefinition(cwdResolved),
-    bash: createBashToolDefinition(cwdResolved),
+    bash: createBashToolDefinition(cwdResolved, userBashShellPath ? { shellPath: userBashShellPath } : undefined),
     ls: createLsToolDefinition(cwdResolved),
     find: createFindToolDefinition(cwdResolved),
     grep: createGrepToolDefinition(cwdResolved),
