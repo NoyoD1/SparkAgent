@@ -20,7 +20,7 @@ import {
   Plug,             // MCP (2026-08-21 v0.6.3-rc1 P2-1: Model Context Protocol)
   Sparkles,         // Skills (v0.4.4)
   Terminal,         // Slash (v0.4.5.2 恢复, D184 v9 ❷)
-  FileText,         // Custom Instructions (v0.5.0-v0.1 回归 v0.4.6 单 AGENTS.md 编辑)
+  FileText,         // Agent 守则 (v0.6.3-rc1: 改 "Custom Instructions" → "Agent 守则" 业务名, 跟 Skills/Slash/MCP/Tools 风格统一; command/文件名保留)
   Wrench,           // Tools (2026-08-20 P1-5: user tool 派生)
   Info,             // 关于
   ArrowLeft,        // 关闭
@@ -56,7 +56,7 @@ const TABS: TabDef[] = [
   { id: 'mcp',        label: 'MCP',     icon: markRaw(Plug),        component: markRaw(McpTab),        group: 'Agent 能力', implemented: true  },  // 2026-08-21 v0.6.3-rc1 P2-1: Model Context Protocol 配置
   { id: 'skills',     label: 'Skills',  icon: markRaw(Sparkles),   component: markRaw(SkillsTab),     group: 'Agent 能力', implemented: true  },
   { id: 'slash',      label: 'Slash',   icon: markRaw(Terminal),   component: markRaw(SlashTab),      group: 'Agent 能力', implemented: true  },  // v0.4.5.2 恢复 (D184 v9 ❷)
-  { id: 'instructions', label: 'Custom Instructions', icon: markRaw(FileText), component: markRaw(CustomInstructionsTab), group: 'Agent 能力', implemented: true  },  // v0.5.0-v0.1: 回归 v0.4.6 单 AGENTS.md 编辑 (取代 v0.4.6.1 multi-persona Agents tab)
+  { id: 'instructions', label: 'Agent 守则', icon: markRaw(FileText), component: markRaw(CustomInstructionsTab), group: 'Agent 能力', implemented: true  },  // v0.6.3-rc1: 改 "Custom Instructions" → "Agent 守则" (用户可见业务名; id/文件名/component 不变)
   { id: 'tools',      label: 'Tools',   icon: markRaw(Wrench),     component: markRaw(ToolsTab),       group: 'Agent 能力', implemented: true  },  // 2026-08-20 P1-5: user tool 派生 (从 builtin tool 派生的 args 预设模板)
   { id: 'about',      label: '关于',     icon: markRaw(Info),       component: markRaw(AboutTab),      group: '数据与统计', implemented: true  },
 ];
