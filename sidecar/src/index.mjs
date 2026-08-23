@@ -28,7 +28,7 @@
 //   - 现在: 写 config 1 行, 后续 RpcCommand 走 passthrough (Tauri 不用解析)
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, lstatSync, readlinkSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, lstatSync, readlinkSync, statSync, appendFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join, resolve as pathResolve } from 'node:path';
 
 import {
@@ -1534,6 +1534,39 @@ function createMaxRoundsExtension(maxRounds) {
  *
  * 关键设计: block 的 reason 文案明确告诉 LLM 怎么改 (加白名单 / 改命令), 不要用模棱两可的拒绝.
  */
+// ====== ADR-0020 P-Sec1.2 (2026-08-23): 审计日志 ======
+//   持久化每次 bash tool call (allow / block 都写), 写到 <agentDir>/audit.log (JSONL)
+//   rotate 策略: 单文件 > 10MB → audit.log.1 (覆盖旧的, 保留 1 份历史)
+//   字段: ts (ISO8601), session, tool, command (truncate 1000 char), cwd, allowed,
+//         block_reason, matched_pattern, whitelisted
+//   错误降级: 写失败只 log 到 stderr, 不阻塞 LLM agent
+const AUDIT_LOG_PATH = join(agentDir, 'audit.log');
+const AUDIT_LOG_MAX_BYTES = 10 * 1024 * 1024;  // 10MB
+
+function appendAuditLog(entry) {
+  try {
+    if (existsSync(AUDIT_LOG_PATH)) {
+      const stat = statSync(AUDIT_LOG_PATH);
+      if (stat.size > AUDIT_LOG_MAX_BYTES) {
+        const rotated = AUDIT_LOG_PATH + '.1';
+        if (existsSync(rotated)) {
+          unlinkSync(rotated);
+        }
+        renameSync(AUDIT_LOG_PATH, rotated);
+      }
+    }
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      // command 截断到 1000 字符, 防 log 爆炸 (含 base64 之类奇葩命令)
+      command: (entry.command || '').slice(0, 1000),
+      ...entry,
+    }) + '\n';
+    appendFileSync(AUDIT_LOG_PATH, line, 'utf-8');
+  } catch (e) {
+    console.error(`[audit] failed to write: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 function createDangerousCommandExtension(getWhitelist) {
   // 2026-08-23 bug fix: 之前工厂立即预编译 (line 1536), 跟 loadUserTools 填白名单有时序竞争 —
   //   createAgentSessionServices 跑的时候 (line 549) dangerousWhitelist 还是 [],
@@ -1570,30 +1603,54 @@ function createDangerousCommandExtension(getWhitelist) {
       const command = event.input?.command;
       if (typeof command !== 'string' || !command) return undefined;
 
+      // 默认值 (普通 bash 调用)
+      let allowed = true;
+      let blockReason = null;
+      let matchedPattern = null;
+      let whitelisted = false;
+
       // 检查 deny list
       const matchedDeny = BUILTIN_DENY_LIST.find((re) => re.test(command));
-      if (!matchedDeny) return undefined;
-
-      // 检查 whitelist (lazy 编译, 第一次 tool_call 才真正 compile)
-      const compiledWhitelist = getCompiledWhitelist();
-      const isWhitelisted = compiledWhitelist.some((re) => re.test(command));
-      if (isWhitelisted) {
-        console.error(`[DANGEROUS_USED] whitelisted command allowed: pattern=${matchedDeny.source} cmd=${command.slice(0, 200)}`);
-        return undefined;  // 放行
+      if (matchedDeny) {
+        matchedPattern = matchedDeny.source;
+        // 检查 whitelist (lazy 编译, 第一次 tool_call 才真正 compile)
+        const compiledWhitelist = getCompiledWhitelist();
+        const isWhitelisted = compiledWhitelist.some((re) => re.test(command));
+        if (isWhitelisted) {
+          whitelisted = true;
+          console.error(`[DANGEROUS_USED] whitelisted command allowed: pattern=${matchedDeny.source} cmd=${command.slice(0, 200)}`);
+        } else {
+          allowed = false;
+          const preview = command.slice(0, 120);
+          blockReason = `危险命令被沙箱拦截 (匹配: ${matchedDeny.source.slice(0, 60)}). 原命令前 120 字: ${preview}`;
+          console.error(`[danger] BLOCK dangerous bash: ${matchedDeny.source} cmd=${preview}`);
+        }
       }
 
-      // block with detailed reason
-      const preview = command.slice(0, 120);
-      console.error(`[danger] BLOCK dangerous bash: ${matchedDeny.source} cmd=${preview}`);
-      return {
-        block: true,
-        reason: `危险命令被沙箱拦截 (匹配: ${matchedDeny.source.slice(0, 60)}).\n` +
-          `原命令前 120 字: ${preview}\n\n` +
-          `两种处理方式:\n` +
-          `  1) 改写命令避免危险模式 (推荐, 95% 情况可以)\n` +
-          `  2) 到 Settings → 通用 → 高级权限, 加白名单 (仅当用户明确想用此命令时)\n\n` +
-          `内置检测: rm -rf / format / mkfs / dd if= / pipe-to-shell / fork bomb / shutdown 等.`,
-      };
+      // ADR-0020 P-Sec1.2: 审计日志 (每次 bash 调用都记, 无论 allow/block)
+      appendAuditLog({
+        session: event.sessionId ?? 'unknown',
+        tool: 'bash',
+        command,
+        cwd: process.cwd(),
+        allowed,
+        block_reason: blockReason,
+        matched_pattern: matchedPattern,
+        whitelisted,
+      });
+
+      if (!allowed) {
+        return {
+          block: true,
+          reason: `危险命令被沙箱拦截 (匹配: ${matchedDeny.source.slice(0, 60)}).\n` +
+            `原命令前 120 字: ${command.slice(0, 120)}\n\n` +
+            `两种处理方式:\n` +
+            `  1) 改写命令避免危险模式 (推荐, 95% 情况可以)\n` +
+            `  2) 到 Settings → 通用 → 高级权限, 加白名单 (仅当用户明确想用此命令时)\n\n` +
+            `内置检测: rm -rf / format / mkfs / dd if= / pipe-to-shell / fork bomb / shutdown 等.`,
+        };
+      }
+      return undefined;
     });
   };
 }

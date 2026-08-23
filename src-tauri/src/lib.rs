@@ -9,6 +9,7 @@ mod config_store;
 mod index_file;
 mod keyring;
 mod model_catalog;  // v0.5.0-D D213: 静态 model metadata catalog
+mod sandbox;         // ADR-0020 P-Sec1: 沙箱加固 (Job Object + 审计)
 mod sidecar;
 
 use serde::{Deserialize, Serialize};

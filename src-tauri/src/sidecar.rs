@@ -197,6 +197,15 @@ pub fn run_prompt(
             }) {
             Ok(pair) => {
                 debug_log(&format!("sidecar spawned, session={session_id}"));
+
+                // ADR-0020 P-Sec1 (2026-08-23): 把 sidecar 进程 attach 到全局 sandbox Job
+                //   - 限制: 1GB mem / 进程, 100 子进程, 1 核 CPU hard cap
+                //   - 失败不阻塞主流程 (降级到 P0-2 baseline, 记 stderr)
+                let pid = pair.1.pid();
+                if let Err(e) = crate::sandbox::attach_pid_to_job(pid) {
+                    log::warn!("[sandbox] attach pid {pid} to Job failed: {e} (sandbox 降级到 P0-2 baseline)");
+                    debug_log(&format!("sandbox attach failed: {e}"));
+                }
                 pair
             }
             Err(e) => {
@@ -356,6 +365,12 @@ pub fn run_compact(
             }) {
             Ok(pair) => {
                 debug_log(&format!("compact sidecar spawned, session={session_id}"));
+
+                // ADR-0020 P-Sec1: attach to sandbox Job (跟 run_prompt 一样)
+                let pid = pair.1.pid();
+                if let Err(e) = crate::sandbox::attach_pid_to_job(pid) {
+                    log::warn!("[sandbox] attach compact pid {pid} to Job failed: {e}");
+                }
                 pair
             }
             Err(e) => {
