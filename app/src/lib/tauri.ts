@@ -645,6 +645,28 @@ class PiTauriClient {
     }>;
   }
 
+  // ====== ADR-0023 P3-C (2026-08-24): 通用 secret 管理 (MCP / external tool 用) ======
+  //   跟 saveApiKey 走同一个 keychain service="pi-agent", 区别只是 key 名字是 secret
+  //   (mcp-<server>-<field> / external-<tool>-<field>).
+  //   触发 P3-A 静默重启: 改了 secret → 走 triggerRestart 复用模式
+  async saveSecret(name: string, value: string): Promise<void> {
+    await invoke('save_secret', { name, value });
+  }
+
+  async deleteSecret(name: string): Promise<void> {
+    await invoke('delete_secret', { name });
+  }
+
+  async listSecrets(): Promise<
+    Array<{ providerId: string; configured: boolean; preview: string | null }>
+  > {
+    return (await invoke('list_secrets')) as Array<{
+      providerId: string;
+      configured: boolean;
+      preview: string | null;
+    }>;
+  }
+
   // ====== v0.4.4.6 Skills list (FE 主动拉) ======
   // 之前 v0.4.4.x sidecar 启动时 emit skills_snapshot 一次, 写完 skill 后 UI 不刷新
   // 修法: Tauri 端 list_skills 走 std::fs::read_dir 扫两个目录 (workspace + global),

@@ -696,6 +696,8 @@ pub fn ensure_browser_watcher(app: AppHandle) {
 
             // 3.4 dispatch — 调用 lib.rs 里现成的 browser_navigate / get_text / get_url
             //    这些都是 #[tauri::command] + pub async fn, 走 crate:: 直接调
+            //    v0.6.3-rc1 P3-C: 加 resolve_secrets, 跟 browser_* 共用同一文件队列
+            //    (browser_request.json 名字历史遗留, 现在是 generic tauri_call 通道)
             let (result, error): (Option<serde_json::Value>, Option<String>) = match command.as_str() {
                 "browser_navigate" => {
                     let url = args
@@ -724,6 +726,19 @@ pub fn ensure_browser_watcher(app: AppHandle) {
                     Ok(b64) => (Some(serde_json::Value::String(b64)), None),
                     Err(e) => (None, Some(e)),
                 },
+                // ADR-0023 P3-C: sidecar 发来一批 env value, 解析 keychain: 引用返明文
+                //   用法: resolve_secrets({ values: ["keychain:pi-agent:foo", "literal"] })
+                //   返: { result: ["actual_secret", "literal"] } (跟 input 1:1 对应)
+                "resolve_secrets" => {
+                    let values: Vec<String> = match args.get("values").and_then(|v| v.as_array()) {
+                        Some(arr) => arr.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+                        None => Vec::new(),
+                    };
+                    match crate::resolve_secrets(values).await {
+                        Ok(resolved) => (Some(serde_json::json!(resolved)), None),
+                        Err(e) => (None, Some(e)),
+                    }
+                }
                 other => (None, Some(format!("unknown command: {other}"))),
             };
 

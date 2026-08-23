@@ -211,6 +211,84 @@ async fn has_api_key(provider_id: String) -> Result<bool, String> {
     Ok(keyring::get(&provider_id)?.is_some())
 }
 
+// ====== ADR-0023 P3-C (2026-08-24): 通用 secret 管理 ======
+//   给 MCP server env / external tool env 用的 keychain entry.
+//   跟 save_api_key / delete_api_key 复用同一个 keyring service="pi-agent",
+//   区别只是 key 名字命名空间: mcp-<server>-<field> / external-<tool>-<field>.
+//   实际就是 keychain::save/get/delete + index_file::add/remove, 包装出来
+//   给 FE SecretsTab 调, FE 不用关心 LLM apiKey 跟普通 secret 走的是同一个 keychain.
+#[tauri::command]
+async fn save_secret(app: AppHandle, name: String, value: String) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("name is empty".to_string());
+    }
+    if value.is_empty() {
+        return Err("value is empty".to_string());
+    }
+    // 命名校验: 跟 LLM provider_id 一样, 1-128 char, [A-Za-z0-9._@-]
+    if name.len() > 128 {
+        return Err(format!("secret name too long: {} > 128", name.len()));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@')) {
+        return Err(format!("secret name '{name}' 含非法字符, 只能 [A-Za-z0-9._@-]"));
+    }
+    keyring::save(&name, &value)?;
+    index_file::add(&app, &name)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_secret(app: AppHandle, name: String) -> Result<(), String> {
+    keyring::delete(&name)?;
+    index_file::remove(&app, &name)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_secrets(app: AppHandle) -> Result<Vec<KeychainInfoDto>, String> {
+    // 跟 list_api_keys 一样逻辑, 但复用同一个 DTO (provider_id 字段 = secret name)
+    let idx = index_file::load(&app);
+    let mut out = Vec::with_capacity(idx.provider_ids.len());
+    for id in idx.provider_ids {
+        let (configured, preview) = match keyring::get(&id) {
+            Ok(Some(k)) => (true, Some(crate::keyring::mask(&k))),
+            Ok(None) => (false, None),
+            Err(_) => (false, None),
+        };
+        out.push(KeychainInfoDto {
+            provider_id: id,
+            configured,
+            preview,
+        });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+async fn resolve_secrets(values: Vec<String>) -> Result<Vec<String>, String> {
+    // 给 sidecar 调: 批量解析 env 值, 把 "keychain:pi-agent:<name>" 替换成实际值
+    //   - 输入: env values 列表 (跟 mcp/external tool 的 env dict 同 shape)
+    //   - 输出: 解析后的 values 列表, 跟输入 1:1 对应
+    //   - 失败 (keychain 找不到): 返错误, 让 caller 决定是 fail-fast 还是 fallback
+    //
+    // 不在 keychain 引用 (没有 "keychain:" 前缀) 直接 pass-through
+    const PREFIX: &str = "keychain:";
+    let mut out = Vec::with_capacity(values.len());
+    for v in values {
+        if let Some(name) = v.strip_prefix(PREFIX) {
+            match keyring::get(name)? {
+                Some(secret) => out.push(secret),
+                None => return Err(format!(
+                    "keychain 引用 '{v}' 解析失败: 找不到 secret '{name}' (请在 Settings → Secrets 加)"
+                )),
+            }
+        } else {
+            out.push(v);
+        }
+    }
+    Ok(out)
+}
+
 // ====== ADR-0022 (2026-08-23): WebView2 内嵌浏览器 — Tauri command ======
 //   走 Tauri 2 的 WebviewWindow (底层 WebView2, 跑在 Tauri 进程里, 真内嵌)
 //   - 0 外部进程: 不像 chromiumoxide 启 Edge.exe
@@ -4107,6 +4185,12 @@ pub fn run() {
             //   external tool / dangerousWhitelist / bash.path) 后, FE 触发, Tauri
             //   kill 所有 active sidecar, 下次 send_prompt lazy spawn 走新 config.
             restart_all_sidecars,
+            // ADR-0023 P3-C (2026-08-24): 通用 secret 管理 (MCP env / external tool env
+            //   走 keychain, 不再明文存盘)
+            save_secret,
+            delete_secret,
+            list_secrets,
+            resolve_secrets,
             fetch_provider_models,
             verify_provider_connection,  // P0 #1: 测试连接按钮
             // ADR-0022: WebView2 内嵌浏览器 (Tauri WebviewWindow, 走 reverse RPC)

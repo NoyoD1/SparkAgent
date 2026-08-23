@@ -192,7 +192,25 @@ async function initMcpSubsystem(workspacePath, agentDir) {
   const results = [];
   const clients = [];
   for (const config of configs) {
-    const client = new McpServerClient(config);
+    // ADR-0023 P3-C: 解析 env 里的 keychain: 引用, 拿到明文 secret 后再 spawn subprocess
+    //   失败 throw (e.g. 引用了不存在的 secret), 让 caller 决定降级
+    let resolvedEnv;
+    try {
+      resolvedEnv = await resolveSecretEnv(config.env);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[sidecar] P3-C: MCP '${config.name}' env 解析失败, 跳过: ${msg}`);
+      results.push({
+        name: config.name,
+        status: 'failed',
+        reason: `env 解析失败: ${msg}`,
+        toolCount: 0,
+        durationMs: 0,
+      });
+      continue;
+    }
+    const resolvedConfig = { ...config, env: resolvedEnv };
+    const client = new McpServerClient(resolvedConfig);
     try {
       await client.start();
       clients.push(client);
@@ -710,7 +728,8 @@ The re-read is a single tool call — a small cost for correctness. Skipping it 
   //   成一个 customTools 列表
   const browserTools = loadBrowserTools();
   // ADR-0023 P3-B: 扫 external tool 文件夹, 启 subprocess, 跟其它 tool 同样 merge
-  const externalTools = loadExternalTools(workspacePath, agentDir);
+  // P3-C: 传 resolveSecretEnv, 让 external tool manifest.env 也能用 keychain: 引用
+  const externalTools = loadExternalTools(workspacePath, agentDir, resolveSecretEnv);
   const allCustomTools = [...userTools, ...mcpCustomTools, ...browserTools, ...externalTools];
   if (allCustomTools.length > 0) {
     console.error(`[sidecar] total customTools: ${allCustomTools.length} (user=${userTools.length}, mcp=${mcpCustomTools.length}, browser=${browserTools.length}, external=${externalTools.length})`);
@@ -1863,6 +1882,34 @@ function callTauriCommand(command, args) {
     };
     poll();
   });
+}
+
+/**
+ * ADR-0023 P3-C (2026-08-24): 解析 env dict 里的 keychain: 引用
+ *   - 输入: { KEY1: "keychain:pi-agent:foo", KEY2: "literal-value" }
+ *   - 输出: { KEY1: "<actual secret from keychain>", KEY2: "literal-value" }
+ *   - 走 callTauriCommand("resolve_secrets") 通道, Tauri 端从 OS keychain 读
+ *   - 失败 (keychain 找不到): throw, 让 caller 决定 fail-fast
+ *
+ * 不在 keychain 引用 (没 "keychain:" 前缀) 直接 pass-through, 向后兼容明文.
+ */
+async function resolveSecretEnv(env) {
+  if (!env || Object.keys(env).length === 0) return env;
+  const keys = Object.keys(env);
+  const values = keys.map((k) => env[k]);
+  let resolvedValues;
+  try {
+    resolvedValues = await callTauriCommand('resolve_secrets', { values });
+  } catch (e) {
+    throw new Error(
+      `解析 keychain secret 失败: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  const out = {};
+  for (let i = 0; i < keys.length; i++) {
+    out[keys[i]] = resolvedValues[i];
+  }
+  return out;
 }
 
 function loadBrowserTools() {

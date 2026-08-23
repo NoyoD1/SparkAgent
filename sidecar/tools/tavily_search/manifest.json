@@ -1,6 +1,6 @@
 {
   "name": "tavily_search",
-  "description": "Web search via Tavily API. Returns ranked search results with title, URL, content snippet, and optional AI-generated answer. Use this for: current events, documentation lookup, news, prices, or any info that needs a fresh web search. Supports search_depth='basic' (fast) or 'advanced' (slower but more thorough, includes answer). Requires TAVILY_API_KEY env var.",
+  "description": "Web search via Tavily API. Returns ranked search results with title, URL, content snippet, and optional AI-generated answer. Use this for: current events, documentation lookup, news, prices, or any info that needs a fresh web search. Supports search_depth='basic' (fast) or 'advanced' (slower but more thorough, includes answer). Requires TAVILY_API_KEY.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -32,5 +32,9 @@
   },
   "runtime": "python",
   "entry": "tavily_search.py",
-  "timeout": 30000
+  "timeout": 30000,
+  "_comment_env": "ADR-0023 P3-C: 用 keychain: 引用避免明文存盘. value 以 'keychain:' 开头 → 从 OS keychain (service='pi-agent', user=冒号后那段) 取明文; 其他字符串 → 跟以前一样当字面 env 值. 推荐命名 'external-<tool>-<field>' 跟 keychain index 命名空间一致.",
+  "env": {
+    "TAVILY_API_KEY": "keychain:pi-agent:external-tavily_search-TAVILY_API_KEY"
+  }
 }

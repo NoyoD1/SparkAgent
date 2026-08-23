@@ -112,6 +112,9 @@ commit-msg-*.txt
 commit_msg_*.txt
 *.bun-build
 .browser-tmp-*
+# external tools 测试 smoke 脚本 (one-time 验证用, 跟外部 tool 一起 ship 但不入 git)
+.test-smoke.mjs
+.test-input.json
 
 # ---- 临时测试/调试产出 (按 P2-x 实施时跑过即删, .trash 是没删的 fallback) ----
 .trash/
