@@ -1,10 +1,11 @@
 /**
- * Extension Tools store — ADR-0022 v3.4 (2026-08-23)
+ * Extension Tools store — ADR-0022 v3.4 + ADR-0023 P3-D
  *
  * Pi 内置 7 个 tool (read/write/edit/bash/ls/find/grep) 之外, 还有"嫁接"工具
  *   (extension tools), 由 sidecar 通过 file-queue / custom register 注入:
- *   - web_navigate / web_get_text / web_screenshot (browser panel, ADR-0022)
- *   - mcp__xxx (后续 MCP 嫁接, 暂未实现 FE 展示)
+ *   - web_navigate / web_get_text / web_screenshot (browser panel, ADR-0022) — 静态
+ *   - mcp__xxx (MCP 嫁接, ADR-0023 P3) — 静态 (配置决定)
+ *   - external (external tools, ADR-0023 P3-B) — 动态 (从 <workspace>/.pi/tools/external 扫)
  *
  * 这个 store 管 user 的 enable/disable preference:
  *   - 默认全部启用
@@ -14,13 +15,14 @@
  *                sidecar loadBrowserTools 时读这个 list 过滤
  */
 import { defineStore } from 'pinia';
-import { ref, watch } from 'vue';
+import { ref, computed, watch } from 'vue';
+import { piTauri } from '@/lib/tauri';
 
 export interface ExtensionToolDef {
   name: string;
   label: string;
   description: string;
-  source: 'browser' | 'mcp';
+  source: 'browser' | 'mcp' | 'external';
 }
 
 export const EXTENSION_TOOLS: readonly ExtensionToolDef[] = [
@@ -60,6 +62,24 @@ function loadEnabled(): Record<string, boolean> {
 export const useExtensionToolsStore = defineStore('extensionTools', () => {
   const enabled = ref<Record<string, boolean>>(loadEnabled());
 
+  // ADR-0023 P3-D: external tools 动态加载 (从 Tauri list_external_tools 拉)
+  //   - 每次 refresh() 重新扫 (跟 list_user_tools / list_mcp_servers 同 pattern)
+  //   - workspace 切换时也要 refresh (旧 tool 列表跟新 workspace 不匹配)
+  const externalTools = ref<Array<{
+    name: string;
+    description: string;
+    runtime: string;
+    entry: string;
+    entryPath: string;
+    manifest: string;
+    manifestPath: string;
+    scope: 'workspace' | 'global';
+    isValid: boolean;
+    error: string | null;
+  }>>([]);
+  const externalLoading = ref(false);
+  const externalError = ref<string | null>(null);
+
   // 持久化
   watch(
     enabled,
@@ -81,5 +101,36 @@ export const useExtensionToolsStore = defineStore('extensionTools', () => {
     setEnabled(name, !isEnabled(name));
   }
 
-  return { enabled, isEnabled, setEnabled, toggle, EXTENSION_TOOLS };
+  /** ADR-0023 P3-D: 重新扫 external tool 文件夹, 给 Tools tab 用 */
+  async function refreshExternal(workspacePath: string | null, agentDir: string | null) {
+    externalLoading.value = true;
+    externalError.value = null;
+    try {
+      externalTools.value = await piTauri.listExternalTools(workspacePath, agentDir);
+    } catch (e) {
+      externalError.value = e instanceof Error ? e.message : String(e);
+      externalTools.value = [];
+    } finally {
+      externalLoading.value = false;
+    }
+  }
+
+  // 派生: 静态 + 动态合并
+  const allExtensionTools = computed<ExtensionToolDef[]>(() => {
+    const staticOnes = [...EXTENSION_TOOLS];
+    const dynamicOnes: ExtensionToolDef[] = externalTools.value.map((t) => ({
+      name: t.name,
+      label: t.name,
+      description: t.description || t.error || '(无描述)',
+      source: 'external',
+    }));
+    return [...staticOnes, ...dynamicOnes];
+  });
+
+  return {
+    enabled, isEnabled, setEnabled, toggle,
+    EXTENSION_TOOLS,
+    externalTools, externalLoading, externalError,
+    refreshExternal, allExtensionTools,
+  };
 });

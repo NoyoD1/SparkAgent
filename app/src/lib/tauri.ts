@@ -667,6 +667,40 @@ class PiTauriClient {
     }>;
   }
 
+  // ====== ADR-0023 P3-D (2026-08-24): 列出 external tool 文件夹 ======
+  //   跟 sidecar/src/externalTools.mjs 同扫描规则, 给 FE Tools tab "External Tools" section 展示
+  //   - global: <agentDir>/tools/external/*/manifest.json
+  //   - workspace: <workspacePath>/.pi/tools/external/*/manifest.json (同名覆盖 global)
+  //   - is_valid=false: manifest 字段缺失或 entry 文件不存在, FE 标红显示
+  async listExternalTools(workspacePath: string | null, agentDir: string | null): Promise<Array<{
+    name: string;
+    description: string;
+    runtime: string;
+    entry: string;
+    entryPath: string;
+    manifest: string;
+    manifestPath: string;
+    scope: 'workspace' | 'global';
+    isValid: boolean;
+    error: string | null;
+  }>> {
+    return (await invoke('list_external_tools', {
+      workspacePath: workspacePath,
+      agentDir: agentDir,
+    })) as Array<{
+      name: string;
+      description: string;
+      runtime: string;
+      entry: string;
+      entryPath: string;
+      manifest: string;
+      manifestPath: string;
+      scope: 'workspace' | 'global';
+      isValid: boolean;
+      error: string | null;
+    }>;
+  }
+
   // ====== v0.4.4.6 Skills list (FE 主动拉) ======
   // 之前 v0.4.4.x sidecar 启动时 emit skills_snapshot 一次, 写完 skill 后 UI 不刷新
   // 修法: Tauri 端 list_skills 走 std::fs::read_dir 扫两个目录 (workspace + global),

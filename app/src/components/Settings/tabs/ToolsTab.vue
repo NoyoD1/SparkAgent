@@ -15,11 +15,11 @@
  * 存储: <workspacePath>/.pi/tools/<name>.json + <agentDir>/tools/<name>.json
  *   两层 scope, workspace 优先 (跟 Skills/Commands/CustomInstructions 同 pattern).
  */
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import {
   Wrench, Plus, X, Save, Trash2, AlertCircle, Check, Info,
-  FileCode, Edit3, BookOpen, Search, FileText, FileSearch, Terminal, Globe, Power,
+  FileCode, Edit3, BookOpen, Search, FileText, FileSearch, Terminal, Globe, Power, Package, RefreshCw,
 } from 'lucide-vue-next';
 import {
   useUserToolsStore,
@@ -27,12 +27,14 @@ import {
   BUILTIN_TOOL_LABEL,
   type BuiltinToolName,
 } from '@/stores/userTools';
+import { useSessionStore } from '@/stores/session';
 import { useExtensionToolsStore } from '@/stores/extensionTools';
 
 const userToolsStore = useUserToolsStore();
 const extensionToolsStore = useExtensionToolsStore();
 const { tools, loading, error } = storeToRefs(userToolsStore);
-const { EXTENSION_TOOLS } = extensionToolsStore;
+const { externalLoading, externalError, allExtensionTools } = storeToRefs(extensionToolsStore);
+const sessionStore = useSessionStore();
 
 // builtin 工具 → lucide icon 映射 (UI 显示)
 const BUILTIN_TOOL_ICON: Record<BuiltinToolName, any> = {
@@ -110,7 +112,24 @@ async function removeTool(scope: 'workspace' | 'global', name: string) {
 
 onMounted(() => {
   userToolsStore.refresh();
+  // ADR-0023 P3-D: 加载 external tools (Tavily 等, 从 workspace / agentDir 扫描)
+  refreshExtension();
 });
+
+// workspace 切换时重新扫 (旧 tool 列表跟新 workspace 不匹配)
+watch(
+  () => sessionStore.activeWorkspace?.path ?? null,
+  () => {
+    refreshExtension();
+  },
+);
+
+function refreshExtension() {
+  void extensionToolsStore.refreshExternal(
+    sessionStore.activeWorkspace?.path ?? null,
+    null,  // agentDir 暂不传, 跟 user tool / MCP server 一致只扫 workspace
+  );
+}
 </script>
 
 <template>
@@ -249,26 +268,54 @@ onMounted(() => {
         </button>
       </h3>
 
-    <!-- ADR-0022 v3.4: Extension Tools (嫁接的 web_* / mcp__xxx)
+    <!-- ADR-0022 v3.4 + ADR-0023 P3-D: Extension Tools (静态 browser + 动态 external)
+         v3-D: external tools 从 <workspace>/.pi/tools/external/ 动态扫
          PoC: 只展示 + toggle, 实际过滤后续 P3.1 (写到 settings.json 传 sidecar) -->
     <div class="pad-toolstab__section">
       <h3 class="pad-toolstab__section-title">
         <Globe :size="14" :stroke-width="1.75" />
-        <span>Extension Tools ({{ EXTENSION_TOOLS.length }})</span>
-        <span class="pad-toolstab__hint-inline">嫁接 (内置 + 后续 MCP), 可启停</span>
+        <span>Extension Tools ({{ allExtensionTools.length }})</span>
+        <span class="pad-toolstab__hint-inline">嫁接 (browser + external tool), 可启停</span>
+        <button
+          class="pad-toolstab__btn pad-toolstab__btn--ghost"
+          type="button"
+          :disabled="externalLoading"
+          :title="externalLoading ? '加载中…' : '重新扫 external tool 文件夹'"
+          @click="refreshExtension"
+        >
+          <RefreshCw v-if="externalLoading" :size="12" :stroke-width="1.75" class="pad-toolstab__spin" />
+          <RefreshCw v-else :size="12" :stroke-width="1.75" />
+          <span>刷新</span>
+        </button>
       </h3>
-      <div class="pad-toolstab__ext-grid">
+      <div v-if="externalError" class="pad-toolstab__toast is-fail">
+        <AlertCircle :size="13" :stroke-width="1.75" />
+        <span>扫 external tool 失败: {{ externalError }}</span>
+      </div>
+      <div v-if="!externalLoading && allExtensionTools.length === 0" class="pad-toolstab__empty">
+        <Package :size="20" :stroke-width="1.5" />
+        <div class="pad-toolstab__empty-title">还没有 external tool</div>
+        <div class="pad-toolstab__empty-desc">
+          复制 <code>sidecar/tools/tavily_search/</code> 整个文件夹到
+          <code>&lt;workspace&gt;/.pi/tools/external/</code>, 触发静默重启就能看到.
+        </div>
+      </div>
+      <div v-else class="pad-toolstab__ext-grid">
         <div
-          v-for="t in EXTENSION_TOOLS"
+          v-for="t in allExtensionTools"
           :key="t.name"
           class="pad-toolstab__ext-card"
-          :class="{ 'is-disabled': !extensionToolsStore.isEnabled(t.name) }"
+          :class="{
+            'is-disabled': !extensionToolsStore.isEnabled(t.name),
+            'is-external': t.source === 'external',
+          }"
         >
-          <Globe :size="18" :stroke-width="1.5" class="pad-toolstab__builtin-icon" />
+          <Globe v-if="t.source === 'browser'" :size="18" :stroke-width="1.5" class="pad-toolstab__builtin-icon" />
+          <Package v-else :size="18" :stroke-width="1.5" class="pad-toolstab__builtin-icon" />
           <div class="pad-toolstab__builtin-body">
             <div class="pad-toolstab__builtin-name">
               <code>{{ t.name }}</code>
-              <span class="pad-toolstab__scope-tag is-browser">{{ t.source }}</span>
+              <span :class="['pad-toolstab__scope-tag', `is-${t.source}`]">{{ t.source }}</span>
             </div>
             <div class="pad-toolstab__builtin-label">{{ t.label }} — {{ t.description }}</div>
           </div>
@@ -430,6 +477,20 @@ onMounted(() => {
 .pad-toolstab__scope-tag.is-browser {
   background: color-mix(in srgb, var(--pad-accent) 14%, transparent);
   color: var(--pad-accent);
+}
+.pad-toolstab__scope-tag.is-external {
+  background: color-mix(in srgb, #10b981 14%, transparent);
+  color: #059669;
+}
+.pad-toolstab__scope-tag.is-mcp {
+  background: color-mix(in srgb, #8b5cf6 14%, transparent);
+  color: #7c3aed;
+}
+.pad-toolstab__spin {
+  animation: pad-toolstab-spin 1s linear infinite;
+}
+@keyframes pad-toolstab-spin {
+  to { transform: rotate(360deg); }
 }
 .pad-toolstab__toggle {
   display: inline-flex;

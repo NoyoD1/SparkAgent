@@ -2189,6 +2189,183 @@ async fn list_user_tools(workspace_path: Option<String>, agent_dir: Option<Strin
     Ok(tools)
 }
 
+// ====== ADR-0023 P3-D (2026-08-24): External tools 列表 + 导入导出 ======
+//   跟 sidecar/src/externalTools.mjs 同扫描规则, 跟 builtin 7 + user tool 隔离.
+//   manifest.json schema 跟 sidecar 那边对齐 (name/description/parameters/runtime/entry/timeout/env).
+//   返回: Vec<ExternalToolInfo> (FE Tools tab "External Tools" section 展示)
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalToolInfo {
+    /// LLM 看到的 tool name (跟 manifest.name)
+    name: String,
+    /// manifest.description
+    description: String,
+    /// "python" | "node" | "bun"
+    runtime: String,
+    /// manifest 里的 entry 文件名 (相对 manifest 同目录)
+    entry: String,
+    /// 完整 entry 绝对路径
+    entry_path: String,
+    /// 完整 manifest.json 内容 (JSON 字符串, FE import 用)
+    manifest: String,
+    /// 完整 manifest.json 绝对路径
+    manifest_path: String,
+    /// "workspace" | "global"
+    scope: String,
+    /// 校验是否通过 (manifest 字段完整 + entry 文件存在)
+    is_valid: bool,
+    /// 校验失败原因 (is_valid=false 时填)
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn list_external_tools(
+    workspace_path: Option<String>,
+    agent_dir: Option<String>,
+) -> Result<Vec<ExternalToolInfo>, String> {
+    let mut tools: Vec<ExternalToolInfo> = Vec::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    fn scan_scope<'a>(
+        dir: &std::path::Path,
+        scope: &'a str,
+        tools: &'a mut Vec<ExternalToolInfo>,
+        seen_names: &'a mut std::collections::HashSet<String>,
+        workspace_override: bool,
+    ) -> Result<(), String> {
+        if !dir.exists() { return Ok(()); }
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("read_dir({}): {}", dir.display(), e))?;
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_file() { continue; }
+            if p.file_name().and_then(|n| n.to_str()) != Some("manifest.json") { continue; }
+            // 父目录就是 tool folder, name = 文件夹名
+            let tool_name = match p.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            // workspace 覆盖: 同名删旧的
+            if workspace_override && seen_names.contains(&tool_name) {
+                tools.retain(|t| t.name != tool_name);
+            }
+            seen_names.insert(tool_name.clone());
+            tools.push(parse_external_tool_manifest(&tool_name, &p, scope));
+        }
+        Ok(())
+    }
+
+    // 1. global: <agentDir>/tools/external/*/manifest.json
+    if let Some(agent_dir_str) = agent_dir.as_ref().filter(|s| !s.is_empty()) {
+        let global_dir = PathBuf::from(agent_dir_str).join("tools").join("external");
+        scan_scope(&global_dir, "global", &mut tools, &mut seen_names, false)?;
+    }
+    // 2. workspace: <workspacePath>/.pi/tools/external/*/manifest.json
+    if let Some(ws_str) = workspace_path.as_ref().filter(|s| !s.is_empty()) {
+        let workspace_dir = PathBuf::from(ws_str).join(".pi").join("tools").join("external");
+        scan_scope(&workspace_dir, "workspace", &mut tools, &mut seen_names, true)?;
+    }
+
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tools)
+}
+
+/// 解析 + 校验 manifest.json, 返 ExternalToolInfo (is_valid=false 时填 error).
+/// 跟 sidecar/src/externalTools.mjs::tryBuildToolFromManifest 校验规则对齐.
+fn parse_external_tool_manifest(
+    folder_name: &str,
+    manifest_path: &std::path::Path,
+    scope: &str,
+) -> ExternalToolInfo {
+    let raw = match std::fs::read_to_string(manifest_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return ExternalToolInfo {
+                name: folder_name.to_string(),
+                description: String::new(),
+                runtime: String::new(),
+                entry: String::new(),
+                entry_path: String::new(),
+                manifest: String::new(),
+                manifest_path: manifest_path.display().to_string(),
+                scope: scope.to_string(),
+                is_valid: false,
+                error: Some(format!("读 manifest 失败: {e}")),
+            };
+        }
+    };
+    let mut obj: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return ExternalToolInfo {
+                name: folder_name.to_string(),
+                description: String::new(),
+                runtime: String::new(),
+                entry: String::new(),
+                entry_path: String::new(),
+                manifest: raw,
+                manifest_path: manifest_path.display().to_string(),
+                scope: scope.to_string(),
+                is_valid: false,
+                error: Some(format!("manifest 不是合法 JSON: {e}")),
+            };
+        }
+    };
+    // 提取字段 (跟 sidecar schema 一致)
+    let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let description = obj.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let runtime = obj.get("runtime").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let entry = obj.get("entry").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // 校验必填字段
+    let mut error: Option<String> = None;
+    if name.is_empty() {
+        error = Some("missing 'name'".to_string());
+    } else if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        error = Some(format!("name '{name}' 含非法字符, 只能 [A-Za-z0-9._-]"));
+    } else if name.len() > 64 {
+        error = Some(format!("name 长度 {} > 64", name.len()));
+    } else if description.is_empty() {
+        error = Some("missing 'description'".to_string());
+    } else if !matches!(runtime.as_str(), "python" | "node" | "bun") {
+        error = Some(format!("runtime 必须是 python|node|bun, got '{runtime}'"));
+    } else if entry.is_empty() {
+        error = Some("missing 'entry'".to_string());
+    } else {
+        // entry 文件存在性
+        let tool_dir = manifest_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let entry_path = tool_dir.join(&entry);
+        if !entry_path.exists() {
+            error = Some(format!("entry 文件 '{}' 不存在", entry_path.display()));
+        }
+    }
+
+    // name 跟 folder_name 不一致时, 把 manifest.name 改成 folder_name (跟现有 user tool / MCP 一致:
+    //   file path 跟 name 强绑定, 校验保持一致)
+    if name != folder_name {
+        if let Some(map) = obj.as_object_mut() {
+            map.insert("name".to_string(), serde_json::Value::String(folder_name.to_string()));
+        }
+    }
+    let normalized_manifest = serde_json::to_string_pretty(&obj).unwrap_or(raw);
+
+    let tool_dir = manifest_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let entry_path = tool_dir.join(&entry).display().to_string();
+
+    ExternalToolInfo {
+        name: folder_name.to_string(),
+        description,
+        runtime,
+        entry,
+        entry_path,
+        manifest: normalized_manifest,
+        manifest_path: manifest_path.display().to_string(),
+        scope: scope.to_string(),
+        is_valid: error.is_none(),
+        error,
+    }
+}
+
 #[tauri::command]
 async fn read_user_tool(args: ReadDeleteUserToolArgs) -> Result<String, String> {
     let dir = resolve_user_tools_dir(&args.scope, args.workspace_path, args.agent_dir)?;
@@ -4196,6 +4373,8 @@ pub fn run() {
             delete_secret,
             list_secrets,
             resolve_secrets,
+            // ADR-0023 P3-D: 列出 external tool 文件夹, 给 FE Tools tab 展示 + 导入导出用
+            list_external_tools,
             fetch_provider_models,
             verify_provider_connection,  // P0 #1: 测试连接按钮
             // ADR-0022: WebView2 内嵌浏览器 (Tauri WebviewWindow, 走 reverse RPC)
