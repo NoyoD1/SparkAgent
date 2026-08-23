@@ -42,6 +42,68 @@ import { join, resolve, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { jsonSchemaToTypeBox } from './mcpClient.mjs';
 
+// ====== ADR-0023 P3-E (2026-08-24): external tool registry ======
+//   Pi SDK 0.84.2 启动时通过 ToolDefinition.execute 拿 closure 调到 subprocess,
+//   但 user-driven 调用 (slash 选 tool, 直接 modal 调) 没法走 Pi SDK.
+//   维护一份 name → { proc, manifest, scope } map, 暴露给 index.mjs file queue watcher
+//   用, 让 Tauri 可以直接调 tool 而不走 LLM turn.
+//
+//   跟 P3-B ToolDefinition 共享同一个 subprocess 实例 (不重复 spawn), 跟 builtin 7 + MCP
+//   tool 隔离 (builtin / MCP 不走这条路径).
+const externalToolRegistry = new Map();
+
+/**
+ * ADR-0023 P3-E: 给 FE / Tauri 看 — 列出当前 sidecar 里所有 external tool 快照
+ *   返回: [{ name, description, source, scope, parameters, runtime, entry }]
+ *     - source: "browser" (内置 web_*) / "external" (user 装的)
+ *     - scope: "global" / "workspace"
+ *     - parameters: manifest 里的 JSON Schema object (空 {} 表示 no args)
+ *
+ *   browser_* 走 builtin 路径, 不在 registry 里, 但这里也列出来 (让 modal 知道这些
+ *   也能 user-driven 调). 实际 user-driven 调走 builtin 的 execute 路径, 不走 file queue.
+ */
+export function getExternalToolsSnapshot() {
+  const out = [];
+  // 1. external tools (subprocess-backed)
+  for (const [name, entry] of externalToolRegistry.entries()) {
+    out.push({
+      name,
+      description: entry.manifest.description || '',
+      source: 'external',
+      scope: entry.scope,
+      parameters: entry.manifest.parameters || { type: 'object', properties: {} },
+      runtime: entry.manifest.runtime || '',
+      entry: entry.manifest.entry || '',
+    });
+  }
+  return out;
+}
+
+/**
+ * ADR-0023 P3-E: 走 registry 直接调 tool (不经过 LLM)
+ *   跟 ToolDefinition.execute 一样调 subprocess.call, 但 args 是 parsed JSON object.
+ *   返 { ok, content, error }: ok=true 时 content 是 AgentToolResult.content array.
+ *
+ *   fail 模式:
+ *     - unknown tool: { ok:false, error: "tool 'xxx' 未注册" }
+ *     - subprocess crash: { ok:false, error: "CRASH: ..." }
+ *     - timeout: { ok:false, error: "TIMEOUT: ..." }
+ *   调用方 (file queue watcher) 把 error 写回 response.
+ */
+export async function callExternalToolByName(name, args) {
+  const entry = externalToolRegistry.get(name);
+  if (!entry) {
+    return { ok: false, error: `tool '${name}' 未注册 (可能 subprocess 未启动或 scope 被覆盖)` };
+  }
+  try {
+    const content = await entry.proc.call(args ?? {});
+    return { ok: true, content: content ?? [] };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: msg };
+  }
+}
+
 /**
  * Scan 2 个目录 (global + workspace), 给每个 manifest 启 subprocess, 包成 Pi SDK ToolDefinition.
  *
@@ -189,6 +251,12 @@ async function tryBuildToolFromManifest(manifestPath, scope, resolveSecretEnv) {
     // spawn 失败 (e.g. python3 不在 PATH), 不注册这个 tool
     return null;
   }
+
+  // ADR-0023 P3-E: 注册到全局 registry, 让 user-driven 调用 (file queue 路径) 能找到
+  //   注意: workspace 覆盖 global (line 92-95 scanAndAppend 已 splice), 所以同名只最后一个
+  //   的 manifest 生效, registry 覆盖也只最后一个生效 (跟 scanAndAppend 行为一致)
+  externalToolRegistry.set(name, { proc: subprocess, manifest, scope });
+  console.error(`[externalTools] P3-E: registered '${name}' (scope=${scope}) for user-driven invoke`);
 
   // 5. 包成 Pi SDK ToolDefinition
   return {

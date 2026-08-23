@@ -115,7 +115,7 @@ import { McpServerClient, McpServerError, jsonSchemaToTypeBox } from './mcpClien
 //   <workspace>/.pi/tools/external/<name>/ 或 <agentDir>/tools/external/<name>/,
 //   sidecar 扫到后启 subprocess (python/node/bun) 走 stdio JSON-RPC,
 //   包成 Pi SDK ToolDefinition 让 LLM 调用.
-import { loadExternalTools } from './externalTools.mjs';
+import { loadExternalTools, getExternalToolsSnapshot, callExternalToolByName } from './externalTools.mjs';
 // v0.6.3-rc1 P2-6: 工具错误分类 + 人类可读化 (401/403/5xx/网络错误 → user 看得懂的提示)
 import { classifyToolError, formatToolError } from './errorSanitizer.mjs';
 // v0.6.3-rc1 P2-2: MCP config dir 热重载 watcher (fs.watch + debounce)
@@ -1761,6 +1761,75 @@ const runtime = await createAgentSessionRuntime(createRuntime, {
 });
 
 console.error(`[sidecar] runtime ready, model=${runtime.session.model?.provider}/${runtime.session.model?.id}`);
+
+// ====== ADR-0023 P3-E: external tools 加载完写 sentinel, Tauri 端 invoke_external_tool 用 ====//
+//   Tauri 端 invoke_external_tool 命令: spawn sidecar → poll 这个文件 (60s timeout) → 写 request.
+//   跟 browser_ready 同 pattern (Tauri 端自己 poll 100ms), 不走 stdout (runRpcMode 接管了).
+//   文件内容: { tools: [...], ts: <ms> }. ts 用来 detect stale (老 sidecar 没删).
+//   每次 sidecar 启动覆盖写, Tauri 看到 ts 变化就 reset wait.
+try {
+  const toolsSnapshot = getExternalToolsSnapshot();
+  const sentinelPath = join(agentDir, 'external_tools_ready.json');
+  writeFileSync(sentinelPath, JSON.stringify({
+    ts: Date.now(),
+    tools: toolsSnapshot,
+  }), 'utf-8');
+  console.error(`[sidecar] P3-E: external_tools_ready.json written (${toolsSnapshot.length} tool(s))`);
+} catch (e) {
+  console.error(`[sidecar] P3-E: write sentinel failed:`, e instanceof Error ? e.message : String(e));
+}
+
+// ====== ADR-0023 P3-E: file queue watcher — 处理 Tauri → sidecar 的 tool_call_direct ======
+//   Tauri 写 <agentDir>/tool_call_request.json = { id, name, args }, sidecar poll 读到后
+//   调 callExternalToolByName, 写 <agentDir>/tool_call_response.json = { id, ok, content?, error? }.
+//   跟 browser_request/response 同 pattern (但方向反: 这里是 Tauri→sidecar, browser 是 sidecar→Tauri).
+//
+//   并发: 多个 invoke_external_tool 进来怎么办?
+//   简单处理: setInterval 单线程, 一次读 1 个 request (queue 排队), 写完 response 再读下一个.
+//   如果请求量低 (1 user + modal), 不需要复杂并发.
+//
+//   atomic write: Tauri 写 .tmp 后 rename, sidecar readFileSync 看不到半截 JSON. 简单起见
+//   sidecar 这边读不到合法 JSON 就 skip + 留文件 (下个 tick 再读), 不会误处理.
+{
+  const toolReqPath = join(agentDir, 'tool_call_request.json');
+  const toolResPath = join(agentDir, 'tool_call_response.json');
+  console.error(`[sidecar] P3-E: tool_call watcher started, req=${toolReqPath} res=${toolResPath}`);
+  setInterval(async () => {
+    if (!existsSync(toolReqPath)) return;
+    let req;
+    try {
+      const raw = readFileSync(toolReqPath, 'utf-8');
+      req = JSON.parse(raw);
+    } catch (e) {
+      // 还在写 / 半截 JSON, 下个 tick 再试. 不要 unlink, 留文件.
+      return;
+    }
+    // 立即删 request (防重复 dispatch). atomic rename 之前 sidecar 看到空文件就 skip.
+    try { unlinkSync(toolReqPath); } catch {}
+    if (!req || typeof req.name !== 'string') {
+      console.error(`[sidecar] P3-E: invalid tool_call request:`, req);
+      return;
+    }
+    const id = typeof req.id === 'string' ? req.id : `tc-${Date.now()}`;
+    const args = req.args && typeof req.args === 'object' ? req.args : {};
+    // dispatch
+    callExternalToolByName(req.name, args).then((res) => {
+      try {
+        // 写 .tmp + rename, 避免 sidecar 写到一半 Tauri 读到半截.
+        const tmp = `${toolResPath}.tmp`;
+        writeFileSync(tmp, JSON.stringify({ id, ...res }), 'utf-8');
+        renameSync(tmp, toolResPath);
+      } catch (e) {
+        console.error(`[sidecar] P3-E: write tool_call response failed:`, e instanceof Error ? e.message : String(e));
+      }
+    }).catch((e) => {
+      console.error(`[sidecar] P3-E: callExternalToolByName unexpected throw:`, e);
+      try {
+        writeFileSync(toolResPath, JSON.stringify({ id, ok: false, error: e instanceof Error ? e.message : String(e) }), 'utf-8');
+      } catch {}
+    });
+  }, 100);
+}
 
 // ====== v0.5.4 hotfix: sync sessionManager history → agent.state.messages ======
 // 背景: Pi SDK 0.84.2 createAgentSessionFromServices 不会自动把 sessionManager.loadEntries

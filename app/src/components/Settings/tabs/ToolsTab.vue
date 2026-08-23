@@ -56,7 +56,7 @@ const formName = ref('');
 const formDescription = ref('');
 const formBody = ref('');
 const isSaving = ref(false);
-const toast = ref<{ type: 'ok' | 'fail'; message: string } | null>(null);
+const toast = ref<{ type: 'ok' | 'fail' | 'warn'; message: string } | null>(null);
 
 function startDerive(basedOn: BuiltinToolName) {
   isDeriving.value = true;
@@ -224,6 +224,30 @@ async function exportExternalToolDialog(name: string) {
     toast.value = { type: 'ok', message: `已导出到: ${written}` };
   } catch (e) {
     toast.value = { type: 'fail', message: `导出失败: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+// v3.19: 删 external tool (跟 import/export 配套)
+async function deleteExternalToolDialog(name: string) {
+  if (!confirm(`确认删除 external tool '${name}'?\n\n会从 <workspace>/.pi/tools/external/${name}/ 整个删掉 (含 manifest.json + entry 文件).\n删除后 sidecar 自动重启, LLM 立刻看不到这个 tool. 不可恢复, 建议先 export 备份.`)) {
+    return;
+  }
+  try {
+    const removed = await piTauri.deleteExternalTool(
+      'workspace',
+      name,
+      sessionStore.activeWorkspace?.path ?? null,
+      null,
+    );
+    if (removed) {
+      toast.value = { type: 'ok', message: `已删除 '${name}'` };
+    } else {
+      toast.value = { type: 'warn', message: `'${name}' 不存在 (已删过?)` };
+    }
+    refreshExtension();
+    void piTauri.restartAllSidecars('external_tool_changed');
+  } catch (e) {
+    toast.value = { type: 'fail', message: `删除失败: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 </script>
@@ -439,6 +463,15 @@ async function exportExternalToolDialog(name: string) {
             @click="exportExternalToolDialog(t.name)"
           >
             <Save :size="12" :stroke-width="1.75" />
+          </button>
+          <!-- v3.19: external tool 删除按钮 -->
+          <button
+            v-if="t.source === 'external'"
+            class="pad-toolstab__btn pad-toolstab__btn--danger pad-toolstab__btn--sm"
+            :title="`删除 ${t.name}`"
+            @click="deleteExternalToolDialog(t.name)"
+          >
+            <Trash2 :size="12" :stroke-width="1.75" />
           </button>
           <button
             class="pad-toolstab__toggle"

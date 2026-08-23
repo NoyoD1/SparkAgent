@@ -645,7 +645,7 @@ export const useChatStore = defineStore('chat', () => {
   //
   // 显式 vs 隐式区分: sendPrompt 解析 [[ref:kind:name]] marker 时, 收集
   //   explicitRefKeys (Set<string>); recentRefs 不在 Set 里的才算"隐式".
-  type RecentRef = { kind: 'skill' | 'tool' | 'mcp'; name: string };
+  type RecentRef = { kind: 'skill' | 'tool' | 'mcp' | 'extension'; name: string };
   const RECENT_REFS_MAX = 3;
   const recentRefsBySession = ref<Record<string, RecentRef[]>>({});
 

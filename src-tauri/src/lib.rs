@@ -2651,6 +2651,183 @@ async fn import_external_tool(
     Ok(target_dir.display().to_string())
 }
 
+#[tauri::command]
+async fn delete_external_tool(
+    scope: String,
+    name: String,
+    workspace_path: Option<String>,
+    agent_dir: Option<String>,
+) -> Result<bool, String> {
+    // 跟 export/import 同源位置
+    let base = if scope == "global" {
+        agent_dir.clone().ok_or("global scope 需要 agent_dir")?
+    } else {
+        workspace_path.clone().ok_or("workspace scope 需要 workspace_path")?
+    };
+    let tool_dir = std::path::PathBuf::from(&base)
+        .join(if scope == "global" { "tools/external" } else { ".pi/tools/external" })
+        .join(&name);
+    if !tool_dir.is_dir() {
+        return Ok(false);  // 已经没了, 算成功 (幂等)
+    }
+    // 递归删 tool folder
+    std::fs::remove_dir_all(&tool_dir)
+        .map_err(|e| format!("remove_dir_all({}): {}", tool_dir.display(), e))?;
+    debug_log(&format!("delete_external_tool: removed {}", tool_dir.display()));
+    Ok(true)
+}
+
+// ====== ADR-0023 P3-E (2026-08-24): user-driven / 真的调 external tool ======
+//   FE 端用户在 Composer 选 /tools:tavily_search → modal 填 args → Run
+//   → 调本命令 → 转发到 sidecar 的 file queue watcher → 拿到结果
+//
+//   协议 (Tauri ↔ sidecar, 走文件队列, 跟 browser_request/response 同 pattern 但方向反):
+//   - Tauri 写 <agentDir>/tool_call_request.json = { id, name, args }
+//   - sidecar poll 100ms, 读到后调 callExternalToolByName(name, args), 写
+//     <agentDir>/tool_call_response.json = { id, ok, content?, error? }
+//   - Tauri poll response (60s timeout), 删文件, 解析返给 FE
+//
+//   生命周期: sidecar 是 per-agent-run 模式 (Tauri lazy spawn on first send_prompt).
+//   user 调 tool 时可能 sidecar 还没起, 所以本命令要自己负责 spawn.
+//   spawn 用 run_prompt 走同样的 path, 但不写任何 RpcCommand, sidecar 起来后就坐等.
+//   跟踪用独立 AtomicBool (跟 LLM active map 隔离, 避免 run_prompt task 把 tool session 的
+//   "state" event 发到 chat:event 干扰 FE).
+static TOOL_CALL_SIDECAR_SPAWNED: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+async fn invoke_external_tool(
+    app: AppHandle,
+    name: String,
+    args_json: String,
+    workspace_path: Option<String>,
+    agent_dir: String,
+    config: ClientConfig,
+    active: tauri::State<'_, Arc<sidecar::ActiveSidecars>>,
+) -> Result<serde_json::Value, String> {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    debug_log(&format!(
+        "invoke_external_tool: name={name} args_len={} workspace={:?} agent_dir={agent_dir}",
+        args_json.len(),
+        workspace_path,
+    ));
+
+    // 1. Spawn sidecar 如果还没起. 跟 send_prompt 共用 spawn path, 但 initial command 是 noop
+    //   `get_state` (不调 LLM, 走 Pi SDK query 状态). 后续可优化: 改 run_prompt 加 flag.
+    if !TOOL_CALL_SIDECAR_SPAWNED.load(Ordering::SeqCst) {
+        // 从 keychain 拿 apiKey (跟 send_prompt 一致, 防止 provider 配了但 key 没存就 spawn 失败)
+        let api_key = match keyring::get(&config.provider_id) {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                return Err(format!(
+                    "No API key for provider \"{}\" in OS keychain. Add it in Settings → Providers.",
+                    config.provider_id
+                ));
+            }
+            Err(e) => return Err(format!("Keychain read error: {e}")),
+        };
+        let base_url = if config.provider == "openai-compatible" {
+            config.base_url.clone().ok_or_else(|| "openai-compatible needs baseUrl".to_string())?
+        } else {
+            String::new()
+        };
+        // tool-call 用独立 session_id (跟 chat session 隔离, 避免相互冲突)
+        let ts_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+        let tool_session_id = format!("_tool_call_{ts_ms}");
+        let sidecar_config = sidecar::SidecarConfig {
+            provider: config.provider.clone(),
+            model: config.model.clone(),
+            base_url,
+            api_key,
+            thinking_level: config.thinking_level.clone(),
+            workspace_path: workspace_path.clone(),
+            // 用 "allow" 跳过 permission 弹窗 (tool call 是 user 主动调, 不需要 confirm)
+            permission_mode: "allow".to_string(),
+            session_id: Some(tool_session_id.clone()),
+            skills: config.skills.clone(),
+            model_metadata: config.model_metadata.clone(),
+        };
+        // 写个 noop initial RpcCommand (get_state) 让 sidecar 处理 + 返 state event
+        // 副作用: run_prompt task 会 emit "state" event 到 chat:event, FE 可能看到 (但无害,
+        // sessionId 是 _tool_call_<ts> 前缀, FE dispatch 时可识别忽略)
+        let initial = r#"{"type":"get_state"}"#.to_string();
+        debug_log(&format!(
+            "invoke_external_tool: spawning sidecar (tools-only) session={tool_session_id}"
+        ));
+        sidecar::run_prompt(
+            app.clone(),
+            sidecar_config,
+            tool_session_id,
+            initial,
+            active.inner().clone(),
+        );
+        TOOL_CALL_SIDECAR_SPAWNED.store(true, Ordering::SeqCst);
+    }
+
+    // 2. 等 sentinel 文件 (sidecar 加载完 external tools 后写)
+    let agent_dir_path = std::path::PathBuf::from(&agent_dir);
+    if !agent_dir_path.exists() {
+        return Err(format!("agent_dir 不存在: {agent_dir}"));
+    }
+    let sentinel = agent_dir_path.join("external_tools_ready.json");
+    let start = SystemTime::now();
+    let timeout = Duration::from_secs(30);
+    while !sentinel.exists() {
+        if start.elapsed().unwrap_or_default() > timeout {
+            return Err(format!(
+                "sidecar 启动超时 (30s), 没看到 external_tools_ready.json: {}",
+                sentinel.display()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    debug_log("invoke_external_tool: sentinel seen, sidecar tools ready");
+
+    // 3. 写 request (atomic: tmp + rename, 防 sidecar 读半截)
+    let req_id = format!("tc-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis());
+    let args_value: serde_json::Value = serde_json::from_str(&args_json).unwrap_or(serde_json::json!({}));
+    let req_obj = serde_json::json!({
+        "id": req_id,
+        "name": name,
+        "args": args_value,
+    });
+    let req_path = agent_dir_path.join("tool_call_request.json");
+    let req_tmp = agent_dir_path.join("tool_call_request.json.tmp");
+    std::fs::write(&req_tmp, serde_json::to_string(&req_obj).map_err(|e| format!("ser req: {e}"))?)
+        .map_err(|e| format!("write req tmp: {e}"))?;
+    std::fs::rename(&req_tmp, &req_path).map_err(|e| format!("rename req: {e}"))?;
+    debug_log(&format!("invoke_external_tool: wrote request id={req_id}"));
+
+    // 4. Poll response
+    let res_path = agent_dir_path.join("tool_call_response.json");
+    let start = SystemTime::now();
+    let timeout = Duration::from_secs(60);
+    loop {
+        if res_path.exists() {
+            let content = std::fs::read_to_string(&res_path)
+                .map_err(|e| format!("read res: {e}"))?;
+            // 删文件, 防下次读 stale
+            let _ = std::fs::remove_file(&res_path);
+            if content.trim().is_empty() {
+                // 写了一半, 等下个 tick
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            let res: serde_json::Value = serde_json::from_str(&content)
+                .map_err(|e| format!("parse res: {e}, content={content}"))?;
+            debug_log(&format!("invoke_external_tool: got response id={} ok={}", req_id,
+                res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)));
+            return Ok(res);
+        }
+        if start.elapsed().unwrap_or_default() > timeout {
+            return Err(format!(
+                "tool call 超时 (60s): name={name}, sidecar 没回 response"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 // ====== 2026-08-21 v0.6.3-rc1 P2-1: MCP server 配置 CRUD ======
 //   跟 P1-5 user tool 同 pattern: 两层 scope (workspace + global, workspace 优先)
 //     - workspace: <workspacePath>/.pi/mcp/<name>.json
@@ -4606,6 +4783,10 @@ pub fn run() {
             import_user_tool,
             export_external_tool,
             import_external_tool,
+            // v3.19: 删除 external tool (跟 import/export 配套)
+            delete_external_tool,
+            // v3.21 ADR-0023 P3-E: user-driven / 真调 external tool (file queue ↔ sidecar)
+            invoke_external_tool,
             fetch_provider_models,
             verify_provider_connection,  // P0 #1: 测试连接按钮
             // ADR-0022: WebView2 内嵌浏览器 (Tauri WebviewWindow, 走 reverse RPC)

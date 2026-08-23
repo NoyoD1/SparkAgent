@@ -765,6 +765,91 @@ class PiTauriClient {
     })) as string;
   }
 
+  // v3.19: 删 external tool (跟 import/export 配套, user tool 已经走 remove)
+  async deleteExternalTool(
+    scope: 'workspace' | 'global',
+    name: string,
+    workspacePath: string | null,
+    agentDir: string | null,
+  ): Promise<boolean> {
+    return (await invoke('delete_external_tool', {
+      scope,
+      name,
+      workspacePath,
+      agentDir,
+    })) as boolean;
+  }
+
+  // ====== ADR-0023 P3-E (2026-08-24): user-driven / 真的调 external tool ======
+  //   跟 send_prompt 同 pattern: FE 传完整 config (provider/model/apiKey 等走 keychain),
+  //   Tauri 端负责 spawn sidecar (如果还没起) + 走 file queue 转发到 sidecar + 等 response.
+  //
+  //   返回: { id, ok: true, content: [...] } | { id, ok: false, error: "..." }
+  //   content 跟 Pi SDK AgentToolResult.content 同 shape (text / image 数组)
+  //
+  //   modal UX: FE 拿 manifest.parameters 给 user 填 args (MVP: 直接 JSON textarea).
+  async invokeExternalTool(args: {
+    name: string;
+    argsJson: string;
+    workspacePath: string | null;
+    agentDir: string;
+    // 跟 send_prompt 的 configGetter 一样 (但拿掉 providerId/apiKey 这种
+    //   server 端从 keychain 读, 不用 FE 传). 这里用 inline type 避免引循环依赖.
+    config: {
+      providerId: string;
+      provider: string;
+      model: string;
+      baseUrl?: string | null;
+      thinkingLevel?: string | null;
+      workspacePath?: string | null;
+      permissionMode?: 'ask' | 'smart' | 'allow' | string | null;
+      sessionId?: string | null;
+      skills?: { enabledNames?: string[]; extraPaths?: string[] } | null;
+      modelMetadata?: {
+        type?: 'chat' | 'image' | 'video' | 'audio' | 'embedding' | string;
+        vision?: boolean;
+        contextWindow?: number;
+        maxOutput?: number;
+        maxRounds?: number;
+        reasoning?: boolean;
+      } | null;
+    };
+  }): Promise<{
+    id: string;
+    ok: boolean;
+    content?: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }>;
+    error?: string;
+  }> {
+    return (await invoke('invoke_external_tool', {
+      name: args.name,
+      argsJson: args.argsJson,
+      workspacePath: args.workspacePath,
+      agentDir: args.agentDir,
+      config: args.config,
+    })) as {
+      id: string;
+      ok: boolean;
+      content?: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }>;
+      error?: string;
+    };
+  }
+
+  /**
+   * 解析 external tool manifest 里的 parameters 字段 (JSON Schema object).
+   *   拿 listExternalTools 返回的某条, 调 .manifest (raw JSON 字符串) → parse → .parameters
+   *   出错时返空 object, caller 用 ?? {} 兜底.
+   */
+  parseExternalToolParameters(manifestJson: string): Record<string, unknown> {
+    try {
+      const parsed = JSON.parse(manifestJson);
+      const p = parsed?.parameters;
+      if (p && typeof p === 'object' && !Array.isArray(p)) return p as Record<string, unknown>;
+    } catch {
+      // fall through
+    }
+    return {};
+  }
+
   // ====== v0.4.4.6 Skills list (FE 主动拉) ======
   // 之前 v0.4.4.x sidecar 启动时 emit skills_snapshot 一次, 写完 skill 后 UI 不刷新
   // 修法: Tauri 端 list_skills 走 std::fs::read_dir 扫两个目录 (workspace + global),

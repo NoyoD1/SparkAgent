@@ -17,6 +17,7 @@ import { useUiStore } from '@/stores/ui';
 import { useSkillsStore } from '@/stores/skills';
 import { useUserToolsStore } from '@/stores/userTools';
 import { useMcpServersStore } from '@/stores/mcpServers';
+import { useExtensionToolsStore } from '@/stores/extensionTools';
 import { useComposerAttachmentsStore, type PendingImage, type PendingFile } from '@/stores/composerAttachments';
 import { piTauri } from '@/lib/tauri';
 import ContextIndicator from './ContextIndicator.vue';
@@ -28,11 +29,13 @@ const uiStore = useUiStore();
 const skillsStore = useSkillsStore();
 const userToolsStore = useUserToolsStore();
 const mcpServersStore = useMcpServersStore();
+const extensionToolsStore = useExtensionToolsStore();
 const attachmentsStore = useComposerAttachmentsStore();
 const { activeSession } = storeToRefs(sessionStore);
 const { skills } = storeToRefs(skillsStore);
 const { tools: userTools } = storeToRefs(userToolsStore);
 const { servers: mcpServers } = storeToRefs(mcpServersStore);
+const { allExtensionTools } = storeToRefs(extensionToolsStore);
 
 const inputText = ref('');
 const showModelMenu = ref(false);
@@ -45,7 +48,7 @@ const showSlashPopover = ref(false);
 const slashPopoverQuery = ref('');
 const slashPopoverTrigger = ref<'/' | '@' | null>(null);
 const slashPopoverCursor = ref(0);  // 当前选中项
-type RefKind = 'skill' | 'tool' | 'mcp';
+type RefKind = 'skill' | 'tool' | 'mcp' | 'extension';
 interface SlashItem {
   group: 'Skills' | 'Tools' | 'MCP';
   slug: string;       // 显示用, e.g. /skill:code-review 或 @skill:code-review
@@ -68,7 +71,7 @@ const slashItems = computed<SlashItem[]>(() => {
       name: s.name,
     });
   }
-  // 2. Tools (D214 Phase 1: 接入 useUserToolsStore)
+  // 2. User Tools (D214 Phase 1: 接入 useUserToolsStore)
   for (const t of userTools.value) {
     out.push({
       group: 'Tools',
@@ -76,6 +79,21 @@ const slashItems = computed<SlashItem[]>(() => {
       label: t.name,
       description: t.description || `${t.basedOn} preset`,
       kind: 'tool',
+      name: t.name,
+    });
+  }
+  // v3.20: Extension tools (browser + external) 也走 Tools 分组
+  //   slug 走 /tools:tavily_search 走"/"触发, 让 LLM 看到 / 引用时知道这是 tool
+  //   (LLM 直接调, 跟 @tool:foo 等价, 但 user 在 composer 里用 "/" 也能看到)
+  for (const t of allExtensionTools.value) {
+    // 跳过 builtin 7 tool, 它们已经走 builtin 内部, 不需要走 slash
+    if (['read', 'write', 'edit', 'bash', 'ls', 'find', 'grep'].includes(t.name)) continue;
+    out.push({
+      group: 'Tools',
+      slug: `/tools:${t.name}`,
+      label: t.name,
+      description: `[${t.source}] ${t.description}`,
+      kind: 'extension',
       name: t.name,
     });
   }
@@ -587,6 +605,185 @@ const isStreaming = computed(() =>
   activeSession.value ? chatStore.isStreamingSession(activeSession.value.id) : false,
 );
 
+// ====== v3.21 ADR-0023 P3-E: / 真调 external tool 弹窗状态 ======
+//   之前 / 选 extension tool 只插入 [[ref:extension:xxx]] marker, sidecar 不识别, 啥也不做.
+//   现在: 选 tool → 开 modal → 填 args → 调 piTauri.invokeExternalTool → 展示结果.
+//   modal 状态在本组件管, 关掉就清. 不进 store (modal 跟 composer 强绑定, 没必要全局).
+interface ToolCallModalState {
+  open: boolean;
+  toolName: string;
+  toolDescription: string;
+  toolSource: 'browser' | 'mcp' | 'external';
+  toolScope: 'workspace' | 'global' | '';
+  toolRuntime: string;
+  parameters: Record<string, unknown>;  // 解析自 manifest.parameters (JSON Schema)
+  argsText: string;                      // user 填的 JSON
+  loading: boolean;
+  error: string | null;
+  result: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> | null;
+}
+const toolCallModal = ref<ToolCallModalState>({
+  open: false,
+  toolName: '',
+  toolDescription: '',
+  toolSource: 'external',
+  toolScope: '',
+  toolRuntime: '',
+  parameters: {},
+  argsText: '{}',
+  loading: false,
+  error: null,
+  result: null,
+});
+
+function openToolCallModal(toolName: string) {
+  // 1. 在 externalTools 里查 raw manifest
+  const rawTool = extensionToolsStore.externalTools.find((t) => t.name === toolName);
+  if (!rawTool) {
+    // builtin 7 + browser 3 不走这条 (slash 列表里已 filter), 但兜底
+    uiStore.showToast(`tool '${toolName}' 不在 external tools 里`, 'error');
+    return;
+  }
+  if (!rawTool.isValid) {
+    uiStore.showToast(`tool '${toolName}' manifest 无效: ${rawTool.error ?? '未知错误'}`, 'error');
+    return;
+  }
+  const params = piTauri.parseExternalToolParameters(rawTool.manifest);
+  toolCallModal.value = {
+    open: true,
+    toolName: rawTool.name,
+    toolDescription: rawTool.description,
+    toolSource: 'external',
+    toolScope: rawTool.scope,
+    toolRuntime: rawTool.runtime,
+    parameters: params,
+    // 给个像样的初始 args 模板 (取 properties required 字段填空字符串)
+    argsText: buildArgsTemplate(params),
+    loading: false,
+    error: null,
+    result: null,
+  };
+  // 关 slash popover, 让 modal 接管
+  closeSlashPopover();
+}
+
+// 从 JSON Schema 拿 required + properties 生成 {"query": ""} 这种 template, 让 user 改
+// 而不是面对一个空 textarea 不知写啥. 嵌套 object / array 留 {} 让 user 自己展开.
+function buildArgsTemplate(params: Record<string, unknown>): string {
+  const props = (params?.properties ?? {}) as Record<string, unknown>;
+  const required = (params?.required ?? []) as string[];
+  if (Object.keys(props).length === 0) return '{}';
+  const sample: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(props)) {
+    const schema = v as Record<string, unknown>;
+    if (schema.default !== undefined) {
+      sample[k] = schema.default;
+    } else if (schema.type === 'string') {
+      sample[k] = '';
+    } else if (schema.type === 'number' || schema.type === 'integer') {
+      sample[k] = 0;
+    } else if (schema.type === 'boolean') {
+      sample[k] = false;
+    } else if (schema.type === 'array') {
+      sample[k] = [];
+    } else {
+      sample[k] = {};
+    }
+  }
+  // 如果有 required 字段但 sample 全空, 提示 user
+  if (required.length > 0) {
+    const emptyRequired = required.filter((k) => sample[k] === '' || sample[k] === 0 || sample[k] === false);
+    if (emptyRequired.length > 0) {
+      // 保持 sample 但 LLM 不会自动跑, user 自己填. 不 warn, 简单给个 comment.
+      return JSON.stringify(sample, null, 2);
+    }
+  }
+  return JSON.stringify(sample, null, 2);
+}
+
+function closeToolCallModal() {
+  toolCallModal.value.open = false;
+  toolCallModal.value.loading = false;
+  toolCallModal.value.error = null;
+  toolCallModal.value.result = null;
+}
+
+async function runToolCall() {
+  if (!toolCallModal.value.open) return;
+  const m = toolCallModal.value;
+  // 1. 校验 args JSON
+  let argsObj: unknown;
+  try {
+    argsObj = JSON.parse(m.argsText);
+  } catch (e) {
+    m.error = `args JSON 解析失败: ${e instanceof Error ? e.message : String(e)}`;
+    return;
+  }
+  if (argsObj === null || typeof argsObj !== 'object' || Array.isArray(argsObj)) {
+    m.error = 'args 必须是 JSON object (e.g. {"query":"rust async"})';
+    return;
+  }
+  // 2. 拿 config (跟 send_prompt 一样的 shape)
+  const p = activeProvider.value;
+  const mod = activeModel.value;
+  if (!p || !mod) {
+    m.error = '没选 provider/model, 先去 Settings → Providers 选一个';
+    return;
+  }
+  // agentDir 走 Tauri invoke 拿 (跟 McpTab / CustomInstructionsTab 同 pattern, 缓存)
+  let agentDir: string;
+  try {
+    agentDir = await piTauri.getAgentDir();
+  } catch (e) {
+    m.error = `拿 agentDir 失败: ${e instanceof Error ? e.message : String(e)}`;
+    return;
+  }
+  // workspace path: session 只有 workspaceId, 通过 sessionStore.getWorkspace 拿 path
+  const sess = activeSession.value;
+  const workspacePath = sess ? sessionStore.getWorkspace(sess.workspaceId)?.path ?? null : null;
+  const cfg = {
+    providerId: p.id,
+    provider: p.type,
+    model: mod.id,
+    baseUrl: p.baseUrl,
+    thinkingLevel: configStore.thinkingLevel,
+    workspacePath,
+    permissionMode: currentPermissionMode.value,
+    sessionId: sess?.id ?? null,
+    skills: { enabledNames: skillsStore.getEnabledNames() },
+    // model metadata 走 flat 字段 (ModelInfo 本身就是 flat, 不嵌套)
+    modelMetadata: {
+      type: mod.type,
+      vision: mod.vision,
+      contextWindow: mod.contextWindow,
+      maxOutput: mod.maxOutput,
+      maxRounds: mod.maxRounds,
+      reasoning: mod.reasoning,
+    },
+  };
+  m.loading = true;
+  m.error = null;
+  m.result = null;
+  try {
+    const res = await piTauri.invokeExternalTool({
+      name: m.toolName,
+      argsJson: JSON.stringify(argsObj),
+      workspacePath,
+      agentDir,
+      config: cfg,
+    });
+    if (res.ok) {
+      m.result = res.content ?? [];
+    } else {
+      m.error = res.error ?? 'unknown error';
+    }
+  } catch (e) {
+    m.error = e instanceof Error ? e.message : String(e);
+  } finally {
+    m.loading = false;
+  }
+}
+
 // 2026-08-20 P0-1 补充 A: 当前 session 的 send queue. reactive ref 让 UI 实时反映队列变化.
 //   storeToRefs 解构 sendQueueBySession 后, 内部改值会触发本组件重新计算 length/列表.
 const { sendQueueBySession } = storeToRefs(chatStore);
@@ -825,6 +1022,11 @@ async function pickSlashItem(item: SlashItem) {
   }
   if (!item.kind || !item.name) {
     console.warn('[Composer / popover] missing kind/name:', item);
+    return;
+  }
+  // v3.21 ADR-0023 P3-E: extension tool 走 modal 真调, 不插 marker (sidecar 不识别 kind:extension)
+  if (item.kind === 'extension') {
+    openToolCallModal(item.name);
     return;
   }
   // D214: 统一 marker 格式 [[ref:kind:name]], send 时按 kind 解析
@@ -1695,6 +1897,77 @@ onMounted(() => {
         </button>
       </div>
     </div>
+
+    <!-- v3.21 ADR-0023 P3-E: / 真的调 external tool 弹窗 -->
+    <!-- 复用 modal 类名跟 PermissionDialog 一致, 不引新依赖 -->
+    <Teleport to="body">
+      <div
+        v-if="toolCallModal.open"
+        class="pad-modal-backdrop"
+        @click.self="closeToolCallModal"
+      >
+        <div class="pad-modal toolcall-modal">
+          <div class="pad-modal-header">
+            <h3>
+              <span class="toolcall-modal__chip">/tools</span>
+              {{ toolCallModal.toolName }}
+            </h3>
+            <button class="pad-modal-close" @click="closeToolCallModal" aria-label="关闭">×</button>
+          </div>
+          <div class="pad-modal-body">
+            <p class="toolcall-modal__desc">{{ toolCallModal.toolDescription }}</p>
+            <p class="toolcall-modal__meta">
+              source: <code>{{ toolCallModal.toolSource }}</code> ·
+              scope: <code>{{ toolCallModal.toolScope || 'n/a' }}</code> ·
+              runtime: <code>{{ toolCallModal.toolRuntime || 'n/a' }}</code>
+            </p>
+
+            <details class="toolcall-modal__schema" v-if="Object.keys(toolCallModal.parameters).length > 0">
+              <summary>查看参数 schema (JSON Schema)</summary>
+              <pre>{{ JSON.stringify(toolCallModal.parameters, null, 2) }}</pre>
+            </details>
+
+            <label class="toolcall-modal__label">Args (JSON 对象):</label>
+            <textarea
+              v-model="toolCallModal.argsText"
+              class="toolcall-modal__textarea"
+              rows="8"
+              spellcheck="false"
+              placeholder='{"query":"rust async"}'
+              :disabled="toolCallModal.loading"
+            />
+
+            <div v-if="toolCallModal.error" class="toolcall-modal__error">
+              ❌ {{ toolCallModal.error }}
+            </div>
+
+            <div v-if="toolCallModal.result" class="toolcall-modal__result">
+              <h4>结果:</h4>
+              <div v-for="(c, i) in toolCallModal.result" :key="i" class="toolcall-modal__result-item">
+                <pre v-if="c.type === 'text'">{{ c.text }}</pre>
+                <div v-else-if="c.type === 'image'">
+                  <img :src="`data:${c.mimeType};base64,${c.data}`" :alt="`result-${i}`" />
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="pad-modal-footer">
+            <button
+              class="pad-btn pad-btn--ghost"
+              :disabled="toolCallModal.loading"
+              @click="closeToolCallModal"
+            >关闭</button>
+            <button
+              class="pad-btn pad-btn--primary"
+              :disabled="toolCallModal.loading"
+              @click="runToolCall"
+            >
+              {{ toolCallModal.loading ? '运行中…' : 'Run' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -2799,5 +3072,133 @@ onMounted(() => {
 }
 .pad-composer__send.is-stop.is-stopping:hover {
   background: var(--pad-fg-tertiary);
+}
+
+/* ====== v3.21 ADR-0023 P3-E: / 真的调 external tool 弹窗 ======
+ *   复用全局 .pad-modal-backdrop / .pad-modal 基础类 (跟 PermissionDialog 同款),
+ *   自己再加 .toolcall-modal 系列做微调. 颜色变量走全站 design token, 不写死. */
+.toolcall-modal {
+  max-width: 640px;
+  width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+.toolcall-modal__chip {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--pad-bg-elevated, rgba(0, 0, 0, 0.06));
+  color: var(--pad-fg-tertiary, #888);
+  font-size: 12px;
+  font-family: var(--pad-font-mono, ui-monospace, SFMono-Regular, monospace);
+  margin-right: 8px;
+  vertical-align: middle;
+}
+.toolcall-modal__desc {
+  margin: 0 0 8px 0;
+  color: var(--pad-fg-secondary);
+  line-height: 1.5;
+}
+.toolcall-modal__meta {
+  margin: 0 0 12px 0;
+  font-size: 12px;
+  color: var(--pad-fg-tertiary);
+}
+.toolcall-modal__meta code {
+  font-family: var(--pad-font-mono, monospace);
+  background: var(--pad-bg-elevated, rgba(0, 0, 0, 0.05));
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.toolcall-modal__schema {
+  margin-bottom: 12px;
+  border: 1px solid var(--pad-border, rgba(0, 0, 0, 0.1));
+  border-radius: 4px;
+  padding: 6px 8px;
+  background: var(--pad-bg-elevated, rgba(0, 0, 0, 0.02));
+}
+.toolcall-modal__schema summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--pad-fg-tertiary);
+  user-select: none;
+}
+.toolcall-modal__schema pre {
+  margin: 8px 0 0 0;
+  font-size: 11px;
+  font-family: var(--pad-font-mono, monospace);
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.toolcall-modal__label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pad-fg-secondary);
+  margin-bottom: 4px;
+}
+.toolcall-modal__textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--pad-border, rgba(0, 0, 0, 0.15));
+  border-radius: 4px;
+  background: var(--pad-bg-input, #fff);
+  color: var(--pad-fg-primary);
+  font-family: var(--pad-font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 120px;
+}
+.toolcall-modal__textarea:focus {
+  outline: none;
+  border-color: var(--pad-accent, #7c3aed);
+}
+.toolcall-modal__textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.toolcall-modal__error {
+  margin-top: 12px;
+  padding: 8px 10px;
+  background: var(--pad-bg-error, rgba(220, 38, 38, 0.1));
+  color: var(--pad-fg-error, #dc2626);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.toolcall-modal__result {
+  margin-top: 16px;
+  border-top: 1px solid var(--pad-border, rgba(0, 0, 0, 0.1));
+  padding-top: 12px;
+}
+.toolcall-modal__result h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  color: var(--pad-fg-secondary);
+}
+.toolcall-modal__result-item {
+  margin-bottom: 8px;
+}
+.toolcall-modal__result-item pre {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--pad-bg-elevated, rgba(0, 0, 0, 0.03));
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: var(--pad-font-mono, monospace);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow: auto;
+}
+.toolcall-modal__result-item img {
+  max-width: 100%;
+  border-radius: 4px;
 }
 </style>
