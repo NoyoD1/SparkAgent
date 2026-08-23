@@ -173,7 +173,7 @@ async fn save_api_key(
         return Err("api_key is empty".to_string());
     }
     keyring::save(&provider_id, &api_key)?;
-    index_file::add(&app, &provider_id)?;
+    index_file::add(&app, &provider_id, index_file::Scope::Llm)?;
     Ok(())
 }
 
@@ -183,13 +183,13 @@ async fn delete_api_key(
     provider_id: String,
 ) -> Result<(), String> {
     keyring::delete(&provider_id)?;
-    index_file::remove(&app, &provider_id)?;
+    index_file::remove(&app, &provider_id, index_file::Scope::Llm)?;
     Ok(())
 }
 
 #[tauri::command]
 async fn list_api_keys(app: AppHandle) -> Result<Vec<KeychainInfoDto>, String> {
-    let idx = index_file::load(&app);
+    let idx = index_file::load(&app, index_file::Scope::Llm);
     let mut out = Vec::with_capacity(idx.provider_ids.len());
     for id in idx.provider_ids {
         let (configured, preview) = match keyring::get(&id) {
@@ -213,10 +213,9 @@ async fn has_api_key(provider_id: String) -> Result<bool, String> {
 
 // ====== ADR-0023 P3-C (2026-08-24): 通用 secret 管理 ======
 //   给 MCP server env / external tool env 用的 keychain entry.
-//   跟 save_api_key / delete_api_key 复用同一个 keyring service="pi-agent",
-//   区别只是 key 名字命名空间: mcp-<server>-<field> / external-<tool>-<field>.
-//   实际就是 keychain::save/get/delete + index_file::add/remove, 包装出来
-//   给 FE SecretsTab 调, FE 不用关心 LLM apiKey 跟普通 secret 走的是同一个 keychain.
+//   走独立 keyring service="pi-agent-secret" (跟 LLM apiKey 的 "pi-agent" 完全隔离,
+//   list 互不干扰) + 独立 index file "keychain_secret_index.json".
+//   命名建议: mcp-<server>-<field> / external-<tool>-<field> (跟 keychain 命名空间一致).
 #[tauri::command]
 async fn save_secret(app: AppHandle, name: String, value: String) -> Result<(), String> {
     if name.is_empty() {
@@ -232,22 +231,23 @@ async fn save_secret(app: AppHandle, name: String, value: String) -> Result<(), 
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@')) {
         return Err(format!("secret name '{name}' 含非法字符, 只能 [A-Za-z0-9._@-]"));
     }
-    keyring::save(&name, &value)?;
-    index_file::add(&app, &name)?;
+    keyring::save_secret(&name, &value)?;
+    index_file::add(&app, &name, index_file::Scope::Secret)?;
     Ok(())
 }
 
 #[tauri::command]
 async fn delete_secret(app: AppHandle, name: String) -> Result<(), String> {
-    keyring::delete(&name)?;
-    index_file::remove(&app, &name)?;
+    keyring::delete_secret(&name)?;
+    index_file::remove(&app, &name, index_file::Scope::Secret)?;
     Ok(())
 }
 
 #[tauri::command]
 async fn list_secrets(app: AppHandle) -> Result<Vec<KeychainInfoDto>, String> {
-    // 跟 list_api_keys 一样逻辑, 但复用同一个 DTO (provider_id 字段 = secret name)
-    let idx = index_file::load(&app);
+    // ADR-0023 P3-C: 独立 index file (keychain_secret_index.json) + 独立 service
+    //   (pi-agent-secret), 跟 list_api_keys 完全隔离, 不会返回 LLM apiKey 条目
+    let idx = index_file::load(&app, index_file::Scope::Secret);
     let mut out = Vec::with_capacity(idx.provider_ids.len());
     for id in idx.provider_ids {
         let (configured, preview) = match keyring::get(&id) {
@@ -271,12 +271,15 @@ async fn resolve_secrets(values: Vec<String>) -> Result<Vec<String>, String> {
     //   - 输出: 解析后的 values 列表, 跟输入 1:1 对应
     //   - 失败 (keychain 找不到): 返错误, 让 caller 决定是 fail-fast 还是 fallback
     //
+    // ADR-0023 P3-C (2026-08-24): 用 keyring::get_secret 走 SERVICE_SECRET 独立 keychain,
+    //   不会拿到 LLM apiKey (就算 user 配了同名 entry 也不行, 命名空间完全隔离)
+    //
     // 不在 keychain 引用 (没有 "keychain:" 前缀) 直接 pass-through
     const PREFIX: &str = "keychain:";
     let mut out = Vec::with_capacity(values.len());
     for v in values {
         if let Some(name) = v.strip_prefix(PREFIX) {
-            match keyring::get(name)? {
+            match keyring::get_secret(name)? {
                 Some(secret) => out.push(secret),
                 None => return Err(format!(
                     "keychain 引用 '{v}' 解析失败: 找不到 secret '{name}' (请在 Settings → Secrets 加)"
@@ -3162,7 +3165,7 @@ async fn migrate_from_env(app: AppHandle, env_path: Option<String>) -> Result<Mi
         let provider_id = format!("prov-{suffix}-1");
         match keyring::save(&provider_id, value) {
             Ok(()) => {
-                index_file::add(&app, &provider_id)?;
+                index_file::add(&app, &provider_id, index_file::Scope::Llm)?;
                 migrated.push(MigrationEntry {
                     env_var: key.to_string(),
                     provider_id: provider_id.clone(),

@@ -5,19 +5,26 @@
  * 走 OS 原生 keychain (Windows Credential Manager / macOS Keychain / Linux Secret Service)
  * 通过 keyring crate 调用.
  *
- * Service name:  "pi-agent"
- * Username:      provider.id (e.g. "prov-shangtang-1")
+ * Service name:  "pi-agent" (LLM apiKey) / "pi-agent-secret" (通用 secret, ADR-0023 P3-C)
+ * Username:      provider.id (e.g. "prov-shangtang-1") / secret name (e.g. "mcp-MiniMax-API_KEY")
  *
  * 跟 frontend 配合:
  *   - Settings UI 显示 "已配置" (有 key) / "未配置" (无 key)
  *   - 不显示 key 内容 (永远前端拿不到明文)
- *   - 保存时: invoke('save_api_key', { providerId, apiKey })
- *   - 删除时: invoke('delete_api_key', { providerId })
- *   - 列表:   invoke('list_api_keys') → ['prov-shangtang-1', ...]
+ *   - 保存时: invoke('save_api_key', { providerId, apiKey }) / invoke('save_secret', { name, value })
+ *   - 删除时: invoke('delete_api_key', { providerId }) / invoke('delete_secret', { name })
+ *   - 列表:   invoke('list_api_keys') / invoke('list_secrets') → 不同 service, 互不干扰
+ *
+ * ADR-0023 P3-C (2026-08-24): 加 P3-C 之后, 通用 secret 用独立 service "pi-agent-secret"
+ *   跟 LLM apiKey 完全隔离, list API 不会混. 命名规范: mcp-<server>-<field> /
+ *   external-<tool>-<field> / 或 user 自取 (只要 [A-Za-z0-9._@-] 1-128 char).
  */
 use keyring::Entry;
 
-const SERVICE: &str = "pi-agent";
+/// 默认 service: LLM apiKey 用 (历史 + UX 原因, Provider tab 单独管)
+pub const SERVICE_LLM: &str = "pi-agent";
+/// 通用 secret service: MCP / external tool env 用 (P3-C 引入, 跟 LLM 隔离)
+pub const SERVICE_SECRET: &str = "pi-agent-secret";
 
 // R5: 严格化 mask — 只显示前 2 字符 (provider prefix, e.g. "sk") + "..." + 后 4 字符
 // 之前 4+4=8 字符对短 key 暴露比例偏高, 改为更保守
@@ -28,15 +35,21 @@ pub fn mask(key: &str) -> String {
     format!("{}...{}", &key[..2], &key[key.len() - 4..])
 }
 
+// ====== 内部 helper: 任意 service 走 Entry ======
+fn entry(service: &str, user: &str) -> Result<Entry, String> {
+    Entry::new(service, user).map_err(|e| format!("keychain new({service}:{user}): {e}"))
+}
+
+// ====== LLM apiKey 专用 API (backward compat, 跟 v0.3 设计一致) ======
 pub fn save(provider_id: &str, api_key: &str) -> Result<(), String> {
-    let entry = Entry::new(SERVICE, provider_id).map_err(|e| format!("keychain new: {e}"))?;
-    entry.set_password(api_key).map_err(|e| format!("keychain set: {e}"))?;
+    let e = entry(SERVICE_LLM, provider_id)?;
+    e.set_password(api_key).map_err(|e| format!("keychain set: {e}"))?;
     Ok(())
 }
 
 pub fn get(provider_id: &str) -> Result<Option<String>, String> {
-    let entry = Entry::new(SERVICE, provider_id).map_err(|e| format!("keychain new: {e}"))?;
-    match entry.get_password() {
+    let e = entry(SERVICE_LLM, provider_id)?;
+    match e.get_password() {
         Ok(pw) => Ok(Some(pw)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(format!("keychain get: {e}")),
@@ -44,10 +57,35 @@ pub fn get(provider_id: &str) -> Result<Option<String>, String> {
 }
 
 pub fn delete(provider_id: &str) -> Result<(), String> {
-    let entry = Entry::new(SERVICE, provider_id).map_err(|e| format!("keychain new: {e}"))?;
-    match entry.delete_credential() {
+    let e = entry(SERVICE_LLM, provider_id)?;
+    match e.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()), // already gone
         Err(e) => Err(format!("keychain delete: {e}")),
+    }
+}
+
+// ====== ADR-0023 P3-C: 通用 secret API (MCP / external tool env 用) ======
+pub fn save_secret(name: &str, value: &str) -> Result<(), String> {
+    let e = entry(SERVICE_SECRET, name)?;
+    e.set_password(value).map_err(|e| format!("keychain set_secret: {e}"))?;
+    Ok(())
+}
+
+pub fn get_secret(name: &str) -> Result<Option<String>, String> {
+    let e = entry(SERVICE_SECRET, name)?;
+    match e.get_password() {
+        Ok(pw) => Ok(Some(pw)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("keychain get_secret: {e}")),
+    }
+}
+
+pub fn delete_secret(name: &str) -> Result<(), String> {
+    let e = entry(SERVICE_SECRET, name)?;
+    match e.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()), // already gone
+        Err(e) => Err(format!("keychain delete_secret: {e}")),
     }
 }
