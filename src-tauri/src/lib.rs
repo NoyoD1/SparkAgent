@@ -247,10 +247,12 @@ async fn delete_secret(app: AppHandle, name: String) -> Result<(), String> {
 async fn list_secrets(app: AppHandle) -> Result<Vec<KeychainInfoDto>, String> {
     // ADR-0023 P3-C: 独立 index file (keychain_secret_index.json) + 独立 service
     //   (pi-agent-secret), 跟 list_api_keys 完全隔离, 不会返回 LLM apiKey 条目
+    // BUG FIX v3.14: 之前用 keyring::get (走 LLM service), 跟 save_secret 跨服务,
+    //   导致 list 显示 "(keychain) 找不到" 但实际 secret 已存. 改用 get_secret.
     let idx = index_file::load(&app, index_file::Scope::Secret);
     let mut out = Vec::with_capacity(idx.provider_ids.len());
     for id in idx.provider_ids {
-        let (configured, preview) = match keyring::get(&id) {
+        let (configured, preview) = match keyring::get_secret(&id) {
             Ok(Some(k)) => (true, Some(crate::keyring::mask(&k))),
             Ok(None) => (false, None),
             Err(_) => (false, None),
