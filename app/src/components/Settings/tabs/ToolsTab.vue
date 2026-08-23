@@ -29,6 +29,8 @@ import {
 } from '@/stores/userTools';
 import { useSessionStore } from '@/stores/session';
 import { useExtensionToolsStore } from '@/stores/extensionTools';
+import { piTauri } from '@/lib/tauri';
+import { pickFile, pickSavePath } from '@/lib/dialog';
 
 const userToolsStore = useUserToolsStore();
 const extensionToolsStore = useExtensionToolsStore();
@@ -129,6 +131,100 @@ function refreshExtension() {
     sessionStore.activeWorkspace?.path ?? null,
     null,  // agentDir 暂不传, 跟 user tool / MCP server 一致只扫 workspace
   );
+}
+
+// ====== ADR-0023 P3-D Phase 2: 工具导入导出 ======
+//  - user tool: 单 JSON in/out
+//  - external tool: ZIP in/out
+//  - FE 用 @tauri-apps/plugin-dialog 选文件路径, Rust 负责实际读写
+//  - 完成后弹 toast + 触发 P3-A 静默重启
+async function importUserToolDialog() {
+  const file = await pickFile({
+    title: '选择 user tool JSON 文件',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (!file || typeof file !== 'string') return;
+  // 默认写到 workspace scope (跟 user tools 列表行为一致)
+  const targetScope: 'workspace' | 'global' = sessionStore.activeWorkspace?.path
+    ? 'workspace' : 'global';
+  try {
+    const written = await piTauri.importUserTool(
+      targetScope,
+      file,
+      sessionStore.activeWorkspace?.path ?? null,
+      null,  // agentDir 暂不传
+    );
+    toast.value = { type: 'ok', message: `已导入: ${written}` };
+    await userToolsStore.refresh();
+    void piTauri.restartAllSidecars('user_tool_changed');
+  } catch (e) {
+    toast.value = { type: 'fail', message: `导入失败: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+async function importExternalToolDialog() {
+  const file = await pickFile({
+    title: '选择 external tool ZIP 文件',
+    filters: [{ name: 'ZIP', extensions: ['zip'] }],
+  });
+  if (!file || typeof file !== 'string') return;
+  const targetScope: 'workspace' | 'global' = sessionStore.activeWorkspace?.path
+    ? 'workspace' : 'global';
+  try {
+    const written = await piTauri.importExternalTool(
+      targetScope,
+      file,
+      sessionStore.activeWorkspace?.path ?? null,
+      null,
+    );
+    toast.value = { type: 'ok', message: `已导入: ${written}` };
+    refreshExtension();
+    void piTauri.restartAllSidecars('external_tool_changed');
+  } catch (e) {
+    toast.value = { type: 'fail', message: `导入失败: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+async function exportUserToolDialog(name: string) {
+  const target = await pickSavePath({
+    title: `导出 user tool "${name}"`,
+    defaultPath: `${name}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (!target) return;
+  try {
+    const written = await piTauri.exportUserTool(
+      'workspace',  // 暂只支持 workspace scope (跟 store 一致)
+      name,
+      target,
+      sessionStore.activeWorkspace?.path ?? null,
+      null,
+    );
+    toast.value = { type: 'ok', message: `已导出到: ${written}` };
+  } catch (e) {
+    toast.value = { type: 'fail', message: `导出失败: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+async function exportExternalToolDialog(name: string) {
+  const target = await pickSavePath({
+    title: `导出 external tool "${name}"`,
+    defaultPath: `${name}.zip`,
+    filters: [{ name: 'ZIP', extensions: ['zip'] }],
+  });
+  if (!target) return;
+  try {
+    const written = await piTauri.exportExternalTool(
+      'workspace',
+      name,
+      target,
+      sessionStore.activeWorkspace?.path ?? null,
+      null,
+    );
+    toast.value = { type: 'ok', message: `已导出到: ${written}` };
+  } catch (e) {
+    toast.value = { type: 'fail', message: `导出失败: ${e instanceof Error ? e.message : String(e)}` };
+  }
 }
 </script>
 
@@ -259,6 +355,14 @@ function refreshExtension() {
         <Wrench :size="14" :stroke-width="1.75" />
         <span>User Tools ({{ tools.length }})</span>
         <button
+          class="pad-toolstab__btn pad-toolstab__btn--ghost"
+          title="从 JSON 文件导入 user tool"
+          @click="importUserToolDialog"
+        >
+          <Plus :size="12" :stroke-width="2" />
+          <span>导入</span>
+        </button>
+        <button
           v-if="!loading && tools.length > 0"
           class="pad-toolstab__btn"
           @click="userToolsStore.refresh()"
@@ -276,6 +380,14 @@ function refreshExtension() {
         <Globe :size="14" :stroke-width="1.75" />
         <span>Extension Tools ({{ allExtensionTools.length }})</span>
         <span class="pad-toolstab__hint-inline">嫁接 (browser + external tool), 可启停</span>
+        <button
+          class="pad-toolstab__btn pad-toolstab__btn--ghost"
+          title="从 ZIP 文件导入 external tool"
+          @click="importExternalToolDialog"
+        >
+          <Plus :size="12" :stroke-width="2" />
+          <span>导入</span>
+        </button>
         <button
           class="pad-toolstab__btn pad-toolstab__btn--ghost"
           type="button"
@@ -319,6 +431,15 @@ function refreshExtension() {
             </div>
             <div class="pad-toolstab__builtin-label">{{ t.label }} — {{ t.description }}</div>
           </div>
+          <!-- v3-D Phase 2: external tool 卡片有 export 按钮 (ZIP 导出) -->
+          <button
+            v-if="t.source === 'external'"
+            class="pad-toolstab__btn pad-toolstab__btn--ghost pad-toolstab__btn--sm"
+            :title="`导出 ${t.name} 到 ZIP`"
+            @click="exportExternalToolDialog(t.name)"
+          >
+            <Save :size="12" :stroke-width="1.75" />
+          </button>
           <button
             class="pad-toolstab__toggle"
             :class="{ 'is-on': extensionToolsStore.isEnabled(t.name) }"
@@ -351,6 +472,13 @@ function refreshExtension() {
             <div class="pad-toolstab__item-desc">{{ t.description }}</div>
           </div>
           <div class="pad-toolstab__item-actions">
+            <button
+              class="pad-toolstab__btn"
+              :title="`导出 ${t.name} 到 JSON`"
+              @click="exportUserToolDialog(t.name)"
+            >
+              <Save :size="13" :stroke-width="1.75" />
+            </button>
             <button
               class="pad-toolstab__btn pad-toolstab__btn--danger"
               title="删除"

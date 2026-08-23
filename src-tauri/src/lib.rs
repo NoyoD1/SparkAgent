@@ -2425,6 +2425,230 @@ async fn delete_user_tool(args: ReadDeleteUserToolArgs) -> Result<bool, String> 
     Ok(true)
 }
 
+// ====== ADR-0023 P3-D Phase 2 (2026-08-24): 工具导入导出 ======
+//   - user tool: 单 JSON in/out (跟 McpTab 的 import JSON 流程一致, 走 dialog 选文件)
+//   - external tool: ZIP in/out (manifest.json + entry + 依赖, 多文件)
+//   触发: import 完后 P3-A 静默重启让新 tool 立刻生效
+
+#[tauri::command]
+async fn export_user_tool(
+    scope: String,
+    name: String,
+    target_path: String,
+    workspace_path: Option<String>,
+    agent_dir: Option<String>,
+) -> Result<String, String> {
+    // 1. 读源 file
+    let dir = resolve_user_tools_dir(&scope, workspace_path, agent_dir)?;
+    let src = dir.join(format!("{}.json", name));
+    if !src.exists() {
+        return Err(format!("user tool '{}' (scope={}) 不存在", name, scope));
+    }
+    let body = std::fs::read_to_string(&src)
+        .map_err(|e| format!("read {}: {}", src.display(), e))?;
+    // 2. 写 target_path (FE 选好的 save 路径)
+    let target = std::path::PathBuf::from(&target_path);
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create_dir_all({}): {}", parent.display(), e))?;
+        }
+    }
+    std::fs::write(&target, body.as_bytes())
+        .map_err(|e| format!("write {}: {}", target.display(), e))?;
+    debug_log(&format!("export_user_tool: {} -> {}", src.display(), target.display()));
+    Ok(target.display().to_string())
+}
+
+#[tauri::command]
+async fn import_user_tool(
+    scope: String,
+    source_path: String,
+    workspace_path: Option<String>,
+    agent_dir: Option<String>,
+) -> Result<String, String> {
+    // 1. 读 source
+    let src = std::path::PathBuf::from(&source_path);
+    if !src.exists() {
+        return Err(format!("source 文件 '{}' 不存在", src.display()));
+    }
+    let body = std::fs::read_to_string(&src)
+        .map_err(|e| format!("read {}: {}", src.display(), e))?;
+    // 2. 解析 + 校验 (走 write_user_tool 的相同校验, 复用逻辑)
+    //   这里重新 parse, 不调用 write_user_tool 因为后者需要 args struct, 还要走 invoke handler
+    //   直接本地校验 + 直接写 file 更直接 (FE 已经传了 scope + name)
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("imported 文件不是合法 JSON: {}", e))?;
+    let obj = parsed.as_object()
+        .ok_or("imported 文件顶层必须是 JSON object")?;
+    let name = obj.get("name").and_then(|v| v.as_str())
+        .ok_or("imported 文件缺 'name' 字段")?
+        .to_string();
+    // 走跟 write_user_tool 一样的全套校验 (含 basedOn / builtin 不重 / 1-64 char)
+    let _ = parse_user_tool_name(&name)?;
+    validate_user_tool_body(&body)?;
+    // 3. 写目标 dir
+    let dir = resolve_user_tools_dir(&scope, workspace_path, agent_dir)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create_dir_all({}): {}", dir.display(), e))?;
+    let dst = dir.join(format!("{}.json", name));
+    if dst.exists() {
+        return Err(format!("user tool '{}' (scope={}) 已存在, 请先删除再 import", name, scope));
+    }
+    std::fs::write(&dst, body.as_bytes())
+        .map_err(|e| format!("write {}: {}", dst.display(), e))?;
+    invalidate_ref_body_cache(&format!("tool:{}:{}", scope, name));
+    debug_log(&format!("import_user_tool: {} -> {}", src.display(), dst.display()));
+    Ok(dst.display().to_string())
+}
+
+#[tauri::command]
+async fn export_external_tool(
+    scope: String,
+    name: String,
+    target_path: String,
+    workspace_path: Option<String>,
+    agent_dir: Option<String>,
+) -> Result<String, String> {
+    use std::io::Write;
+    // 1. 找源 dir
+    let base = if scope == "global" {
+        agent_dir.clone().ok_or("global scope 需要 agent_dir")?
+    } else {
+        workspace_path.clone().ok_or("workspace scope 需要 workspace_path")?
+    };
+    let src_dir = std::path::PathBuf::from(&base)
+        .join(if scope == "global" { "tools/external" } else { ".pi/tools/external" });
+    let tool_dir = src_dir.join(&name);
+    if !tool_dir.is_dir() {
+        return Err(format!("external tool '{}' (scope={}) 不存在 (dir={})", name, scope, tool_dir.display()));
+    }
+    // 2. 创建 zip file, 递归 walk tool_dir
+    let target = std::path::PathBuf::from(&target_path);
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create_dir_all({}): {}", parent.display(), e))?;
+        }
+    }
+    let file = std::fs::File::create(&target)
+        .map_err(|e| format!("create {}: {}", target.display(), e))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    // 递归添加文件
+    fn add_dir_to_zip(
+        zip: &mut zip::ZipWriter<std::fs::File>,
+        prefix: &std::path::Path,
+        base: &std::path::Path,
+        options: &zip::write::SimpleFileOptions,
+    ) -> Result<(), String> {
+        for entry in std::fs::read_dir(base).map_err(|e| format!("read_dir({}): {}", base.display(), e))? {
+            let entry = entry.map_err(|e| format!("dir entry: {}", e))?;
+            let p = entry.path();
+            let rel = p.strip_prefix(prefix).map_err(|e| format!("strip_prefix: {}", e))?;
+            if p.is_dir() {
+                zip.add_directory(rel.to_string_lossy().as_ref(), *options)
+                    .map_err(|e| format!("zip add_dir: {}", e))?;
+                add_dir_to_zip(zip, prefix, &p, options)?;
+            } else if p.is_file() {
+                zip.start_file(rel.to_string_lossy().as_ref(), *options)
+                    .map_err(|e| format!("zip start_file: {}", e))?;
+                let mut f = std::fs::File::open(&p)
+                    .map_err(|e| format!("open {}: {}", p.display(), e))?;
+                std::io::copy(&mut f, zip).map_err(|e| format!("zip copy: {}", e))?;
+            }
+        }
+        Ok(())
+    }
+    add_dir_to_zip(&mut zip, &tool_dir, &tool_dir, &options)?;
+    zip.finish().map_err(|e| format!("zip finish: {}", e))?;
+    debug_log(&format!("export_external_tool: {} -> {}", tool_dir.display(), target.display()));
+    Ok(target.display().to_string())
+}
+
+#[tauri::command]
+async fn import_external_tool(
+    scope: String,
+    source_path: String,
+    workspace_path: Option<String>,
+    agent_dir: Option<String>,
+) -> Result<String, String> {
+    use std::io::Read;
+    // 1. 找目标 dir (跟 export 同源位置)
+    let base = if scope == "global" {
+        agent_dir.clone().ok_or("global scope 需要 agent_dir")?
+    } else {
+        workspace_path.clone().ok_or("workspace scope 需要 workspace_path")?
+    };
+    let base_dir = std::path::PathBuf::from(&base)
+        .join(if scope == "global" { "tools/external" } else { ".pi/tools/external" });
+    // 2. 打开 zip 找 manifest.json
+    let src = std::path::PathBuf::from(&source_path);
+    if !src.exists() {
+        return Err(format!("source 文件 '{}' 不存在", src.display()));
+    }
+    let file = std::fs::File::open(&src)
+        .map_err(|e| format!("open {}: {}", src.display(), e))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| format!("zip open: {}", e))?;
+    // 2.1 找 manifest.json 拿 name (跟 export 时一样, 顶层 entry)
+    let mut manifest_content: Option<String> = None;
+    for i in 0..zip.len() {
+        let entry = zip.by_index(i).map_err(|e| format!("zip entry: {}", e))?;
+        if entry.is_file() && entry.name() == "manifest.json" {
+            let mut e = entry;
+            let mut s = String::new();
+            e.read_to_string(&mut s)
+                .map_err(|e| format!("read manifest: {}", e))?;
+            manifest_content = Some(s);
+            break;
+        }
+    }
+    let manifest_content = manifest_content
+        .ok_or("zip 里找不到 manifest.json, 不是合法的 external tool 包")?;
+    // 2.2 解析 manifest 拿 name
+    let parsed: serde_json::Value = serde_json::from_str(&manifest_content)
+        .map_err(|e| format!("manifest 不是合法 JSON: {}", e))?;
+    let tool_name = parsed.get("name").and_then(|v| v.as_str())
+        .ok_or("manifest 缺 'name' 字段")?
+        .to_string();
+    // 2.3 目标 dir (跟 export 时一样, 顶层是 name/)
+    let target_dir = base_dir.join(&tool_name);
+    if target_dir.exists() {
+        return Err(format!("external tool '{}' (scope={}) 已存在, 请先删除再 import", tool_name, scope));
+    }
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("create_dir_all({}): {}", target_dir.display(), e))?;
+    // 2.4 解压所有 entry 到 target_dir
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| format!("zip entry: {}", e))?;
+        let entry_name = entry.name().to_string();
+        // 防止 zip slip: 拒绝包含 ".." 或绝对路径的 entry
+        if entry_name.contains("..") || entry_name.starts_with('/') || entry_name.contains(':') {
+            debug_log(&format!("import_external_tool: skip unsafe entry '{}'", entry_name));
+            continue;
+        }
+        let out_path = target_dir.join(&entry_name);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path)
+                .map_err(|e| format!("mkdir {}: {}", out_path.display(), e))?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+            }
+            let mut out = std::fs::File::create(&out_path)
+                .map_err(|e| format!("create {}: {}", out_path.display(), e))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|e| format!("write {}: {}", out_path.display(), e))?;
+        }
+    }
+    debug_log(&format!("import_external_tool: {} -> {}", src.display(), target_dir.display()));
+    Ok(target_dir.display().to_string())
+}
+
 // ====== 2026-08-21 v0.6.3-rc1 P2-1: MCP server 配置 CRUD ======
 //   跟 P1-5 user tool 同 pattern: 两层 scope (workspace + global, workspace 优先)
 //     - workspace: <workspacePath>/.pi/mcp/<name>.json
@@ -4375,6 +4599,11 @@ pub fn run() {
             resolve_secrets,
             // ADR-0023 P3-D: 列出 external tool 文件夹, 给 FE Tools tab 展示 + 导入导出用
             list_external_tools,
+            // ADR-0023 P3-D Phase 2: 工具导入导出 (user tool JSON / external tool ZIP)
+            export_user_tool,
+            import_user_tool,
+            export_external_tool,
+            import_external_tool,
             fetch_provider_models,
             verify_provider_connection,  // P0 #1: 测试连接按钮
             // ADR-0022: WebView2 内嵌浏览器 (Tauri WebviewWindow, 走 reverse RPC)

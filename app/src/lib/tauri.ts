@@ -701,6 +701,70 @@ class PiTauriClient {
     }>;
   }
 
+  // ====== ADR-0023 P3-D Phase 2 (2026-08-24): 工具导入导出 ======
+  //   - user tool: 单 JSON in/out (FE 选 save/load 路径, Rust 读 + 写)
+  //   - external tool: ZIP in/out (manifest + entry + 依赖, 多文件)
+  //   - import 完返回 写入路径, FE 提示 + 触发 P3-A 静默重启
+  async exportUserTool(
+    scope: 'workspace' | 'global',
+    name: string,
+    targetPath: string,
+    workspacePath: string | null,
+    agentDir: string | null,
+  ): Promise<string> {
+    return (await invoke('export_user_tool', {
+      scope,
+      name,
+      targetPath,
+      workspacePath,
+      agentDir,
+    })) as string;
+  }
+
+  async importUserTool(
+    scope: 'workspace' | 'global',
+    sourcePath: string,
+    workspacePath: string | null,
+    agentDir: string | null,
+  ): Promise<string> {
+    return (await invoke('import_user_tool', {
+      scope,
+      sourcePath,
+      workspacePath,
+      agentDir,
+    })) as string;
+  }
+
+  async exportExternalTool(
+    scope: 'workspace' | 'global',
+    name: string,
+    targetPath: string,
+    workspacePath: string | null,
+    agentDir: string | null,
+  ): Promise<string> {
+    return (await invoke('export_external_tool', {
+      scope,
+      name,
+      targetPath,
+      workspacePath,
+      agentDir,
+    })) as string;
+  }
+
+  async importExternalTool(
+    scope: 'workspace' | 'global',
+    sourcePath: string,
+    workspacePath: string | null,
+    agentDir: string | null,
+  ): Promise<string> {
+    return (await invoke('import_external_tool', {
+      scope,
+      sourcePath,
+      workspacePath,
+      agentDir,
+    })) as string;
+  }
+
   // ====== v0.4.4.6 Skills list (FE 主动拉) ======
   // 之前 v0.4.4.x sidecar 启动时 emit skills_snapshot 一次, 写完 skill 后 UI 不刷新
   // 修法: Tauri 端 list_skills 走 std::fs::read_dir 扫两个目录 (workspace + global),
