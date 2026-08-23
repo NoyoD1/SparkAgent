@@ -521,6 +521,53 @@ async fn read_text_file_preview(path: String, max_lines: usize) -> Result<String
     Ok(lines.join("\n"))
 }
 
+// ADR-0022 v3.9: 从 savedPath 重新读图片, 转 base64 给 useAttachmentPreview
+//   场景: user 重开 session, message.images[].data (in-memory) 已丢, 但 savedPath 还在
+//         click thumbnail 触发这个 command, 拿到完整 base64 后开大图预览
+//   跟 read_text_file_preview 配对, 都是"reload 持久化附件"用
+#[tauri::command]
+async fn read_image_as_data_url(path: String) -> Result<ImageContent, String> {
+    if path.is_empty() {
+        return Err("path is empty".to_string());
+    }
+    // 推断 mime from 扩展名 (image/png, image/jpeg, image/gif, image/webp)
+    let mime = match std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => "application/octet-stream",
+    };
+    // 限制文件大小防止 OOM (image 一般 10MB 以内, 给 50MB 缓冲)
+    const MAX_BYTES: u64 = 50 * 1024 * 1024;
+    let path_clone = path.clone();
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let meta = std::fs::metadata(&path_clone).map_err(|e| format!("stat {path_clone}: {e}"))?;
+        if meta.len() > MAX_BYTES {
+            return Err(format!(
+                "image too large: {} bytes (max {} MB)",
+                meta.len(),
+                MAX_BYTES / 1024 / 1024
+            ));
+        }
+        std::fs::read(&path_clone).map_err(|e| format!("read {path_clone}: {e}"))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {e}"))??;
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(ImageContent {
+        kind: "image".into(),
+        data,
+        mime_type: mime.into(),
+    })
+}
+
 // 简单随机 u32 (基于 SystemTime nanos 抖动, 不需要 crypto-grade, 只是 filename 防冲突)
 fn rand_u32() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -4052,6 +4099,8 @@ pub fn run() {
             save_uploaded_file,
             // ADR-0022 v3.8: 文件预览 (读 text 前 N 行, 给 useAttachmentPreview 用)
             read_text_file_preview,
+            // ADR-0022 v3.9: 从 savedPath 重读图片 base64 (reload 后 image 预览)
+            read_image_as_data_url,
             compact_session,  // Bug #2 修 (2026-08-18): 独立 compact invoke
             kill_sidecar,  // v0.4.6 修 (2026-08-18): abort 兜底时 force kill 旧 sidecar
             fetch_provider_models,

@@ -475,6 +475,26 @@ class PiTauriClient {
   }
 
   /**
+   * ADR-0022 v3.9: 从 savedPath 重读图片, 转 ImageContent (base64 + mime)
+   *   - 给 useAttachmentPreview.openImageFromPath 用
+   *   - 场景: user 重开 session, message.images[].data (in-memory) 已被 sanitize 剥掉,
+   *           click thumbnail 触发这个, 拿完整 base64 开大图
+   *   - Rust 端限 50MB 防 OOM
+   */
+  async readImageAsDataUrl(path: string): Promise<{ data: string; mimeType: string }> {
+    try {
+      const result = await invoke<{ kind: string; data: string; mimeType: string }>(
+        'read_image_as_data_url',
+        { path },
+      );
+      return { data: result.data, mimeType: result.mimeType };
+    } catch (e) {
+      console.error('[pi-tauri] readImageAsDataUrl FAILED', e);
+      throw e;
+    }
+  }
+
+  /**
    * ADR-0022 v3 (2026-08-23): FE 顶部 URL bar 主动导航 (不依赖 agent)
    * 跟 sidecar 调 web_navigate 一样的 URL 校验, 但不返回 text (user 视觉可见 webview)
    */

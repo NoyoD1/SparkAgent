@@ -61,8 +61,10 @@ interface SessionFile {
   count: number;
   /** user-image: mimeType (image/png); user-file: mimeType (text/plain, ...); tool-file: 不用 */
   mimeType?: string;
-  /** user-image: base64; user-file: undefined; tool-file: undefined */
+  /** user-image: in-memory base64; reload 后变 undefined. click 优先用 */
   base64?: string;
+  /** user-image: 200x200 JPEG thumbnail base64, 持久化. 用于缩略图 icon */
+  thumbnail?: string;
   /** user-image/file: 字节数 */
   bytes?: number;
 }
@@ -103,25 +105,28 @@ const sessionFiles = computed<SessionFile[]>(() => {
   for (const m of messages) {
     if (m.role !== 'user') continue;
     // 2a) images (用全局 idx 编号, 跨 message 累计, 避免不同 message 的 image 撞 key)
+    //   v3.9: image 持久化后只剩 thumbnail + savedPath, in-memory data 没了
+    //   按 savedPath dedupe (而不是合成 key), 这样 reload 后还是同一张图
     for (let i = 0; i < (m.images?.length ?? 0); i++) {
       const img = m.images![i];
-      // user 上传的 image: 用合成 key (`<image 0>`) 避免跟 user-file path 冲突
-      //  (image 没存盘路径, Pi SDK images[] 是 in-memory base64)
-      const path = `<image ${globalImageIdx}>`;
+      // dedupe key: 优先 savedPath (持久化稳定), fallback 合成 key (in-memory 边界)
+      const key = img.savedPath || `<image-${globalImageIdx}>`;
       globalImageIdx += 1;
       const mimeType = img.mimeType || 'image';
       // 显示名: "图片 1 (png)" 风格, 比单显示 "png" 更明确
       const name = `图片 ${globalImageIdx} (${mimeType.replace('image/', '') || 'image'})`;
-      if (!userByPath.has(path)) {
-        userByPath.set(path, {
+      if (!userByPath.has(key)) {
+        userByPath.set(key, {
           kind: 'user-image',
-          path,
+          // path 字段: 用 savedPath (click 预览用), 没 savedPath 就用合成 key
+          path: img.savedPath || key,
           name,
           toolName: '上传',
           status: 'success',
           count: 1,
           mimeType: img.mimeType,
-          base64: img.data,
+          base64: img.data,  // in-memory only, reload 后变 undefined
+          thumbnail: img.thumbnail,  // 持久化, 给缩略图 icon 用
         });
       }
     }
@@ -169,8 +174,16 @@ const fileStatusClass = (f: SessionFile) => {
 function onEntryClick(f: SessionFile) {
   import('@/composables/useAttachmentPreview').then(({ useAttachmentPreview }) => {
     const ap = useAttachmentPreview();
-    if (f.kind === 'user-image' && f.base64) {
-      ap.openImage({ data: f.base64, mimeType: f.mimeType || 'image/png' });
+    if (f.kind === 'user-image') {
+      // v3.9: 优先 in-memory data, 否则从 savedPath 重读 (reload 后场景)
+      if (f.base64) {
+        ap.openImage({ data: f.base64, mimeType: f.mimeType || 'image/png' });
+      } else if (f.path && !f.path.startsWith('<image')) {
+        // savedPath 是绝对路径 (不是合成 key) → 走 Tauri command 重读
+        void ap.openImageFromPath(f.path);
+      } else {
+        console.warn('[TaskDrawer] image 既无 data 也无 savedPath, 无法预览');
+      }
     } else if (f.kind === 'user-file') {
       void ap.openFile({
         path: f.path,
@@ -265,7 +278,17 @@ function formatBytes(b: number): string {
               :title="f.kind === 'user-image' ? `点击预览图片 (${f.mimeType || 'image'})` : f.path"
               @click="onEntryClick(f)"
             >
-              <div class="pad-drawer__file-icon">
+              <!-- v3.9: user-image 有 thumbnail 就渲染小图, 否则回退到 icon -->
+              <div
+                v-if="f.kind === 'user-image' && f.thumbnail"
+                class="pad-drawer__file-thumb"
+              >
+                <img
+                  :src="`data:image/jpeg;base64,${f.thumbnail}`"
+                  :alt="f.name"
+                />
+              </div>
+              <div v-else class="pad-drawer__file-icon">
                 <component :is="fileStatusIcon(f)" :size="14" :stroke-width="1.75" />
               </div>
               <div class="pad-drawer__file-body">
@@ -495,6 +518,21 @@ function formatBytes(b: number): string {
   justify-content: center;
   color: var(--pad-fg-tertiary);
   border-radius: var(--pad-radius-sm);
+}
+/* v3.9: user-image 的 thumbnail 缩略图, 24x24 跟 icon 视觉一致 */
+.pad-drawer__file-thumb {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--pad-radius-sm);
+  overflow: hidden;
+  background: var(--pad-muted);
+}
+.pad-drawer__file-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 .pad-drawer__file-item.is-success .pad-drawer__file-icon {
   color: var(--pad-success, #16a34a);

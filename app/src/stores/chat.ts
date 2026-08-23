@@ -53,7 +53,10 @@ function loadFromStorage(): Record<string, SessionChatData> {
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null) return {};
-    return parsed as Record<string, SessionChatData>;
+    const data = parsed as Record<string, SessionChatData>;
+    // ADR-0022 v3.9: 升级路径 — 旧 localStorage 可能有 base64, load 时也剥掉
+    //   跟 save 一样 sanitize, 避免 reload 后旧 base64 还在 quota 里撑着
+    return sanitizeForStorage(data);
   } catch {
     return {};
   }
@@ -61,10 +64,40 @@ function loadFromStorage(): Record<string, SessionChatData> {
 
 function saveToStorage(data: Record<string, SessionChatData>) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    // ADR-0022 v3.9: 持久化前 strip image 的 in-memory base64
+    //   防止 localStorage quota (5MB) 被图片撑爆, 之前一发送图片就 QuotaExceededError
+    //   base64 在 reload 后会丢失, 但 savedPath + thumbnail 还在 — click preview 时从 savedPath 重读
+    const sanitized = sanitizeForStorage(data);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized));
   } catch (e) {
     console.warn('[chat] localStorage save failed', e);
   }
+}
+
+/**
+ * 深拷贝 + 剥掉 message.images[].data (in-memory base64)
+ * 其余字段全部保留, 包括 images 的 savedPath / thumbnail / mimeType / bytes
+ */
+function sanitizeForStorage(data: Record<string, SessionChatData>): Record<string, SessionChatData> {
+  const out: Record<string, SessionChatData> = {};
+  for (const [k, v] of Object.entries(data)) {
+    out[k] = {
+      messages: v.messages.map((m) => {
+        if (!m.images || m.images.length === 0) return m;
+        return {
+          ...m,
+          images: m.images.map((img) => {
+            // 保留所有持久化字段, 只丢 in-memory data
+            const { data: _data, ...rest } = img;
+            return rest;
+          }),
+        };
+      }),
+      thinking: v.thinking,
+      toolCalls: v.toolCalls,
+    };
+  }
+  return out;
 }
 
 function genMessageId(role: 'u' | 'a'): string {
@@ -914,11 +947,12 @@ export const useChatStore = defineStore('chat', () => {
   //   当 user 用 quote 功能发消息时, quoteContent 存原始引用文本 (没 `> ` 前缀)
   //   给 ChatMessage 渲染 user 气泡时用 (引用部分 blockquote 样式可视化)
   // v0.6+ ADR-0022 v3.7: 加 images / files 字段, 渲染 user 气泡里的图片缩略图 + file chip
+  // v3.9: images 改用 MessageImage schema (savedPath + thumbnail + in-memory data)
   function appendUserMessage(
     sessionId: string,
     content: string,
     quoteContent: string | null = null,
-    images?: Array<{ data: string; mimeType: string }>,
+    images?: import('@/lib/mock/types').MessageImage[],
     files?: Array<{ path: string; filename: string; mimeType: string; bytes: number }>,
   ) {
     const d = getSessionData(sessionId);
@@ -1073,8 +1107,18 @@ export const useChatStore = defineStore('chat', () => {
     if (attachmentFileTags) {
       llmText = llmText ? `${llmText}\n\n${attachmentFileTags}` : attachmentFileTags;
     }
-    // ADR-0022 v3.7: 把 images + files 也存到 user message, 渲染 user 气泡里的
+    // ADR-0022 v3.7+v3.9: 把 images + files 也存到 user message, 渲染 user 气泡里的
     //   图片缩略图 / file chip (跟 sidebar file-ref chip 类似视觉)
+    //   v3.9: image 存 MessageImage 全字段 (savedPath + thumbnail + data),
+    //         data 在持久化时会被 sanitizeForStorage 剥掉, reload 后变 undefined
+    //         但 savedPath + thumbnail 还在 — click preview 时从 savedPath 重读
+    const attachmentImagesForMsg = attachmentsStore.pendingImages.map((img) => ({
+      mimeType: img.mimeType,
+      bytes: img.bytes,
+      savedPath: img.savedPath,
+      thumbnail: img.thumbnail,
+      data: img.base64,  // in-memory, sendPrompt 走 Pi SDK images[] 用同一份 base64
+    }));
     const attachmentFilesForMsg = attachmentsStore.pendingFiles.map((f) => ({
       path: f.path,
       filename: f.filename,
@@ -1094,7 +1138,7 @@ export const useChatStore = defineStore('chat', () => {
       sessionId,
       fullUserText,
       quoteContent,
-      attachmentImages,
+      attachmentImagesForMsg,
       attachmentFilesForMsg,
     );
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: true };

@@ -437,6 +437,7 @@ function formatBytes(b: number): string {
 //  - openImage 直接 set state; openFile 走 spawn_blocking 读 text 前 200 行
 function openAttachmentPreviewImage(img: PendingImage) {
   import('@/composables/useAttachmentPreview').then(({ useAttachmentPreview }) => {
+    // v3.9: composer 里 img.base64 一定在 (in-memory), 走 openImage 直接 set
     useAttachmentPreview().openImage({ data: img.base64, mimeType: img.mimeType });
   });
 }

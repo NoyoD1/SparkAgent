@@ -42,17 +42,36 @@ export interface MessageUsage {
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
 
+/**
+ * ADR-0022 v3.9 (2026-08-23): image schema 改造
+ *   - data (full base64) 改成 in-memory only, 不持久化 (避免 localStorage quota + 413)
+ *   - 持久化字段: mimeType, bytes, savedPath, thumbnail
+ *     - savedPath: Tauri upload 后的绝对路径, 重开 session 时从这里再读完整图
+ *     - thumbnail: 200x200 JPEG base64 (~10-30KB), 用于消息气泡缩略图渲染
+ *   - reload 后 data = undefined, 点击 thumbnail 走 useAttachmentPreview.openImageFromPath
+ *     从 savedPath 重新读完整 base64 (Tauri command)
+ */
+export interface MessageImage {
+  mimeType: string;
+  bytes: number;
+  /** Tauri upload 后的绝对路径, 持久化 */
+  savedPath?: string;
+  /** 200x200 JPEG 缩略图 base64, 持久化 (~10-30KB) */
+  thumbnail?: string;
+  /** 完整 base64, in-memory only (不持久化, sendPrompt 用, reload 后变 undefined) */
+  data?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
   /**
-   * ADR-0022 v3.7 (2026-08-23): user 消息附带的 image
-   *   - 跟 Pi SDK ImageContent schema 对齐: { data: base64, mimeType }
-   *   - 渲染: 消息气泡里以 <img> 缩略图展示, 可点击放大预览
+   * ADR-0022 v3.7+ (2026-08-23): user 消息附带的 image (见 MessageImage 注释)
+   *   - 渲染: thumbnail inline 缩略图, 点击 → useAttachmentPreview 大图 (data 或 savedPath)
    *   - assistant 消息不需要 (LLM 响应 text 包含图片引用)
    */
-  images?: Array<{ data: string; mimeType: string }>;
+  images?: MessageImage[];
   /**
    * ADR-0022 v3.7: user 消息附带的 file paths
    *   - 跟 attachments store 一样, LLM 看到 <file> tag 自己 read

@@ -43,9 +43,30 @@ function formatBytes(b: number): string {
 
 <template>
   <Teleport to="body">
+    <!-- v3.9: image-loading (从 savedPath 读 base64 期间) -->
+    <div
+      v-if="current?.kind === 'image-loading'"
+      class="pad-att-preview pad-att-preview--image"
+      @click.self="close"
+    >
+      <button
+        class="pad-att-preview__close"
+        type="button"
+        title="关闭 (Esc)"
+        @click="close"
+      >
+        <X :size="18" :stroke-width="1.75" />
+      </button>
+      <div class="pad-att-preview__loading">
+        <Loader2 :size="32" :stroke-width="1.5" class="pad-att-preview__spin" />
+        <div class="pad-att-preview__loading-text">加载图片中…</div>
+        <div class="pad-att-preview__loading-path">{{ current.path }}</div>
+      </div>
+    </div>
+
     <!-- image 大图预览 -->
     <div
-      v-if="current?.kind === 'image'"
+      v-else-if="current?.kind === 'image'"
       class="pad-att-preview pad-att-preview--image"
       @click.self="close"
     >
@@ -158,6 +179,26 @@ function formatBytes(b: number): string {
   color: rgba(255, 255, 255, 0.7);
   font-size: var(--pad-fs-12, 12px);
   font-family: var(--pad-font-mono, monospace);
+}
+/* v3.9: image-loading 状态 (从 savedPath 读 base64 期间) */
+.pad-att-preview__loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.8);
+}
+.pad-att-preview__loading-text {
+  font-size: var(--pad-fs-13, 13px);
+}
+.pad-att-preview__loading-path {
+  font-size: var(--pad-fs-11, 11px);
+  font-family: var(--pad-font-mono, monospace);
+  color: rgba(255, 255, 255, 0.5);
+  max-width: 80%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* file 预览面板 */

@@ -162,9 +162,17 @@ async function copyMessage() {
 // ADR-0022 v3.8: 共享 useAttachmentPreview composable (App.vue mount 一次)
 //   点 user 消息里的 image / file chip → 走全局浮层 (跟 Composer / TaskDrawer 一样)
 //   避免每组件各管一份 image preview state 互相打架
-function openAttachmentPreviewImage(img: { data: string; mimeType: string }) {
+// v3.9: image 优先用 in-memory data, 没有就降级到 savedPath 走 openImageFromPath (reload 后场景)
+function openAttachmentPreviewImage(img: { data?: string; mimeType: string; savedPath?: string }) {
   import('@/composables/useAttachmentPreview').then(({ useAttachmentPreview }) => {
-    useAttachmentPreview().openImage(img);
+    const ap = useAttachmentPreview();
+    if (img.data) {
+      ap.openImage({ data: img.data, mimeType: img.mimeType });
+    } else if (img.savedPath) {
+      void ap.openImageFromPath(img.savedPath);
+    } else {
+      console.warn('[ChatMessage] image 既无 data 也无 savedPath, 无法预览');
+    }
   });
 }
 function openAttachmentPreviewFile(f: { path: string; filename: string; mimeType: string; bytes: number }) {
@@ -504,20 +512,29 @@ const statusText = computed(() => {
         v-if="(message.images && message.images.length > 0) || (message.files && message.files.length > 0)"
         class="pad-msg__attachments"
       >
-        <!-- images 缩略图 (base64 inline, data URL) -->
+        <!-- v3.9: image 渲染逻辑
+             - 优先 in-memory data (全图, 缩放后), in-memory 时直接用
+             - 否则用 persisted thumbnail (~10-30KB JPEG, 持久化) 作为缩略图
+             - 都没有 → 灰色 placeholder (空 savedPath 的边界场景, 实际上 always 至少有 thumbnail)
+             - click → 优先 data, 否则 openImageFromPath(savedPath) 走 Tauri 重读 -->
         <button
           v-for="(img, i) in message.images || []"
           :key="`img-${i}`"
           class="pad-msg__attachment-image"
           type="button"
-          :title="`${img.mimeType} (点击放大预览)`"
+          :title="`${img.mimeType} (${formatBytes(img.bytes || 0)}, 点击放大预览)`"
           @click="openAttachmentPreviewImage(img)"
         >
           <img
-            :src="`data:${img.mimeType};base64,${img.data}`"
+            v-if="img.data || img.thumbnail"
+            :src="img.data ? `data:${img.mimeType};base64,${img.data}` : `data:image/jpeg;base64,${img.thumbnail}`"
             class="pad-msg__attachment-thumb"
             :alt="`attachment ${i + 1}`"
           />
+          <div v-else class="pad-msg__attachment-image-placeholder">
+            <span>图片</span>
+            <span class="pad-msg__attachment-image-meta">{{ img.mimeType }}</span>
+          </div>
         </button>
         <!-- files 标签 (点开走共享 useAttachmentPreview 浮层, 跟 Composer 行为一致) -->
         <button
@@ -957,6 +974,24 @@ const statusText = computed(() => {
   display: block;
   object-fit: cover;
   border-radius: var(--pad-radius-sm);
+}
+/* v3.9: 边界 fallback — image 既无 data 也无 thumbnail (理论不会发生, 但兜底) */
+.pad-msg__attachment-image-placeholder {
+  width: 120px;
+  height: 80px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: var(--pad-muted);
+  color: var(--pad-fg-tertiary);
+  font-size: var(--pad-fs-12, 12px);
+  border-radius: var(--pad-radius-sm);
+}
+.pad-msg__attachment-image-meta {
+  font-size: var(--pad-fs-10, 10px);
+  font-family: var(--pad-font-mono, monospace);
 }
 .pad-msg__attachment-file {
   display: inline-flex;

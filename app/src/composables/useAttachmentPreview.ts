@@ -5,10 +5,18 @@
  *   共享 image / file 预览 state, 给 Composer + ChatMessage + TaskDrawer 复用
  *   跟 useChipPreview 一样的 singleton 模式 (避免每组件各管一份 state)
  *
+ * v3.9 (2026-08-23): 加 openImageFromPath — 从 savedPath 重新读完整图 (reload 后用)
+ *   之前 v3.8 的 openImage 要求 data (base64), 但 message.images[].data 被持久化前会 strip,
+ *   reload 后 data 变 undefined, 必须从 savedPath 重新 read 一次.
+ *
  * 用法:
- *   // 打开 image 预览 (大图)
+ *   // 打开 image 预览 (大图, in-memory base64)
  *   const { openImage } = useAttachmentPreview();
  *   openImage({ data: base64, mimeType: 'image/png' });
+ *
+ *   // 打开 image 预览 (从 savedPath 重读, reload 后用)
+ *   const { openImageFromPath } = useAttachmentPreview();
+ *   openImageFromPath('/path/to/image.jpg');  // 内部调 Tauri command
  *
  *   // 打开 file 预览 (text 前 200 行 + mime 推断)
  *   const { openFile } = useAttachmentPreview();
@@ -31,7 +39,9 @@ export type AttachmentPreviewState =
       preview: string;
       loading: boolean;
       truncated: boolean;
-    };
+    }
+  /** v3.9: image 加载中 (从 savedPath 读 base64 期间), 区别于 image 已就绪 */
+  | { kind: 'image-loading'; path: string };
 
 const current = ref<AttachmentPreviewState | null>(null);
 
@@ -60,6 +70,8 @@ function isTextLike(filename: string, mimeType: string): boolean {
 export function useAttachmentPreview(): {
   current: Ref<AttachmentPreviewState | null>;
   openImage: (img: { data: string; mimeType: string }) => void;
+  /** v3.9: 从 savedPath 重读图片 (用于 reload 后, data 已被持久化 strip) */
+  openImageFromPath: (path: string) => Promise<void>;
   openFile: (file: { path: string; filename: string; mimeType: string; bytes: number }) => Promise<void>;
   close: () => void;
 } {
@@ -68,6 +80,33 @@ export function useAttachmentPreview(): {
   }
   function openImage(img: { data: string; mimeType: string }) {
     current.value = { kind: 'image', data: img.data, mimeType: img.mimeType };
+  }
+  async function openImageFromPath(path: string) {
+    if (!path) return;
+    current.value = { kind: 'image-loading', path };
+    try {
+      const { piTauri } = await import('@/lib/tauri');
+      const { data, mimeType } = await piTauri.readImageAsDataUrl(path);
+      // 检查 current 没被新调用覆盖 (用户可能快速点开多个不同 image)
+      if (current.value?.kind === 'image-loading' && current.value.path === path) {
+        current.value = { kind: 'image', data, mimeType };
+      }
+    } catch (e) {
+      console.error('[useAttachmentPreview] openImageFromPath failed', e);
+      if (current.value?.kind === 'image-loading' && current.value.path === path) {
+        // 错误状态: 改用 file kind 显示错误信息 (复用 file 渲染, 但有特殊 title)
+        current.value = {
+          kind: 'file',
+          path,
+          filename: path.split(/[/\\]/).pop() || path,
+          mimeType: 'image/*',
+          bytes: 0,
+          preview: `⚠ 图片读取失败: ${e instanceof Error ? e.message : String(e)}`,
+          loading: false,
+          truncated: false,
+        };
+      }
+    }
   }
   async function openFile(file: {
     path: string;
@@ -125,5 +164,5 @@ export function useAttachmentPreview(): {
       }
     }
   }
-  return { current, openImage, openFile, close };
+  return { current, openImage, openImageFromPath, openFile, close };
 }
