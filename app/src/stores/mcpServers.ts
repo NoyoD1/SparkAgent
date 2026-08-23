@@ -285,6 +285,7 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
    * @returns form 字段
    */
   function parseBodyToForm(bodyStr: string): {
+    name: string;
     type: 'stdio' | 'http' | 'sse';
     command: string;
     url: string;
@@ -297,6 +298,7 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
       ? obj.type
       : 'stdio';
     return {
+      name: typeof obj.name === 'string' ? obj.name : '',
       type: t as 'stdio' | 'http' | 'sse',
       command: typeof obj.command === 'string' ? obj.command : '',
       url: typeof obj.url === 'string' ? obj.url : '',

@@ -170,13 +170,34 @@ async function saveCreate() {
     //   - form tab: form 字段 → buildBodyFromForm
     //   - JSON tab: textarea 内容 (user 已直接编辑)
     let body: string;
+    let resolvedName: string = formName.value;  // 提交时用的 name, JSON tab 会从 body 抓
     if (dialogTab.value === 'json') {
-      // JSON tab: 校验 JSON 合法 + 用 validateBody 走 store / Rust 完整校验
+      // JSON tab: 走 parseMcpImportJson 4 种格式 auto-detect
+      //   - 修 v3.9+: 之前只 JSON.parse + 顶层找 name, 用户贴 Claude Desktop 格式
+      //     {"mcpServers": {...}} 顶层没 name → 报 "name 长度必须 1-64, got 0" 误导
+      //   - 现在统一走 import 解析, 1 个 server 直接用, 多个 server 让 user 用"导入"按钮
       const trimmed = dialogJsonText.value.trim();
       if (!trimmed) throw new Error('JSON 内容为空');
-      // 先 parse 看是不是合法 JSON (Rust 端也会 parse, 这里提前给清晰错误)
-      JSON.parse(trimmed);  // 失败会 throw, 被下面 catch 接住
-      body = JSON.stringify(JSON.parse(trimmed), null, 2);  // 重新格式化
+      const result = parseMcpImportJson(trimmed);
+      if (result.topError) {
+        throw new Error(result.topError);
+      }
+      if (result.invalid.length > 0 && result.servers.length === 0) {
+        const first = result.invalid[0];
+        throw new Error(`JSON 解析失败: ${first.reason}`);
+      }
+      if (result.servers.length === 0) {
+        throw new Error('JSON 解析成功但没找到任何 server (格式可能不识别)');
+      }
+      if (result.servers.length > 1) {
+        throw new Error(
+          `检测到 ${result.servers.length} 个 server (${result.servers.map((s) => s.name).join(', ')}). ` +
+          `批量导入请用右上 "导入" 按钮 (走 ${describeFormat(result.format)} 解析)`,
+        );
+      }
+      const server = result.servers[0];
+      resolvedName = server.name;
+      body = server.body;  // parser 已经把 name 填进 body
     } else {
       const args = formArgs.value
         .split(/\s+/)
@@ -219,8 +240,8 @@ async function saveCreate() {
     //   (老的 write() 走 active workspace, 多个 ws 时 user 没切换入口 → 现在补上)
     const wsPath = editingScope.value === 'workspace' ? dialogSelectedWsPath.value : null;
     const agDir = editingScope.value === 'global' ? (globalDirPath.value || null) : null;
-    await mcpStore.writeWithPath(editingScope.value, formName.value, body, wsPath, agDir);
-    toast.value = { type: 'ok', message: `已创建 ${formName.value}` };
+    await mcpStore.writeWithPath(editingScope.value, resolvedName, body, wsPath, agDir);
+    toast.value = { type: 'ok', message: `已创建 ${resolvedName}` };
     cancelCreate();
     await mcpStore.refresh();
   } catch (e) {
@@ -281,12 +302,33 @@ async function saveEdit() {
   toast.value = null;
   try {
     // v0.6.3-rc1 P2-3: 跟 saveCreate 一样按 tab 决策 body 来源
+    //   v3.9+: JSON tab 走 parseMcpImportJson, 跟 saveCreate 一致, 让 name 自动从 body 抓
     let body: string;
     if (dialogTab.value === 'json') {
       const trimmed = dialogJsonText.value.trim();
       if (!trimmed) throw new Error('JSON 内容为空');
-      JSON.parse(trimmed);  // 校验合法 JSON
-      body = JSON.stringify(JSON.parse(trimmed), null, 2);
+      const result = parseMcpImportJson(trimmed);
+      if (result.topError) throw new Error(result.topError);
+      if (result.invalid.length > 0 && result.servers.length === 0) {
+        throw new Error(`JSON 解析失败: ${result.invalid[0].reason}`);
+      }
+      if (result.servers.length === 0) {
+        throw new Error('JSON 解析成功但没找到任何 server');
+      }
+      if (result.servers.length > 1) {
+        throw new Error(
+          `检测到 ${result.servers.length} 个 server. 编辑场景请保持单 server JSON, 批量请用 "导入" 按钮`,
+        );
+      }
+      const server = result.servers[0];
+      // 编辑模式: name 必须跟原 editingName 一致, 否则 user 改了名字路径冲突
+      if (server.name !== editingName.value) {
+        throw new Error(
+          `JSON 里 server name '${server.name}' 跟原名 '${editingName.value}' 不一致. ` +
+          `改名请用 "新建" 流程`,
+        );
+      }
+      body = server.body;
     } else {
       const args = formArgs.value
         .split(/\s+/)
@@ -357,6 +399,7 @@ function switchDialogTab(target: 'form' | 'json') {
     // json → form: 解析 JSON, 失败不切 + 给错误
     try {
       const f = mcpStore.parseBodyToForm(dialogJsonText.value);
+      formName.value = f.name;  // v3.9+: 之前漏了, JSON tab 填了 name 切回 form 还是空 → saveCreate 报 name 长度 0
       formType.value = f.type;
       formCommand.value = f.command;
       formUrl.value = f.url;
@@ -596,7 +639,7 @@ async function refreshAndShowPath() {
             <span>JSON</span>
           </button>
           <span class="pad-mcptab__tab-hint">
-            高级字段 (headers / 自定义 timeout) 切 JSON 直接编辑
+            支持 4 种格式 (单 server / Claude Desktop mcpServers / array / map) — 多 server 请用 "导入" 按钮
           </span>
         </div>
 
