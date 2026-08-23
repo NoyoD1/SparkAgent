@@ -27,17 +27,21 @@ import {
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
 import { useConfigStore } from '@/stores/config';
+import { useUiStore } from '@/stores/ui';
 import { pickFolder } from '@/lib/dialog';
 import ChatHeader from './ChatHeader.vue';
 import ChatMessage from './ChatMessage.vue';
 import Composer from './Composer.vue';
+import BrowserAddressBar from './BrowserAddressBar.vue';
 import ChatMessageNav, { type ChatTurn } from './ChatMessageNav.vue';
 import PermissionDialog from './PermissionDialog.vue';
 
 const chatStore = useChatStore();
 const sessionStore = useSessionStore();
 const configStore = useConfigStore();
+const uiStore = useUiStore();
 const { activeSession, activeWorkspace, workspaces } = storeToRefs(sessionStore);
+const { browserPanelVisible } = storeToRefs(uiStore);
 
 const messages = computed(() =>
   activeSession.value ? chatStore.getMessages(activeSession.value.id) : []
@@ -334,6 +338,9 @@ function jumpToMessage(messageId: string) {
 
       <!-- composer 浮层: z-index 最高, 上面有渐变 fade + composer 自带 shadow -->
       <div class="pad-chatmain__composer-area">
+        <!-- ADR-0022 v3.1: Browser Panel 打开时, URL bar 放在 Composer 正上方
+             (跟消息输入同一视觉区域, 跟"用户输入"位置对齐, 不在 ChatHeader 下面) -->
+        <BrowserAddressBar v-if="browserPanelVisible" />
         <!-- v0.5.0: PermissionDialog inline 渲染在 Composer 正上方 (v-if 控制 + Transition 滑出).
              inline flow 性质保证弹窗底边始终贴 Composer 顶边, Composer 高度变化时弹窗自然跟随.
              不需要 ResizeObserver 也不用 ResizeEvent, 浏览器自动处理. -->

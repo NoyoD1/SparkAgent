@@ -19,7 +19,7 @@ import { ref, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import {
   Wrench, Plus, X, Save, Trash2, AlertCircle, Check, Info,
-  FileCode, Edit3, BookOpen, Search, FileText, FileSearch, Terminal,
+  FileCode, Edit3, BookOpen, Search, FileText, FileSearch, Terminal, Globe, Power,
 } from 'lucide-vue-next';
 import {
   useUserToolsStore,
@@ -27,9 +27,12 @@ import {
   BUILTIN_TOOL_LABEL,
   type BuiltinToolName,
 } from '@/stores/userTools';
+import { useExtensionToolsStore } from '@/stores/extensionTools';
 
 const userToolsStore = useUserToolsStore();
+const extensionToolsStore = useExtensionToolsStore();
 const { tools, loading, error } = storeToRefs(userToolsStore);
+const { EXTENSION_TOOLS } = extensionToolsStore;
 
 // builtin 工具 → lucide icon 映射 (UI 显示)
 const BUILTIN_TOOL_ICON: Record<BuiltinToolName, any> = {
@@ -245,6 +248,42 @@ onMounted(() => {
           <span>刷新</span>
         </button>
       </h3>
+
+    <!-- ADR-0022 v3.4: Extension Tools (嫁接的 web_* / mcp__xxx)
+         PoC: 只展示 + toggle, 实际过滤后续 P3.1 (写到 settings.json 传 sidecar) -->
+    <div class="pad-toolstab__section">
+      <h3 class="pad-toolstab__section-title">
+        <Globe :size="14" :stroke-width="1.75" />
+        <span>Extension Tools ({{ EXTENSION_TOOLS.length }})</span>
+        <span class="pad-toolstab__hint-inline">嫁接 (内置 + 后续 MCP), 可启停</span>
+      </h3>
+      <div class="pad-toolstab__ext-grid">
+        <div
+          v-for="t in EXTENSION_TOOLS"
+          :key="t.name"
+          class="pad-toolstab__ext-card"
+          :class="{ 'is-disabled': !extensionToolsStore.isEnabled(t.name) }"
+        >
+          <Globe :size="18" :stroke-width="1.5" class="pad-toolstab__builtin-icon" />
+          <div class="pad-toolstab__builtin-body">
+            <div class="pad-toolstab__builtin-name">
+              <code>{{ t.name }}</code>
+              <span class="pad-toolstab__scope-tag is-browser">{{ t.source }}</span>
+            </div>
+            <div class="pad-toolstab__builtin-label">{{ t.label }} — {{ t.description }}</div>
+          </div>
+          <button
+            class="pad-toolstab__toggle"
+            :class="{ 'is-on': extensionToolsStore.isEnabled(t.name) }"
+            :title="extensionToolsStore.isEnabled(t.name) ? '点击停用' : '点击启用'"
+            @click="extensionToolsStore.toggle(t.name)"
+          >
+            <Power :size="12" :stroke-width="2" />
+            <span>{{ extensionToolsStore.isEnabled(t.name) ? '已启用' : '已停用' }}</span>
+          </button>
+        </div>
+      </div>
+    </div>
       <div v-if="loading" class="pad-toolstab__empty">
         <Wrench :size="20" :stroke-width="1.5" />
         <div>⏳ 加载中…</div>
@@ -367,6 +406,57 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 8px;
+}
+
+/* ===== ADR-0022 v3.4: Extension Tools (嫁接 web_* / mcp__*) ===== */
+.pad-toolstab__ext-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pad-toolstab__ext-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--pad-bg-input);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md);
+  transition: opacity var(--pad-dur-fast) ease;
+}
+.pad-toolstab__ext-card.is-disabled {
+  opacity: 0.5;
+}
+.pad-toolstab__scope-tag.is-browser {
+  background: color-mix(in srgb, var(--pad-accent) 14%, transparent);
+  color: var(--pad-accent);
+}
+.pad-toolstab__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-pill);
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--pad-fs-11, 11px);
+  color: var(--pad-fg-tertiary);
+  cursor: pointer;
+  transition: all var(--pad-dur-fast) ease;
+  flex-shrink: 0;
+}
+.pad-toolstab__toggle.is-on {
+  background: color-mix(in srgb, var(--pad-success, #16a34a) 14%, transparent);
+  border-color: var(--pad-success, #16a34a);
+  color: var(--pad-success, #16a34a);
+}
+.pad-toolstab__toggle:hover {
+  background: var(--pad-bg-hover);
+}
+.pad-toolstab__toggle.is-on:hover {
+  background: color-mix(in srgb, var(--pad-success, #16a34a) 22%, transparent);
 }
 .pad-toolstab__builtin-card {
   display: flex;

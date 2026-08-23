@@ -23,7 +23,7 @@
  *   你就用 Pi TUI 那种来试一下效果吧, 参考图3 做效果" — MiniMax Code / Pi TUI 风格.
  */
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
-import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight, Quote, Check, AlertTriangle } from 'lucide-vue-next';
+import { ThumbsUp, ThumbsDown, Copy, RefreshCw, Loader2, Wrench, Brain, ChevronDown, ChevronRight, Quote, Check, AlertTriangle, FileText } from 'lucide-vue-next';
 // 注: ChevronRight 之前是 step group collapsed indicator 用的, 这里引用 blockquote
 //     折叠 indicator 也复用, 不重复 import.
 import type { ChatMessage, Step, ToolCallBlock } from '@/lib/mock/types';
@@ -157,6 +157,27 @@ async function copyMessage() {
   } catch (e) {
     console.warn('[msg] copy failed', e);
   }
+}
+
+// ADR-0022 v3.8: 共享 useAttachmentPreview composable (App.vue mount 一次)
+//   点 user 消息里的 image / file chip → 走全局浮层 (跟 Composer / TaskDrawer 一样)
+//   避免每组件各管一份 image preview state 互相打架
+function openAttachmentPreviewImage(img: { data: string; mimeType: string }) {
+  import('@/composables/useAttachmentPreview').then(({ useAttachmentPreview }) => {
+    useAttachmentPreview().openImage(img);
+  });
+}
+function openAttachmentPreviewFile(f: { path: string; filename: string; mimeType: string; bytes: number }) {
+  import('@/composables/useAttachmentPreview').then(({ useAttachmentPreview }) => {
+    void useAttachmentPreview().openFile(f);
+  });
+}
+
+// 字节数显示: 跟 Composer 一样
+function formatBytes(b: number): string {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1024 / 1024).toFixed(1)} MB`;
 }
 
 // v0.5.0-D 第19轮 (D206): 从 user message.content 提取新问题部分
@@ -476,6 +497,43 @@ const statusText = computed(() => {
   <!-- ============== USER MESSAGE: 右侧气泡 ============== -->
   <div v-if="isUser" class="pad-msg pad-msg--user" :data-message-id="message.id">
     <div class="pad-msg__bubble pad-msg__bubble--user">
+      <!-- ADR-0022 v3.7: 附件 (image + file) 渲染在 content 之前
+           image: 缩略图, 点开大图 (走 useChipPreview 类似的浮层)
+           file: 文件名 chip (跟 sidebar file-ref chip 类似视觉) -->
+      <div
+        v-if="(message.images && message.images.length > 0) || (message.files && message.files.length > 0)"
+        class="pad-msg__attachments"
+      >
+        <!-- images 缩略图 (base64 inline, data URL) -->
+        <button
+          v-for="(img, i) in message.images || []"
+          :key="`img-${i}`"
+          class="pad-msg__attachment-image"
+          type="button"
+          :title="`${img.mimeType} (点击放大预览)`"
+          @click="openAttachmentPreviewImage(img)"
+        >
+          <img
+            :src="`data:${img.mimeType};base64,${img.data}`"
+            class="pad-msg__attachment-thumb"
+            :alt="`attachment ${i + 1}`"
+          />
+        </button>
+        <!-- files 标签 (点开走共享 useAttachmentPreview 浮层, 跟 Composer 行为一致) -->
+        <button
+          v-for="(f, i) in message.files || []"
+          :key="`file-${i}-${f.path}`"
+          class="pad-msg__attachment-file"
+          type="button"
+          :title="`完整路径: ${f.path}\n${formatBytes(f.bytes)}\n点击预览`"
+          @click="openAttachmentPreviewFile(f)"
+        >
+          <FileText :size="11" :stroke-width="1.75" class="pad-msg__attachment-file-icon" />
+          <span class="pad-msg__attachment-file-name">{{ f.filename }}</span>
+          <span class="pad-msg__attachment-file-size">{{ formatBytes(f.bytes) }}</span>
+        </button>
+      </div>
+
       <!-- v0.5.0-D 第19轮 (D206): user 消息里有引用时, 引用部分用 blockquote 可视化
            之前 (D199-D205) 都是用 MarkdownContent 渲染完整 content (带 > 语法, 渲染成 markdown blockquote)
            但 markdown blockquote 在 user 气泡里视觉太朴素 (跟普通文字没区别)
@@ -868,8 +926,73 @@ const statusText = computed(() => {
   padding: 8px 12px;
   background: var(--pad-bg-hover);
   color: var(--pad-fg-primary);
-  border-radius: 12px;
-  border-top-right-radius: 4px;
+}
+
+/* ===== ADR-0022 v3.7: user message 附件 (image + file) 渲染 ===== */
+.pad-msg__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.pad-msg__attachment-image {
+  padding: 0;
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md);
+  background: transparent;
+  cursor: pointer;
+  overflow: hidden;
+  line-height: 0; /* 去掉 button 文字 baseline */
+  transition: transform var(--pad-dur-fast) ease, border-color var(--pad-dur-fast) ease;
+}
+.pad-msg__attachment-image:hover {
+  transform: scale(1.02);
+  border-color: var(--pad-accent);
+}
+.pad-msg__attachment-thumb {
+  max-width: 240px;
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  display: block;
+  object-fit: cover;
+  border-radius: var(--pad-radius-sm);
+}
+.pad-msg__attachment-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  background: var(--pad-card);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm);
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-primary);
+  max-width: 240px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color var(--pad-dur-fast, 0.12s) ease, background var(--pad-dur-fast, 0.12s) ease;
+}
+.pad-msg__attachment-file:hover {
+  border-color: var(--pad-accent, #6366f1);
+  background: var(--pad-accent-soft, #eef2ff);
+}
+.pad-msg__attachment-file-icon {
+  color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
+}
+.pad-msg__attachment-file-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+  font-family: var(--pad-font-mono, monospace);
+}
+.pad-msg__attachment-file-size {
+  font-size: var(--pad-fs-10, 10px);
+  color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
 }
 
 /* v0.5.0-D 第19轮 (D206): user 消息气泡里引用的 blockquote 样式

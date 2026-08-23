@@ -32,6 +32,7 @@ import { useConfigStore } from './config';
 import { useSessionStore } from './session';
 import { useUiStore } from './ui';
 import { useSkillsStore } from './skills';
+import { useComposerAttachmentsStore } from './composerAttachments';
 import { estimateTokens } from '@/lib/tokenEstimate';
 import type { ContextBreakdown, ContextBreakdownReal } from '@/lib/tokenEstimate';
 
@@ -912,13 +913,22 @@ export const useChatStore = defineStore('chat', () => {
   // v0.5.0-D 第19轮 (D206): appendUserMessage 加 quoteContent 参数
   //   当 user 用 quote 功能发消息时, quoteContent 存原始引用文本 (没 `> ` 前缀)
   //   给 ChatMessage 渲染 user 气泡时用 (引用部分 blockquote 样式可视化)
-  function appendUserMessage(sessionId: string, content: string, quoteContent: string | null = null) {
+  // v0.6+ ADR-0022 v3.7: 加 images / files 字段, 渲染 user 气泡里的图片缩略图 + file chip
+  function appendUserMessage(
+    sessionId: string,
+    content: string,
+    quoteContent: string | null = null,
+    images?: Array<{ data: string; mimeType: string }>,
+    files?: Array<{ path: string; filename: string; mimeType: string; bytes: number }>,
+  ) {
     const d = getSessionData(sessionId);
     d.messages.push({
       id: genMessageId('u'),
       role: 'user',
       content,
       quoteContent: quoteContent ?? undefined,
+      images: images && images.length > 0 ? images : undefined,
+      files: files && files.length > 0 ? files : undefined,
       createdAt: new Date().toISOString(),
     });
     // 触发响应式更新
@@ -941,6 +951,11 @@ export const useChatStore = defineStore('chat', () => {
   async function sendPrompt(content: string, opts: { fromQueue?: boolean; userText?: string } = {}) {
     const text = content.trim();
     if (!text) return;
+    // ADR-0022 v3.5: 把 composer attachments 拼到 LLM input
+    //   images 走 Pi SDK images[] 字段 (vision model 看图)
+    //   files 走 <file path="..." /> tag 拼到 message text (LLM 调 read 工具读)
+    const attachmentsStore = useComposerAttachmentsStore();
+    const { images: attachmentImages, textAppend: attachmentFileTags } = attachmentsStore.buildForPrompt();
     // D214 v5: userText = 干净 user 文本 (无 <reference> section, 但有 [[ref:...]] marker),
     //   用于 user 气泡渲染. 不传则 fallback 到 text (旧行为, reference 块会显示在 user 气泡).
     const userBaseText = (opts.userText ?? text).trim();
@@ -1052,6 +1067,20 @@ export const useChatStore = defineStore('chat', () => {
       llmText = `${quotedLines}\n\n${refsHeader}\n${refsBlock}\n\n${text}`;
       fullUserText = `${quotedLines}\n\n${refsHeader}\n${refsBlock}\n\n${userBaseText}`;
     }
+    // ADR-0022 v3.5: 把 pendingFiles 拼成 <file path="..." /> tag 拼到 message text
+    //   images 走 Pi SDK images[] 字段 (上面 sendPrompt 调用传 attachmentImages)
+    //   file tag 走这里 — Pi SDK 不支持 file content block, 用 tag 提示 LLM 调 read 工具
+    if (attachmentFileTags) {
+      llmText = llmText ? `${llmText}\n\n${attachmentFileTags}` : attachmentFileTags;
+    }
+    // ADR-0022 v3.7: 把 images + files 也存到 user message, 渲染 user 气泡里的
+    //   图片缩略图 / file chip (跟 sidebar file-ref chip 类似视觉)
+    const attachmentFilesForMsg = attachmentsStore.pendingFiles.map((f) => ({
+      path: f.path,
+      filename: f.filename,
+      mimeType: f.mimeType,
+      bytes: f.bytes,
+    }));
     if (quote) {
       console.log('[chat] sendPrompt: with quote (messageId=', quote.messageId, ', len=', quote.content.length, ', llmLen=', llmText.length, ', userLen=', fullUserText.length, ')');
       // 调试: 打印实际发送的两份文本, F12 console 可验证
@@ -1061,7 +1090,13 @@ export const useChatStore = defineStore('chat', () => {
     if (fileRefs.length > 0) {
       console.log('[chat] sendPrompt: with fileRefs (count=', fileRefs.length, ', paths=', fileRefs.map((r) => r.path).join(', '), ')');
     }
-    appendUserMessage(sessionId, fullUserText, quoteContent);
+    appendUserMessage(
+      sessionId,
+      fullUserText,
+      quoteContent,
+      attachmentImages,
+      attachmentFilesForMsg,
+    );
     streamingBySession.value = { ...streamingBySession.value, [sessionId]: true };
     errorBySession.value = { ...errorBySession.value, [sessionId]: null };
     // 引用用完即清, 跟发完就消失的 UX 一致 (避免下次发还残留)
@@ -1750,8 +1785,11 @@ export const useChatStore = defineStore('chat', () => {
           reasoning: effectiveModel.reasoning,
         },
       });
-      await piTauri.sendPrompt(sessionId, llmText, cfgFn);
-      console.log('[chat] sendPrompt: piTauri.sendPrompt resolved');
+      await piTauri.sendPrompt(sessionId, llmText, attachmentImages, cfgFn);
+      // ADR-0022 v3.5: send 完清理 attachments (避免下次 send 重复带)
+      // 走 store.clear() 集中处理 (revoke preview URL, 清 pending 列表)
+      attachmentsStore.clear();
+      console.log('[chat] sendPrompt: piTauri.sendPrompt resolved, attachments cleared');
 
       // Phase 6: fire-and-forget ghost title prompt (仅 first message, 不阻塞主流程)
       if (isFirstMessageForGhost) {
@@ -2154,7 +2192,7 @@ export const useChatStore = defineStore('chat', () => {
     //   (让 sidecar 创建独立的 jsonl 文件, 主 session history 不受影响)
     try {
       const ghostCfg = { ...baseCfg, sessionId: null };
-      await piTauri.sendPrompt(ghostSessionId, ghostPrompt, () => ghostCfg);
+      await piTauri.sendPrompt(ghostSessionId, ghostPrompt, [], () => ghostCfg);
       console.log('[chat] ghost: sidecar spawned + prompt sent', ghostSessionId);
     } catch (e) {
       clearTimeout(timeoutTimer);

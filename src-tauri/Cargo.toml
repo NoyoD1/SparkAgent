@@ -37,6 +37,8 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "linux-
 thiserror = "1"
 # Time for log timestamps
 chrono = "0.4"
+# ADR-0022: URL 校验 (browser_navigate 校验 scheme)
+url = "2"
 # HTTP client (sync, simple, no async SSL cert chain)
 ureq = { version = "2", features = ["json"] }
 # v0.4.4.4 Skill 导入: 解析 zip 压缩包 (Tauri 2 标准 zip crate, 支持 .md + 多文件 skill pack)
@@ -52,4 +54,16 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
     "Win32_Foundation",
     "Win32_Security",  # CreateJobObjectW 签名里 SECURITY_ATTRIBUTES 需要
+    # ADR-0022 v3.2: webview 截图 (web_screenshot tool, agent 拿 webview 视觉)
+    "Win32_Graphics_Gdi",             # HDC, CreateCompatibleDC/Bitmap, GetDIBits
+    "Win32_UI_WindowsAndMessaging",   # GetClientRect
+    "Win32_Storage_Xps",              # PrintWindow (Windows API 历史: 来自 print spooler, 放 Storage/Xps)
 ] }
+# PNG 编码 (webview 截图 BGRA bitmap → PNG bytes 返给 FE)
+png = "0.17"
+# webview 截图 (browser_screenshot tool):
+#   raw_window_handle: 拿 WebviewWindow 的 HWND 走 PrintWindow
+#   base64:            PNG bytes base64 编码方便走 JSON 返 FE
+raw-window-handle = "0.6"
+base64 = "0.22"
+

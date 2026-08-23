@@ -33,7 +33,9 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use std::sync::OnceLock;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex;
@@ -159,6 +161,8 @@ pub fn run_prompt(
     active: Arc<ActiveSidecars>,
 ) {
     debug_log(&format!("run_prompt: session={session_id}"));
+    // ADR-0022: 启动 sidecar 浏览器请求轮询 (处理 web_navigate / web_get_text tool)
+    crate::sidecar::ensure_browser_watcher(app.clone());
     tauri::async_runtime::spawn(async move {
         // v0.5.0: config 走 argv[1] (跟 Pi SDK main.ts pattern 一致)
         let config_arg = match serde_json::to_string(&serde_json::json!({
@@ -333,6 +337,7 @@ pub fn run_compact(
     active: Arc<ActiveSidecars>,
 ) {
     debug_log(&format!("run_compact: session={session_id}"));
+    crate::sidecar::ensure_browser_watcher(app.clone());
     tauri::async_runtime::spawn(async move {
         let config_arg = match serde_json::to_string(&serde_json::json!({
             "type": "config",
@@ -537,6 +542,147 @@ pub async fn send_rpc_command(
         .write(line.as_bytes())
         .map_err(|e| format!("write rpc_command: {e}"))?;
     Ok(())
+}
+
+// ====== ADR-0022 (2026-08-23): WebView2 内嵌浏览器 — sidecar 触发入口 ======
+// 背景: sidecar 的 stdin/stdout 是 Pi SDK runRpcMode 100% 管控, 没法 reverse RPC
+//   (没法在 stdout 插 tauri_call 这种结构). 所以 sidecar → Tauri 的浏览器命令走
+//   "文件队列":
+//   - sidecar 写 <agentDir>/browser_request.json = { id, command, args }
+//   - 这边 watcher 100ms 轮询, 看到了就 dispatch 到 browser_navigate /
+//     browser_get_text / browser_get_url, 写结果到 <agentDir>/browser_response.json
+//   - sidecar 看到 response 文件就 resolve, unlink
+//   (id 匹配防 stale 串, 跟 sidecar 那边 callTauriCommand 的协议对得上)
+//
+// 单例: Tauri 进程只起一个 watcher 任务, 多次 run_prompt / run_compact 调用
+//   ensure_browser_watcher 不会重复 spawn. OnceLock<()> 简单够用 (不像 tokio Mutex
+//   需要 .lock().await 才能 check).
+
+static BROWSER_WATCHER_INIT: OnceLock<()> = OnceLock::new();
+
+pub fn ensure_browser_watcher(app: AppHandle) {
+    // 单 spawn 守卫
+    if BROWSER_WATCHER_INIT.get().is_some() {
+        return;
+    }
+    if BROWSER_WATCHER_INIT.set(()).is_err() {
+        // 竞争输了, 别人已经 spawn, 不用再起
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        // 1. 算路径: <HOME>/.pi/agent/browser_{request,response}.json
+        //    跟 lib.rs::pi_settings_path 算的是同一个 agent_dir, 但这边不依赖那个
+        //    私有函数, 自己重算 (跨模块共享路径容易耦合坏).
+        let home = match app.path().home_dir() {
+            Ok(h) => h,
+            Err(e) => {
+                log::error!("[browser] watcher: home_dir failed: {e}");
+                return;
+            }
+        };
+        let agent_dir = home.join(".pi").join("agent");
+        let req_path = agent_dir.join("browser_request.json");
+        let res_path = agent_dir.join("browser_response.json");
+        // 2. 确保 agent_dir 存在 (settings.json 同目录, 正常情况下已在; 兜底)
+        if let Err(e) = std::fs::create_dir_all(&agent_dir) {
+            log::error!("[browser] watcher: create_dir_all failed: {e}");
+            return;
+        }
+        log::info!(
+            "[browser] watcher started, req={} res={}",
+            req_path.display(),
+            res_path.display()
+        );
+
+        // 3. 主轮询循环 — 100ms 一次
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // 3.1 读 request 文件 — 不存在就下一轮
+            let content = match std::fs::read_to_string(&req_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            // 3.2 解析 JSON, 坏了就删文件防卡死, 下一轮
+            let req: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("[browser] watcher: bad request json: {e} content={content}");
+                    let _ = std::fs::remove_file(&req_path);
+                    continue;
+                }
+            };
+            let id = req
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let command = req
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = req.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+            if id.is_empty() || command.is_empty() {
+                log::warn!("[browser] watcher: missing id/command in request, drop");
+                let _ = std::fs::remove_file(&req_path);
+                continue;
+            }
+            // 3.3 立刻删 request, 避免被下一次轮询重复处理
+            //    (sidecar 等 response 期间不会重写 request, 删了不冲突)
+            if let Err(e) = std::fs::remove_file(&req_path) {
+                log::warn!("[browser] watcher: remove_file failed: {e}");
+            }
+            log::info!("[browser] watcher: dispatch id={id} cmd={command}");
+
+            // 3.4 dispatch — 调用 lib.rs 里现成的 browser_navigate / get_text / get_url
+            //    这些都是 #[tauri::command] + pub async fn, 走 crate:: 直接调
+            let (result, error): (Option<serde_json::Value>, Option<String>) = match command.as_str() {
+                "browser_navigate" => {
+                    let url = args
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if url.is_empty() {
+                        (None, Some("missing args.url".to_string()))
+                    } else {
+                        match crate::browser_navigate(app.clone(), url).await {
+                            Ok(text) => (Some(serde_json::Value::String(text)), None),
+                            Err(e) => (None, Some(e)),
+                        }
+                    }
+                }
+                "browser_get_text" => match crate::browser_get_text(app.clone()).await {
+                    Ok(text) => (Some(serde_json::Value::String(text)), None),
+                    Err(e) => (None, Some(e)),
+                },
+                "browser_get_url" => match crate::browser_get_url(app.clone()).await {
+                    Ok(url) => (Some(serde_json::Value::String(url)), None),
+                    Err(e) => (None, Some(e)),
+                },
+                "browser_screenshot" => match crate::browser_screenshot(app.clone()).await {
+                    Ok(b64) => (Some(serde_json::Value::String(b64)), None),
+                    Err(e) => (None, Some(e)),
+                },
+                other => (None, Some(format!("unknown command: {other}"))),
+            };
+
+            // 3.5 写 response — 失败只能 log, 没法 retry (没 ack 机制)
+            let response = if let Some(err) = error {
+                serde_json::json!({ "id": id, "error": err })
+            } else {
+                serde_json::json!({ "id": id, "result": result })
+            };
+            match std::fs::write(
+                &res_path,
+                serde_json::to_string(&response).unwrap_or_default(),
+            ) {
+                Ok(_) => log::info!("[browser] watcher: response id={id} sent"),
+                Err(e) => log::error!("[browser] watcher: write response failed: {e}"),
+            }
+        }
+    });
 }
 
 fn debug_log(msg: &str) {

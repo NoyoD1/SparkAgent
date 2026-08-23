@@ -8,9 +8,11 @@
  *   (解决 v0.3.6 → v0.3.8 升级时 localStorage 孤儿数据问题)
  * - session store 仍走 localStorage (v0.3.8 还接受这个; 后续要继续迁)
  */
-import { onMounted, ref } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import ChatView from '@/views/ChatView.vue';
 import ChipPreview from '@/components/ChipPreview.vue';
+import AttachmentPreview from '@/components/AttachmentPreview.vue';
 import { useConfigStore } from '@/stores/config';
 import { useSessionStore } from '@/stores/session';
 import { useUiStore } from '@/stores/ui';
@@ -20,6 +22,7 @@ const sessions = useSessionStore();
 const ui = useUiStore();
 const ready = ref(false);
 const migrationNotice = ref<string>('');
+let unlistenBrowserDestroyed: UnlistenFn | null = null;
 
 onMounted(async () => {
   // v0.3.8.16: 启动时把保存的主题应用到 <html> 上, 避免初始闪烁
@@ -49,6 +52,19 @@ onMounted(async () => {
   } finally {
     ready.value = true;
   }
+  // ADR-0022 v2: 启动同步 Browser Panel 状态 + 监听 user 主动 X 销毁
+  await ui.initBrowserPanelState();
+  try {
+    unlistenBrowserDestroyed = await listen('browser-panel:destroyed', () => {
+      ui.onBrowserPanelDestroyed();
+    });
+  } catch (e) {
+    console.error('[App] listen browser-panel:destroyed failed', e);
+  }
+});
+
+onUnmounted(() => {
+  unlistenBrowserDestroyed?.();
 });
 </script>
 
@@ -78,6 +94,8 @@ onMounted(async () => {
   </div>
   <!-- D214 v7: 全局 chip 预览浮层 (Teleport 到 body) — 一次性 mount, 状态走 useChipPreview composable -->
   <ChipPreview />
+  <!-- ADR-0022 v3.8: 全局附件预览 (image 大图 + file 内容预览), singleton 状态走 useAttachmentPreview -->
+  <AttachmentPreview />
 </template>
 
 <style>

@@ -9,7 +9,7 @@
  */
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { storeToRefs } from 'pinia';
-import { Plus, Image, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck, Quote, X, Lock, ListOrdered, Wrench, Plug } from 'lucide-vue-next';
+import { Plus, Paperclip, ChevronDown, Mic, ArrowUp, Square, AlertTriangle, Star, Check, Hand, Sparkles, CheckCheck, Quote, X, Lock, ListOrdered, Wrench, Plug } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
 import { useConfigStore, PROVIDER_OPTIONS, PERMISSION_MODE_OPTIONS, type PermissionMode } from '@/stores/config';
@@ -17,6 +17,7 @@ import { useUiStore } from '@/stores/ui';
 import { useSkillsStore } from '@/stores/skills';
 import { useUserToolsStore } from '@/stores/userTools';
 import { useMcpServersStore } from '@/stores/mcpServers';
+import { useComposerAttachmentsStore, type PendingImage, type PendingFile } from '@/stores/composerAttachments';
 import { piTauri } from '@/lib/tauri';
 import ContextIndicator from './ContextIndicator.vue';
 
@@ -27,6 +28,7 @@ const uiStore = useUiStore();
 const skillsStore = useSkillsStore();
 const userToolsStore = useUserToolsStore();
 const mcpServersStore = useMcpServersStore();
+const attachmentsStore = useComposerAttachmentsStore();
 const { activeSession } = storeToRefs(sessionStore);
 const { skills } = storeToRefs(skillsStore);
 const { tools: userTools } = storeToRefs(userToolsStore);
@@ -384,6 +386,71 @@ function onRichClick(e: MouseEvent) {
 // v0.4.1+ tool permission 菜单
 const showPermissionMenu = ref(false);
 
+// ====== ADR-0022 v3.5 (2026-08-23): composer 粘贴/拖拽 image + file ======
+// 粘贴 image (clipboard) 或拖文件到 contentEditable -> upload -> 渲染 chip
+// 阻止默认 paste (默认会 inline dataURL base64 巨大) + drop (默认会 navigate 到文件)
+async function onRichPaste(e: ClipboardEvent) {
+  if (!e.clipboardData) return;
+  const items = e.clipboardData.items;
+  // 找 image/* 类型
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind.startsWith('image/')) {
+      e.preventDefault(); // 阻止 inline base64
+      const file = item.getAsFile();
+      if (file) await attachmentsStore.addFile(file);
+      return; // 只处理第一个 image
+    }
+  }
+  // 找 file 类型 (从其他 app 复制文件粘贴)
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind === 'file') {
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (file) await attachmentsStore.addFile(file);
+      return;
+    }
+  }
+  // 没文件, 走默认 (文字粘贴)
+}
+
+async function onRichDrop(e: DragEvent) {
+  if (!e.dataTransfer) return;
+  const files = Array.from(e.dataTransfer.files);
+  if (files.length === 0) return; // 没文件, 可能是 text drag
+  e.preventDefault();
+  for (const file of files) {
+    await attachmentsStore.addFile(file);
+  }
+}
+
+// 附件显示用: 字节数 -> "2.3 MB" / "456 KB" / "789 B"
+function formatBytes(b: number): string {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// ADR-0022 v3.8: composer chip 点开大图 / 文件预览
+//  - 跟 useChipPreview 同样用动态 import (避免循环, composable 内部也动态 import tauri)
+//  - openImage 直接 set state; openFile 走 spawn_blocking 读 text 前 200 行
+function openAttachmentPreviewImage(img: PendingImage) {
+  import('@/composables/useAttachmentPreview').then(({ useAttachmentPreview }) => {
+    useAttachmentPreview().openImage({ data: img.base64, mimeType: img.mimeType });
+  });
+}
+function openAttachmentPreviewFile(f: PendingFile) {
+  import('@/composables/useAttachmentPreview').then(({ useAttachmentPreview }) => {
+    void useAttachmentPreview().openFile({
+      path: f.path,
+      filename: f.filename,
+      mimeType: f.mimeType,
+      bytes: f.bytes,
+    });
+  });
+}
+
 // 2026-08-20 P0-1 补充 B: 改用 session 自己的 permission mode (per-session 存)
 // 旧实现读 configStore.permissionMode (全局), 导致一个 session 切了 ask, 所有 session 都跟着 ask.
 // 新实现 sessionStore.getSessionPermissionMode(activeId) → session 自己 mode → fallback 全局.
@@ -436,6 +503,31 @@ function pickPermission(mode: PermissionMode) {
 const permMenuRef = ref<HTMLElement | null>(null);
 const modelMenuRef = ref<HTMLElement | null>(null);
 const queuePanelRef = ref<HTMLElement | null>(null);
+// ADR-0022 v3.6: `+` 按钮 menu (合并 Plus/Image/Paperclip)
+const plusMenuRef = ref<HTMLElement | null>(null);
+const showPlusMenu = ref(false);
+const filePickerRef = ref<HTMLInputElement | null>(null);
+function togglePlusMenu() {
+  showPlusMenu.value = !showPlusMenu.value;
+}
+function pickFiles() {
+  // 关闭 menu, 触发隐藏的 <input type="file"> click
+  showPlusMenu.value = false;
+  filePickerRef.value?.click();
+}
+async function onFilePickerChange(e: Event) {
+  const target = e.target as HTMLInputElement;
+  if (!target.files) return;
+  for (const file of Array.from(target.files)) {
+    await attachmentsStore.addFile(file);
+  }
+  // 清 input.value 让同样文件名能再选
+  target.value = '';
+}
+async function toggleBrowserPanelFromMenu() {
+  showPlusMenu.value = false;
+  await uiStore.toggleBrowserPanel();
+}
 function onClickOutsideAnyMenu(e: MouseEvent) {
   const target = e.target as Node;
   if (showPermissionMenu.value && permMenuRef.value && !permMenuRef.value.contains(target)) {
@@ -446,6 +538,9 @@ function onClickOutsideAnyMenu(e: MouseEvent) {
   }
   if (showQueuePanel.value && queuePanelRef.value && !queuePanelRef.value.contains(target)) {
     showQueuePanel.value = false;
+  }
+  if (showPlusMenu.value && plusMenuRef.value && !plusMenuRef.value.contains(target)) {
+    showPlusMenu.value = false;
   }
 }
 onMounted(() => {
@@ -1188,6 +1283,9 @@ onMounted(() => {
       @compositionstart="isComposing = true"
       @compositionend="onCompositionEnd"
       @click="onRichClick"
+      @paste="onRichPaste"
+      @drop.prevent="onRichDrop"
+      @dragover.prevent
     ></div>
 
     <!-- D214 Phase 3: 已删 v0.4.7b 底部 "已引用 skills" preview
@@ -1230,6 +1328,65 @@ onMounted(() => {
       </span>
     </div>
 
+    <!-- ADR-0022 v3.5: composer 粘贴/拖拽 上传的 image + file chip 区
+         - image: 缩略图 (previewUrl) + 删除按钮, send 时走 Pi SDK images[]
+         - file:  文件 icon + filename + 删除按钮, send 时拼到 message text 的 <file> tag
+         顺序: images 在前 (vision model 优先看图), files 在后 -->
+    <div
+      v-if="attachmentsStore.pendingImages.length > 0 || attachmentsStore.pendingFiles.length > 0"
+      class="pad-composer__attachments"
+    >
+      <Paperclip :size="11" :stroke-width="1.75" class="pad-composer__attachments-icon" />
+      <span class="pad-composer__attachments-label">附件 ({{ attachmentsStore.pendingImages.length + attachmentsStore.pendingFiles.length }}):</span>
+      <!-- image: 缩略图 + 删除 -->
+      <span
+        v-for="(img, i) in attachmentsStore.pendingImages"
+        :key="`img-${i}-${img.savedPath}`"
+        class="pad-composer__attachment-image"
+        :title="img.savedPath || `${img.mimeType}, ${formatBytes(img.bytes)}`"
+      >
+        <img
+          :src="img.previewUrl"
+          class="pad-composer__attachment-thumb"
+          alt="upload"
+          @click="openAttachmentPreviewImage(img)"
+        />
+        <span class="pad-composer__attachment-meta">{{ formatBytes(img.bytes) }}</span>
+        <button
+          class="pad-composer__attachment-x"
+          type="button"
+          title="移除"
+          @click.stop="attachmentsStore.removeImage(i)"
+        >
+          <X :size="9" :stroke-width="2" />
+        </button>
+      </span>
+      <!-- file: 文件 icon + filename + 删除 (点主体开预览, 删按钮独立 @click.stop) -->
+      <span
+        v-for="(f, i) in attachmentsStore.pendingFiles"
+        :key="`file-${i}-${f.path}`"
+        class="pad-composer__attachment-file"
+        :title="`${f.path}\n点击预览, ✕ 移除`"
+        @click="openAttachmentPreviewFile(f)"
+      >
+        <FileText :size="9" :stroke-width="2" class="pad-composer__attachment-icon" />
+        <span class="pad-composer__attachment-name">{{ f.filename }}</span>
+        <span class="pad-composer__attachment-meta">{{ formatBytes(f.bytes) }}</span>
+        <button
+          class="pad-composer__attachment-x"
+          type="button"
+          title="移除"
+          @click.stop="attachmentsStore.removeFile(i)"
+        >
+          <X :size="9" :stroke-width="2" />
+        </button>
+      </span>
+    </div>
+    <div v-if="attachmentsStore.uploadError" class="pad-composer__upload-error">
+      <AlertTriangle :size="11" :stroke-width="1.75" />
+      <span>{{ attachmentsStore.uploadError }}</span>
+    </div>
+
     <!-- v0.4.7a: Composer / popover 3 类 (skill / agent / mcp, 不含 builtin 22) -->
     <div v-if="showSlashPopover" ref="slashPopoverRef" class="pad-composer__slash-popover">
       <div v-if="filteredSlashItems.length === 0" class="pad-composer__slash-empty">
@@ -1269,15 +1426,82 @@ onMounted(() => {
     </div>
     <div class="pad-composer__bar">
       <div class="pad-composer__bar-left">
-        <button class="pad-composer__iconbtn" title="添加上下文">
-          <Plus :size="16" :stroke-width="1.75" />
-        </button>
-        <button class="pad-composer__iconbtn" title="附加图片">
-          <Image :size="16" :stroke-width="1.75" />
-        </button>
-        <button class="pad-composer__iconbtn" title="附加文件">
-          <Paperclip :size="16" :stroke-width="1.75" />
-        </button>
+        <!-- ADR-0022 v3.6 (2026-08-23): 合并 Plus + Image + Paperclip 为一个 `+` 按钮
+             点 `+` 弹二级 menu (类似 permission menu):
+             - 添加文件或图片: 触发 file picker (input type=file, accept image/* + 任意)
+             - 技能 / 总结 / 目标 / 计划: 即将推出 (占位)
+             - 浏览器操控: toggle 右侧 browser panel (WebView2) -->
+        <div class="pad-composer__plus-wrap" ref="plusMenuRef">
+          <button
+            class="pad-composer__iconbtn"
+            :class="{ 'is-open': showPlusMenu }"
+            :title="'添加上下文 (文件/图片/技能/...)'"
+            @click="togglePlusMenu"
+          >
+            <Plus :size="16" :stroke-width="1.75" />
+          </button>
+          <div v-if="showPlusMenu" class="pad-composer__plus-menu" @click.stop>
+            <button
+              class="pad-composer__plus-menu-item"
+              type="button"
+              @click="pickFiles"
+            >
+              <Paperclip :size="14" :stroke-width="1.75" class="pad-composer__plus-menu-icon" />
+              <span>添加文件或图片</span>
+            </button>
+            <button
+              class="pad-composer__plus-menu-item is-disabled"
+              type="button"
+              disabled
+              title="即将推出 — 输入 / 触发技能选单"
+            >
+              <Wrench :size="14" :stroke-width="1.75" class="pad-composer__plus-menu-icon" />
+              <span>技能</span>
+            </button>
+            <button
+              class="pad-composer__plus-menu-item is-disabled"
+              type="button"
+              disabled
+              title="即将推出"
+            >
+              <ListOrdered :size="14" :stroke-width="1.75" class="pad-composer__plus-menu-icon" />
+              <span>总结</span>
+            </button>
+            <button
+              class="pad-composer__plus-menu-item is-disabled"
+              type="button"
+              disabled
+              title="即将推出"
+            >
+              <Star :size="14" :stroke-width="1.75" class="pad-composer__plus-menu-icon" />
+              <span>目标</span>
+            </button>
+            <button
+              class="pad-composer__plus-menu-item is-disabled"
+              type="button"
+              disabled
+              title="即将推出"
+            >
+              <CheckCheck :size="14" :stroke-width="1.75" class="pad-composer__plus-menu-icon" />
+              <span>计划</span>
+            </button>
+            <div class="pad-composer__plus-menu-sep" />
+            <button
+              class="pad-composer__plus-menu-item is-toggle"
+              type="button"
+              @click="toggleBrowserPanelFromMenu"
+            >
+              <Plug :size="14" :stroke-width="1.75" class="pad-composer__plus-menu-icon" />
+              <span>浏览器操控</span>
+              <span
+                class="pad-composer__plus-menu-switch"
+                :class="{ 'is-on': uiStore.browserPanelVisible }"
+              >
+                {{ uiStore.browserPanelVisible ? '已开启' : '已关闭' }}
+              </span>
+            </button>
+          </div>
+        </div>
         <!-- v0.4.1+ tool permission 设置按钮: 3 选 1 dropdown (ask / smart / allow) -->
         <div class="pad-composer__perm-wrap" ref="permMenuRef">
           <button
@@ -1319,6 +1543,15 @@ onMounted(() => {
           </div>
         </div>
       </div>
+      <!-- ADR-0022 v3.6: 隐藏 file picker (点 `+` menu 触发) -->
+      <input
+        ref="filePickerRef"
+        type="file"
+        class="pad-composer__file-picker"
+        multiple
+        accept="image/*,.pdf,.txt,.md,.ts,.tsx,.js,.jsx,.json,.yaml,.yml,.toml,.rs,.py,.go,.java,.cs,.cpp,.c,.h,.hpp,.sh,.sql,.css,.html,.xml,.csv,.log"
+        @change="onFilePickerChange"
+      />
       <div class="pad-composer__bar-right">
         <!-- v0.4.3 redesign: ContextIndicator 组件 (compact 83% + click 展开 popover) -->
         <!-- 位置: 切换 model chip 左侧, 跟 model 一体 (UX 原则: 功能逻辑是一体的) -->
@@ -1539,6 +1772,179 @@ onMounted(() => {
 
 /* D214 v7: chip 样式已提到全局 app/src/assets/styles/chip.css
    这里只保留 file-ref (sidebar 文件引用) chip 样式, 跟 ref chip 是两种东西别混 */
+
+/* ===== ADR-0022 v3.6: `+` 按钮 + 二级 menu ===== */
+.pad-composer__plus-wrap {
+  position: relative;
+}
+.pad-composer__iconbtn.is-open {
+  background: var(--pad-bg-active);
+  color: var(--pad-fg-primary);
+}
+.pad-composer__plus-menu {
+  position: absolute;
+  bottom: 36px;
+  left: 0;
+  min-width: 200px;
+  background: var(--pad-popover);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-lg);
+  box-shadow: var(--pad-shadow-popover);
+  padding: 4px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.pad-composer__plus-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--pad-radius-md);
+  background: transparent;
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--pad-fs-13);
+  color: var(--pad-fg-primary);
+  cursor: pointer;
+  transition: background var(--pad-dur-fast) ease;
+}
+.pad-composer__plus-menu-item:hover:not(.is-disabled):not(.is-toggle) {
+  background: var(--pad-bg-hover);
+}
+.pad-composer__plus-menu-item.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.pad-composer__plus-menu-item.is-toggle {
+  cursor: pointer;
+}
+.pad-composer__plus-menu-icon {
+  color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
+}
+.pad-composer__plus-menu-sep {
+  height: 1px;
+  background: var(--pad-divider);
+  margin: 4px 6px;
+}
+.pad-composer__plus-menu-switch {
+  margin-left: auto;
+  font-size: var(--pad-fs-11, 11px);
+  font-family: var(--pad-font-mono, monospace);
+  color: var(--pad-fg-tertiary);
+  padding: 1px 8px;
+  border-radius: var(--pad-radius-pill);
+  background: var(--pad-muted);
+}
+.pad-composer__plus-menu-switch.is-on {
+  color: var(--pad-accent);
+  background: color-mix(in srgb, var(--pad-accent) 14%, transparent);
+}
+.pad-composer__file-picker {
+  display: none; /* 隐藏, 用 ref.click() 触发 */
+}
+
+/* ===== ADR-0022 v3.5: 粘贴/拖拽 attachments (image + file) ===== */
+.pad-composer__attachments {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--pad-border);
+  background: var(--pad-bg-app);
+  flex-wrap: wrap;
+  max-height: 100px;
+  overflow-y: auto;
+}
+.pad-composer__attachments-icon {
+  color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
+}
+.pad-composer__attachments-label {
+  font-size: var(--pad-fs-11, 11px);
+  color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
+}
+.pad-composer__attachment-image,
+.pad-composer__attachment-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 4px 0 4px;
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md);
+  background: var(--pad-card);
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-primary);
+  max-width: 200px;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: border-color var(--pad-dur-fast, 0.12s) ease, background var(--pad-dur-fast, 0.12s) ease;
+}
+.pad-composer__attachment-image:hover,
+.pad-composer__attachment-file:hover {
+  border-color: var(--pad-accent, #6366f1);
+  background: var(--pad-accent-soft, #eef2ff);
+}
+.pad-composer__attachment-image {
+  padding: 2px 4px;
+}
+.pad-composer__attachment-thumb {
+  height: 28px;
+  width: auto;
+  max-width: 100px;
+  object-fit: cover;
+  border-radius: var(--pad-radius-sm);
+}
+.pad-composer__attachment-icon {
+  color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
+}
+.pad-composer__attachment-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+  font-family: var(--pad-font-mono, monospace);
+}
+.pad-composer__attachment-meta {
+  font-size: var(--pad-fs-10, 10px);
+  color: var(--pad-fg-tertiary);
+  flex-shrink: 0;
+}
+.pad-composer__attachment-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--pad-radius-sm);
+  color: var(--pad-fg-tertiary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.pad-composer__attachment-x:hover {
+  background: var(--pad-bg-hover);
+  color: var(--pad-fg-primary);
+}
+.pad-composer__upload-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  background: color-mix(in srgb, var(--pad-danger, #dc2626) 12%, transparent);
+  color: var(--pad-danger, #dc2626);
+  font-size: var(--pad-fs-12, 12px);
+}
+
 .pad-composer__file-refs {
   display: flex;
   align-items: center;

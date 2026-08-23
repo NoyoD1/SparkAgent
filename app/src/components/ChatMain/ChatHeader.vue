@@ -9,7 +9,7 @@ import { ref, computed } from 'vue';
 import { storeToRefs } from 'pinia';
 import {
   MoreHorizontal, Code2, ChevronDown, Folder, ExternalLink, Bell,
-  PanelRight, PanelRightClose, Sun, Moon, Monitor, Check,
+  PanelRight, PanelRightClose, Sun, Moon, Monitor, Check, Globe,
 } from 'lucide-vue-next';
 import { useSessionStore } from '@/stores/session';
 import { useUiStore, type ThemeMode } from '@/stores/ui';
@@ -18,7 +18,7 @@ import IconButton from '@/components/ui/IconButton.vue';
 const sessionStore = useSessionStore();
 const uiStore = useUiStore();
 const { activeSession } = storeToRefs(sessionStore);
-const { drawerCollapsed, themeMode } = storeToRefs(uiStore);
+const { drawerCollapsed, themeMode, browserPanelVisible } = storeToRefs(uiStore);
 
 const showDropdown = ref(false);
 const showThemeMenu = ref(false);
@@ -132,6 +132,14 @@ const formattedTime = computed(() => {
       </div>
 
       <IconButton :icon="Bell" size="sm" title="通知" />
+      <!-- ADR-0022 v2: 切换 Browser Panel (WebView2, agent 控制的浏览器) 显隐 -->
+      <IconButton
+        :icon="Globe"
+        size="sm"
+        :title="browserPanelVisible ? '关闭浏览器面板' : '打开浏览器面板'"
+        :class="['pad-browser-toggle', { 'is-active': browserPanelVisible }]"
+        @click="uiStore.toggleBrowserPanel"
+      />
       <IconButton
         :icon="drawerCollapsed ? PanelRight : PanelRightClose"
         size="sm"
@@ -305,5 +313,14 @@ const formattedTime = computed(() => {
 .pad-theme-menu-check {
   color: var(--pad-accent);
   flex-shrink: 0;
+}
+
+/* ===== ADR-0022 v2: Browser Panel 开关按钮 active 态 ===== */
+.pad-browser-toggle.is-active {
+  color: var(--pad-accent);
+  background: var(--pad-accent-soft);
+}
+.pad-browser-toggle.is-active:hover {
+  background: var(--pad-accent-soft);
 }
 </style>

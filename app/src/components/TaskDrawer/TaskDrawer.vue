@@ -7,10 +7,14 @@
  *   - 删"上下文"section (Composer 底部已有压缩入口, 右侧不再重复)
  *   - 加"会话文件"section: 当前 active session 内 AI 调 file tool 产生的文件列表
  *     (write / edit / edit-diff / 等带 args.path 字段的 tool)
+ *
+ * ADR-0022 v3.8 (2026-08-23):
+ *   - sessionFiles 扩展: 包含 user 上传的 image + file (从 message.images / message.files 抓)
+ *   - 所有 entry 都支持 click → 走 useAttachmentPreview 全局浮层预览
  */
 import { computed, ref } from 'vue';
 import { storeToRefs } from 'pinia';
-import { Plus, PanelRightClose, ChevronDown, ListChecks, FileText, CircleAlert, CircleCheck } from 'lucide-vue-next';
+import { Plus, PanelRightClose, ChevronDown, ListChecks, FileText, CircleAlert, CircleCheck, Image as ImageIcon, Upload } from 'lucide-vue-next';
 import IconButton from '@/components/ui/IconButton.vue';
 import { useUiStore } from '@/stores/ui';
 import { useChatStore } from '@/stores/chat';
@@ -36,21 +40,38 @@ function toggleFiles() {
  * Pi SDK 0.84.2 file tool 命名: write / edit / edit-diff (都用 args.path 字段存文件路径).
  * 也有少数 tool 用 file_path, 两个都兼容. 按 path dedupe (同一文件多次写只展示 1 次,
  * 但 status 取最后一次).
+ *
+ * v3.8: 扩展到 user 上传的 image + file, 用 kind discriminator 区分
+ *   - 'tool-file':  AI 调 file tool 产生的文件
+ *   - 'user-image': user 上传的 image (preview → 大图)
+ *   - 'user-file':  user 上传的 file (preview → text 前 200 行)
  */
 const FILE_TOOL_NAMES = new Set(['write', 'edit', 'edit-diff', 'file_write', 'file_edit', 'create', 'file_create']);
 
+type SessionFileKind = 'tool-file' | 'user-image' | 'user-file';
+
 interface SessionFile {
+  kind: SessionFileKind;
   path: string;
   name: string;
+  /** tool-file: 'write' | 'edit' | ...; user-image: 'image' (mimeType 头部); user-file: 'file' (mimeType 头部) */
   toolName: string;
   status: 'success' | 'error' | 'running' | 'pending';
-  /** 同 path 出现的次数 (用于显示 "N 次修改") */
+  /** tool-file: 同 path 出现次数; user-image/file: 总 1 */
   count: number;
+  /** user-image: mimeType (image/png); user-file: mimeType (text/plain, ...); tool-file: 不用 */
+  mimeType?: string;
+  /** user-image: base64; user-file: undefined; tool-file: undefined */
+  base64?: string;
+  /** user-image/file: 字节数 */
+  bytes?: number;
 }
 
 const sessionFiles = computed<SessionFile[]>(() => {
   const sid = activeSession.value?.id;
   if (!sid) return [];
+  const out: SessionFile[] = [];
+  // 1) AI tool 产生的文件
   const toolCalls = chatStore.getToolCalls(sid);
   const byPath = new Map<string, SessionFile>();
   for (const tc of toolCalls) {
@@ -63,9 +84,9 @@ const sessionFiles = computed<SessionFile[]>(() => {
       existing.count += 1;
       existing.status = tc.status;
     } else {
-      // 从 path 提取 filename (最后一段, 兼容 / 和 \)
       const name = path.split(/[/\\]/).pop() || path;
       byPath.set(path, {
+        kind: 'tool-file',
         path,
         name,
         toolName: tc.name,
@@ -74,20 +95,107 @@ const sessionFiles = computed<SessionFile[]>(() => {
       });
     }
   }
-  return Array.from(byPath.values());
+  out.push(...byPath.values());
+  // 2) user 上传的 image + file (从 message.images / message.files 抓, 按 path dedupe)
+  const userByPath = new Map<string, SessionFile>();
+  const messages = chatStore.getMessages(sid);
+  let globalImageIdx = 0;
+  for (const m of messages) {
+    if (m.role !== 'user') continue;
+    // 2a) images (用全局 idx 编号, 跨 message 累计, 避免不同 message 的 image 撞 key)
+    for (let i = 0; i < (m.images?.length ?? 0); i++) {
+      const img = m.images![i];
+      // user 上传的 image: 用合成 key (`<image 0>`) 避免跟 user-file path 冲突
+      //  (image 没存盘路径, Pi SDK images[] 是 in-memory base64)
+      const path = `<image ${globalImageIdx}>`;
+      globalImageIdx += 1;
+      const mimeType = img.mimeType || 'image';
+      // 显示名: "图片 1 (png)" 风格, 比单显示 "png" 更明确
+      const name = `图片 ${globalImageIdx} (${mimeType.replace('image/', '') || 'image'})`;
+      if (!userByPath.has(path)) {
+        userByPath.set(path, {
+          kind: 'user-image',
+          path,
+          name,
+          toolName: '上传',
+          status: 'success',
+          count: 1,
+          mimeType: img.mimeType,
+          base64: img.data,
+        });
+      }
+    }
+    // 2b) files
+    for (const f of m.files ?? []) {
+      const existing = userByPath.get(f.path);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        const name = f.filename || f.path.split(/[/\\]/).pop() || f.path;
+        userByPath.set(f.path, {
+          kind: 'user-file',
+          path: f.path,
+          name,
+          toolName: '上传',
+          status: 'success',
+          count: 1,
+          mimeType: f.mimeType,
+          bytes: f.bytes,
+        });
+      }
+    }
+  }
+  out.push(...userByPath.values());
+  return out;
 });
 
-/** status 对应的 icon + 颜色 (minimalist, 跟 token 配, 不上彩色块) */
-const fileStatusIcon = (status: SessionFile['status']) => {
-  if (status === 'success') return CircleCheck;
-  if (status === 'error') return CircleAlert;
+/** entry 头部的小 icon (按 kind / status 区分) */
+const fileStatusIcon = (f: SessionFile) => {
+  if (f.kind === 'user-image') return ImageIcon;
+  if (f.kind === 'user-file') return Upload;
+  if (f.status === 'success') return CircleCheck;
+  if (f.status === 'error') return CircleAlert;
   return FileText;
 };
-const fileStatusClass = (status: SessionFile['status']) => {
-  if (status === 'error') return 'is-error';
-  if (status === 'running' || status === 'pending') return 'is-running';
+const fileStatusClass = (f: SessionFile) => {
+  if (f.kind === 'user-image') return 'is-user-image';
+  if (f.kind === 'user-file') return 'is-user-file';
+  if (f.status === 'error') return 'is-error';
+  if (f.status === 'running' || f.status === 'pending') return 'is-running';
   return 'is-success';
 };
+
+/** 点击 entry → 全局 useAttachmentPreview 浮层 (跟 Composer / ChatMessage 共用) */
+function onEntryClick(f: SessionFile) {
+  import('@/composables/useAttachmentPreview').then(({ useAttachmentPreview }) => {
+    const ap = useAttachmentPreview();
+    if (f.kind === 'user-image' && f.base64) {
+      ap.openImage({ data: f.base64, mimeType: f.mimeType || 'image/png' });
+    } else if (f.kind === 'user-file') {
+      void ap.openFile({
+        path: f.path,
+        filename: f.name,
+        mimeType: f.mimeType || 'application/octet-stream',
+        bytes: f.bytes ?? 0,
+      });
+    } else {
+      // tool-file: 也尝试预览 (text 前 200 行, binary 显示占位)
+      void ap.openFile({
+        path: f.path,
+        filename: f.name,
+        mimeType: 'text/plain',
+        bytes: 0,
+      });
+    }
+  });
+}
+
+/** 字节数 -> "2.3 MB" (跟 Composer 一样) */
+function formatBytes(b: number): string {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
 </script>
 
 <template>
@@ -126,7 +234,8 @@ const fileStatusClass = (status: SessionFile['status']) => {
         </div>
       </section>
 
-      <!-- 会话文件 section (v0.4.3.1: 替代"上下文"section, 因为 Composer 底部已有压缩入口) -->
+      <!-- 会话文件 section (v0.4.3.1: 替代"上下文"section, 因为 Composer 底部已有压缩入口)
+           v3.8: 扩展包含 user 上传的 image / file, 全部可 click 预览 -->
       <section class="pad-drawer__section">
         <button class="pad-drawer__section-toggle" @click="toggleFiles">
           <div class="pad-drawer__section-toggle-left">
@@ -145,25 +254,28 @@ const fileStatusClass = (status: SessionFile['status']) => {
               <FileText :size="20" :stroke-width="1.5" />
             </div>
             <div class="pad-drawer__empty-title">暂 无 会 话 文 件</div>
-            <div class="pad-drawer__empty-desc">AI 调用文件工具时会在此记录</div>
+            <div class="pad-drawer__empty-desc">AI 调用文件工具 / 你上传的文件都会在此记录</div>
           </div>
           <ul v-else class="pad-drawer__files">
             <li
               v-for="f in sessionFiles"
-              :key="f.path"
+              :key="`${f.kind}-${f.path}`"
               class="pad-drawer__file-item"
-              :class="fileStatusClass(f.status)"
-              :title="f.path"
+              :class="fileStatusClass(f)"
+              :title="f.kind === 'user-image' ? `点击预览图片 (${f.mimeType || 'image'})` : f.path"
+              @click="onEntryClick(f)"
             >
               <div class="pad-drawer__file-icon">
-                <component :is="fileStatusIcon(f.status)" :size="14" :stroke-width="1.75" />
+                <component :is="fileStatusIcon(f)" :size="14" :stroke-width="1.75" />
               </div>
               <div class="pad-drawer__file-body">
                 <div class="pad-drawer__file-name">{{ f.name }}</div>
-                <div v-if="f.count > 1" class="pad-drawer__file-meta">
-                  {{ f.toolName }} · 修改 {{ f.count }} 次
+                <div class="pad-drawer__file-meta">
+                  <span v-if="f.kind === 'user-image'">{{ f.mimeType || 'image' }}</span>
+                  <span v-else-if="f.kind === 'user-file'">{{ f.mimeType || 'file' }} · {{ formatBytes(f.bytes ?? 0) }}</span>
+                  <span v-else-if="f.count > 1">{{ f.toolName }} · 修改 {{ f.count }} 次</span>
+                  <span v-else>{{ f.toolName }}</span>
                 </div>
-                <div v-else class="pad-drawer__file-meta">{{ f.toolName }}</div>
               </div>
             </li>
           </ul>
@@ -366,7 +478,7 @@ const fileStatusClass = (status: SessionFile['status']) => {
   padding: var(--pad-sp-2) var(--pad-sp-4);
   border-top: 1px solid var(--pad-border-subtle, var(--pad-border));
   transition: background var(--pad-dur-fast) ease;
-  cursor: default;
+  cursor: pointer;
 }
 .pad-drawer__file-item:first-child {
   border-top: none;
@@ -392,6 +504,11 @@ const fileStatusClass = (status: SessionFile['status']) => {
 }
 .pad-drawer__file-item.is-running .pad-drawer__file-icon {
   color: var(--pad-warning, #f59e0b);
+}
+/* v3.8: user 上传 image / file 用 accent 紫色 (跟 Composer chip 一致) */
+.pad-drawer__file-item.is-user-image .pad-drawer__file-icon,
+.pad-drawer__file-item.is-user-file .pad-drawer__file-icon {
+  color: var(--pad-accent, #6366f1);
 }
 .pad-drawer__file-body {
   flex: 1;

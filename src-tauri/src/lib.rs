@@ -9,7 +9,8 @@ mod config_store;
 mod index_file;
 mod keyring;
 mod model_catalog;  // v0.5.0-D D213: 静态 model metadata catalog
-mod sandbox;         // ADR-0020 P-Sec1: 沙箱加固 (Job Object + 审计)
+mod sandbox;         // ADR-0020 P-Sec1: 沙箱加固 (Job Object + 审计) + ADR-0022 WebView2 浏览器
+mod screenshot;      // ADR-0022 v3.2: webview 截图 (agent 识图工具)
 mod sidecar;
 
 use serde::{Deserialize, Serialize};
@@ -132,6 +133,22 @@ pub struct ClientConfig {
     // v0.5.0-v0.1: 删 active_agent 字段 (multi-agent persona 回滚, 详见 ADR-0024 superseded by ADR-0025)
 }
 
+/// ADR-0022 v3.5 (2026-08-23): 多模态 image content
+/// 跟 Pi SDK 0.84.2 RpcCommand.prompt.images schema 一致:
+///   { type: "image", data: base64_string, mimeType: "image/png" | ... }
+/// 透传到 sidecar stdin JSON, sidecar 端不动 (Pi SDK runRpcMode 原生支持)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageContent {
+    /// "image" 固定 (Pi SDK ImageContent 唯一类型)
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// base64 encoded image bytes (no data URL prefix)
+    pub data: String,
+    /// MIME type: "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    pub mime_type: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeychainInfoDto {
@@ -192,6 +209,590 @@ async fn list_api_keys(app: AppHandle) -> Result<Vec<KeychainInfoDto>, String> {
 #[tauri::command]
 async fn has_api_key(provider_id: String) -> Result<bool, String> {
     Ok(keyring::get(&provider_id)?.is_some())
+}
+
+// ====== ADR-0022 (2026-08-23): WebView2 内嵌浏览器 — Tauri command ======
+//   走 Tauri 2 的 WebviewWindow (底层 WebView2, 跑在 Tauri 进程里, 真内嵌)
+//   - 0 外部进程: 不像 chromiumoxide 启 Edge.exe
+//   - 1:1 等比天然成立: LLM 跟 user 看同一个 WebView2 实例
+//   - 单一 browser 实例 per session, 状态持续 (LLM 能 navigate → 读 → 跳 → 读)
+//
+//   sidecar 调这 3 个 command 走文件队列 (browser_request.json / browser_response.json),
+//   Tauri 这边 watcher 100ms 轮询 dispatch (详见 sidecar.rs::ensure_browser_watcher).
+//   PoC 范围: 只 web_navigate + web_get_text + web_get_url, click/type/scroll 后续.
+//
+//   关键技术点:
+//   - eval_with_callback (Tauri 2.11+): JS 结果 JSON 序列化后传给 callback,
+//     之前的 document.title trick 思路是错的 (window.title() 读 native title,
+//     document.title 是 HTML title, 两者不自动同步)
+//   - on_page_load 回调: page finished load 时通过 static Mutex<oneshot> 通知
+//     browser_navigate, 避免盲等
+//   - dock 模式: webview 窗口创建在主窗口右侧 (主窗口宽度的 40%, 高度 = 主窗口高度),
+//     主窗口 Moved/Resized 时自动同步 webview 位置 (像 IDE side panel 贴住)
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use tauri::webview::PageLoadEvent;
+use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tokio::sync::oneshot;
+
+static BROWSER_CREATED: AtomicBool = AtomicBool::new(false); // OnceLock 不能 reset, 用 AtomicBool 跟踪 webview 是否已创建
+static PAGE_LOAD_SIGNAL: OnceLock<StdMutex<Option<oneshot::Sender<()>>>> = OnceLock::new();
+static MAIN_WINDOW_LABEL: OnceLock<String> = OnceLock::new();
+
+fn page_load_signal_cell() -> &'static StdMutex<Option<oneshot::Sender<()>>> {
+    PAGE_LOAD_SIGNAL.get_or_init(|| StdMutex::new(None))
+}
+
+async fn ensure_browser_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    // 1. 已存在就直接返回 (label 唯一)
+    if BROWSER_CREATED.load(Ordering::SeqCst) {
+        if let Some(w) = app.get_webview_window("pi-browser-panel") {
+            return Ok(w);
+        }
+        // 已 destroy, 重置 flag 走创建路径
+        BROWSER_CREATED.store(false, Ordering::SeqCst);
+    }
+    // 2. 创建新窗口 — 默认 hidden, FE 调 toggle_browser_panel 才显示
+    //   (避免一启动就弹个新窗口, IDE 风格: 默认无 panel, 用户主动开)
+    let label = "pi-browser-panel".to_string();
+    let app_handle_for_event = app.clone();
+    // ADR-0022 v3.4: z-order 关联主窗口
+    //   owner 让 webview 总是 above 主窗口 in z-order, 主窗口最小化时 webview 也藏
+    //   user 反馈"切到主程序时 webview 被别的东西挡住" — 修了
+    // 显式 let 绑定 builder, 因为 .owner() 返 Result, 链式里 `?` 后不能直接接 .method() 跨行
+    let main_win = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found for owner (main 创建了吗?)".to_string())?;
+    let mut builder = WebviewWindowBuilder::new(
+        app,
+        &label,
+        WebviewUrl::External(
+            "about:blank"
+                .parse()
+                .map_err(|e| format!("parse about:blank: {e}"))?,
+        ),
+    )
+    .title("Browser")
+    // ADR-0022 v3.4: 16:9 比例 + 等比缩小 (800x450) — 之前 1280x720 太大超出屏幕
+    //   比例 16:9 保留 (跟现代显示器一致), 但默认尺寸减半, user 看着不"占满屏幕"
+    //   拖主窗口时 webview 大小不被 dock 覆盖 (user 调过的大小保持)
+    .inner_size(800.0, 450.0)
+    .min_inner_size(480.0, 270.0)
+    .visible(false) // 默认隐藏, 等 toggle_browser_panel 才显示
+    // ADR-0022 v3.2: 恢复 native decorations
+    //   - 4 角自动有 Windows 原生 resize 弧度 (鼠标移到边角显示可拖拽)
+    //   - 牺牲 P1 v3 的"无标题栏"美学, 但 user 明确要 4 角拖拽提示
+    //   - skip_taskbar 仍然 true, 不在 Windows 任务栏显示
+    //   - title 改成简短 "Browser" 避免占空间
+    .decorations(true) // native title bar + 4 角 resize 弧度
+    .skip_taskbar(true) // 不在 Windows 任务栏显示图标
+    .resizable(true); // 用户可以调 webview 大小, dock 联动不会覆盖
+    // .owner() 返 Result<Self>, 用 `?` 解开赋值回去 (Rust parser 不喜欢 `?` 跨行接 .method())
+    // 注意: owner() 返 tauri::Result, error 是 tauri::Error, 我们要 String, 所以 map_err
+    builder = builder.owner(&main_win).map_err(|e| format!("owner: {e}"))?;
+    let window = builder
+        .on_page_load(|window, payload| {
+            // PageLoadEvent::Finished = 页面 DOM loaded, 此时 SPA 通常已渲染.
+            // callback 是 'static + Send + Sync, 只能从 static 取 oneshot sender.
+            if matches!(payload.event(), PageLoadEvent::Finished) {
+                if let Some(tx) = page_load_signal_cell().lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                // ADR-0022 v3.1: 拦截 target=_blank 和 window.open, 强制 webview 内 navigate
+                //   否则百度搜索结果点的链接会触发 Tauri 的 shell.openExternal, 而我们的 capability
+                //   默认不允许 shell:allow-open → 报 "shell.open not allowed" 错
+                //   每次 page load (新页面) 重新注入, 旧页面的 patch 失效
+                //   (DOMContentLoaded 时注册 capture phase listener + 覆盖 window.open)
+                //
+                // 注意: Tauri 2 的 WebviewWindow::eval 是 fire-and-forget, 这里我们不需要
+                //   返回值, 用 plain eval 即可. JS 抛异常被 wry 吞, 不阻塞.
+                let _ = window.eval(
+                    r#"
+                    (function() {
+                      // 拦截所有 a[target=_blank] click, 强制 _self
+                      document.addEventListener('click', function(e) {
+                        var a = e.target && e.target.closest ? e.target.closest('a[target=_blank]') : null;
+                        if (a) a.target = '_self';
+                      }, true);
+                      // 覆盖 window.open, 让它同窗口 navigate
+                      var origOpen = window.open;
+                      window.open = function(url) {
+                        if (url) window.location.href = String(url);
+                        return null;
+                      };
+                    })();
+                    "#,
+                );
+            }
+        })
+        .build()
+        .map_err(|e| format!("create browser window: {e}"))?;
+    // 3. 注册 window-level listener (WebviewWindowBuilder 没这方法, build 后挂)
+    //    user 点 X 触发 Destroyed — 清 BROWSER_CREATED 让下次 toggle 重新创建
+    //    注意: WebviewWindow::on_window_event 签名是 Fn(&WindowEvent), window 自身是隐式
+    //    (callback 已经绑到具体 window), 不要传第二个参数.
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            BROWSER_CREATED.store(false, Ordering::SeqCst);
+            let _ = app_handle_for_event.emit("browser-panel:destroyed", ());
+            log::info!("[browser] webview destroyed by user, BROWSER_CREATED=false");
+        }
+    });
+    BROWSER_CREATED.store(true, Ordering::SeqCst);
+    log::info!("[browser] created WebviewWindow: pi-browser-panel (WebView2, hidden, await toggle)");
+    Ok(window)
+}
+
+/// 把 webview 窗口 dock 到主窗口右侧 (紧密贴合):
+///   x = main.right - 1 (1px 重叠消除边框缝隙, 视觉无间隙)
+///   y = main.top
+///
+/// ADR-0022 v3.5: **同步宽度 + 16:9 比例锁定高度**
+///   - width = clamp(主窗口宽 50%, 640, 主窗口宽 - 400)
+///     (min 640: 太窄网页出水平滚动条; max 主窗口宽 - 400: 留至少 400px 给 chat 列)
+///   - height = width * 9 / 16  (16:9 比例, 跟 webview 内的网页渲染一致)
+///   - 主窗口 Moved/Resized 时同步位置 + 尺寸, webview 永远是 16:9
+///   - 之前 v3.3 "只同步位置" 被 user 反馈"看着不像 16:9" — 因为 dock 时算的是 800x450 (16:9),
+///     但 user 拖主窗口时 webview 不动, 比例看着漂移
+fn dock_browser_to_main(webview: &tauri::WebviewWindow) -> Result<(), String> {
+    let main_label = MAIN_WINDOW_LABEL
+        .get()
+        .ok_or_else(|| "main window label not registered (setup 未跑完?)".to_string())?;
+    let main = webview
+        .app_handle()
+        .get_webview_window(main_label)
+        .ok_or_else(|| format!("main window '{main_label}' not found"))?;
+    let main_pos = main
+        .outer_position()
+        .map_err(|e| format!("main outer_position: {e}"))?;
+    let main_size = main
+        .outer_size()
+        .map_err(|e| format!("main outer_size: {e}"))?;
+    // 宽度: clamp(主窗口宽 50%, 640, 主窗口宽 - 400)
+    let ideal_w = ((main_size.width as f64) * 0.5).round() as u32;
+    let min_w: u32 = 640;
+    let max_w = main_size.width.saturating_sub(400).max(min_w);
+    let dock_w = ideal_w.clamp(min_w, max_w);
+    // 16:9 比例锁定 (高度 = 宽度 * 9/16)
+    let dock_h = ((dock_w as f64) * 9.0 / 16.0).round() as u32;
+    // 位置: x = 主窗口右边缘 - 1px 重叠, y = 主窗口顶
+    let dock_x = main_pos.x + main_size.width as i32 - 1;
+    let dock_y = main_pos.y;
+    webview
+        .set_position(tauri::PhysicalPosition::new(dock_x, dock_y))
+        .map_err(|e| format!("set_position: {e}"))?;
+    webview
+        .set_size(tauri::PhysicalSize::new(dock_w, dock_h))
+        .map_err(|e| format!("set_size: {e}"))?;
+    log::debug!(
+        "[browser] docked: x={dock_x} y={dock_y} w={dock_w} h={dock_h} (16:9 锁定, 主窗口 {}x{})",
+        main_size.width,
+        main_size.height
+    );
+    Ok(())
+}
+
+async fn eval_webview(window: &tauri::WebviewWindow, js: &str) -> Result<String, String> {
+    // Tauri 2.11+ 的 eval_with_callback: JS 结果 JSON 序列化后传给 callback.
+    // 之前的 document.title trick 是错的 — window.title() 读 native window title,
+    // document.title 是 HTML title, 两者不自动同步 (wry 不监听 DOM title 变化).
+    //
+    // wry 限制 (Tauri 2 注释明示): "Exception is ignored because of the limitation
+    // on Windows. You can catch it yourself and return as string as a workaround."
+    // 也就是说 JS throw 不会触发 callback, 必须在 JS 里 try/catch 后 return string.
+    let (tx, rx) = oneshot::channel::<String>();
+    // eval_with_callback 签名是 Fn (不只 FnOnce), 但 wry 实际只调一次.
+    // 用 Arc<Mutex<Option<>>> 包装, 让 Fn 多次调用也安全 (只第一次 send).
+    let tx_cell = Arc::new(StdMutex::new(Some(tx)));
+    window
+        .eval_with_callback(js.to_string(), move |result| {
+            if let Some(tx) = tx_cell.lock().unwrap().take() {
+                let _ = tx.send(result);
+            }
+        })
+        .map_err(|e| format!("eval_with_callback: {e}"))?;
+    // 等 callback, 5s timeout (普通 JS 几 ms, 慢 JS 也少过 5s;
+    //   超时大概率是 JS 抛了异常被 wry 吞了)
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+        .await
+        .map_err(|_| {
+            "eval_with_callback timeout 5s (JS 可能抛了异常被 wry 吞, 需要 JS 自己 try/catch)"
+        })?
+        .map_err(|e| format!("eval channel dropped: {e}"))?;
+    Ok(result)
+}
+
+// ====== ADR-0022 v3.5 (2026-08-23): User upload (paste/drag image 或 file) ======
+// 流程:
+//   FE composer 粘贴/拖拽 image -> blob -> base64 -> invoke save_uploaded_file
+//   FE composer 拖拽 file -> FileReader.readAsDataURL -> 同上
+//   Tauri 写到 <agentDir>/uploads/<uuid>.<ext>, 返绝对路径
+//   FE 拿路径, 拼到 message text (file) 或 images[] (image)
+//
+// 限制:
+//   - 单文件 max 10 MB (大文件走 LLM read tool 读路径更高效)
+//   - 扩展名白名单: 防恶意扩展名 (exe, bat, com, scr 等)
+const UPLOAD_MAX_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+const UPLOAD_EXT_BLOCKLIST: &[&str] = &[
+    "exe", "bat", "cmd", "com", "scr", "pif", "vbs", "vbe", "js", "jse", "wsf", "wsh",
+    "ps1", "psm1", "msi", "msp", "dll", "jar", "sh", "app", "dmg", "iso",
+];
+
+#[tauri::command]
+async fn save_uploaded_file(
+    app: AppHandle,
+    // 原始 bytes (FE 端从 FileReader.readAsArrayBuffer 拿 Uint8Array 传过来)
+    // 不用 base64 是因为 base64 解码耗时 + 3/4 膨胀; 直接 bytes 更高效
+    data: Vec<u8>,
+    // 用户原始文件名 (用来定扩展名), 实际存盘用 uuid 重命名防冲突
+    filename: String,
+) -> Result<String, String> {
+    if data.is_empty() {
+        return Err("data is empty".to_string());
+    }
+    if data.len() > UPLOAD_MAX_BYTES {
+        return Err(format!(
+            "file too large: {} bytes (max {} MB)",
+            data.len(),
+            UPLOAD_MAX_BYTES / 1024 / 1024,
+        ));
+    }
+    // 扩展名校验: 拿 filename 最后 .xxx 段, 比 blocklist
+    let ext = std::path::Path::new(&filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if UPLOAD_EXT_BLOCKLIST.contains(&ext.as_str()) {
+        return Err(format!("extension '{ext}' is blocked (security)"));
+    }
+    // 路径: <agentDir>/uploads/<uuid>.<ext>
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|e| format!("home_dir: {e}"))?;
+    let agent_dir = home.join(".pi").join("agent");
+    let upload_dir = agent_dir.join("uploads");
+    std::fs::create_dir_all(&upload_dir).map_err(|e| format!("create_dir_all uploads: {e}"))?;
+    // uuid v4 (简单随机, 不需要 v7 排序)
+    let uuid = format!(
+        "{:x}{:x}-{:x}-{:x}-{:x}-{:x}{:x}{:x}",
+        rand_u32(),
+        rand_u32(),
+        rand_u32() & 0xFFFF | 0x4000, // version 4
+        rand_u32() & 0x3FFF | 0x8000, // variant
+        rand_u32(),
+        rand_u32(),
+        rand_u32(),
+        rand_u32(),
+    );
+    let safe_name = if ext.is_empty() {
+        uuid.clone()
+    } else {
+        format!("{uuid}.{ext}")
+    };
+    let target = upload_dir.join(&safe_name);
+    std::fs::write(&target, &data).map_err(|e| format!("write upload: {e}"))?;
+    let path_str = target.to_string_lossy().to_string();
+    log::info!(
+        "[upload] saved {} bytes to {path_str} (orig filename: {filename})",
+        data.len()
+    );
+    Ok(path_str)
+}
+
+// ====== ADR-0022 v3.8 (2026-08-23): 文件预览 (前 N 行) ======
+// FE 端 useAttachmentPreview 调, 拿 text 文件前 200 行显示
+// (text/markdown/code 等文本类; binary 文件 FE 端不调, 直接显示 "binary" 占位)
+#[tauri::command]
+async fn read_text_file_preview(path: String, max_lines: usize) -> Result<String, String> {
+    if path.is_empty() {
+        return Err("path is empty".to_string());
+    }
+    // 限制 max_lines 防止 OOM (极端情况 1GB 文件不该一次读)
+    let bounded = max_lines.min(10_000);
+    // 用 tokio::task::spawn_blocking 跑 sync std::fs (防阻塞 async runtime)
+    let path_clone = path.clone();
+    let content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&path_clone))
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"))?
+        .map_err(|e| format!("read {path}: {e}"))?;
+    let lines: Vec<&str> = content.lines().take(bounded).collect();
+    Ok(lines.join("\n"))
+}
+
+// 简单随机 u32 (基于 SystemTime nanos 抖动, 不需要 crypto-grade, 只是 filename 防冲突)
+fn rand_u32() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    nanos.wrapping_add(std::process::id() as u64) as u32 ^ (nanos as u32)
+}
+
+#[tauri::command]
+async fn browser_navigate(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    // URL 校验
+    let parsed = url::Url::parse(&url).map_err(|e| format!("invalid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("only http/https, got: {}", parsed.scheme()));
+    }
+    log::info!("[browser] browser_navigate: {url}");
+    let window = ensure_browser_window(&app).await?;
+    // setup oneshot 等 page load
+    let (tx, rx) = oneshot::channel::<()>();
+    *page_load_signal_cell().lock().unwrap() = Some(tx);
+    // navigate 走 wry 异步
+    window.navigate(parsed).map_err(|e| format!("navigate: {e}"))?;
+    // 等 page load, 30s timeout
+    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        Ok(Ok(())) => log::info!("[browser] page load finished: {url}"),
+        Ok(Err(_)) => log::warn!("[browser] page load channel dropped: {url}"),
+        Err(_) => log::warn!("[browser] page load timeout 30s: {url}"),
+    }
+    // 读 text — 简单页面 1 次就够, SPA 可能要 1-2s 渲染, poll 几次
+    // (poll 总时长 ~10s, 超时兜底在最后)
+    let mut text = String::new();
+    for i in 0..20 {
+        match eval_webview(&window, "document.body ? document.body.innerText : ''").await {
+            Ok(t) if !t.trim().is_empty() => {
+                text = t;
+                log::info!(
+                    "[browser] text non-empty after {i} polls ({} bytes)",
+                    text.len()
+                );
+                break;
+            }
+            _ => {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+    if text.is_empty() {
+        // 兜底: 10s 内始终空, 最后一次读
+        text = eval_webview(&window, "document.body ? document.body.innerText : ''")
+            .await
+            .unwrap_or_default();
+    }
+    let truncated = if text.len() > 50_000 {
+        let mut cut = 50_000;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!(
+            "{}...\n[truncated, total {} bytes]",
+            &text[..cut],
+            text.len()
+        )
+    } else {
+        text
+    };
+    log::info!(
+        "[browser] navigate ok: {url} → {} bytes",
+        truncated.len()
+    );
+    Ok(truncated)
+}
+
+#[tauri::command]
+async fn browser_get_text(app: tauri::AppHandle) -> Result<String, String> {
+    log::info!("[browser] browser_get_text");
+    let window = ensure_browser_window(&app).await?;
+    let text = eval_webview(&window, "document.body ? document.body.innerText : ''").await?;
+    let truncated = if text.len() > 50_000 {
+        let mut cut = 50_000;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!(
+            "{}...\n[truncated, total {} bytes]",
+            &text[..cut],
+            text.len()
+        )
+    } else {
+        text
+    };
+    Ok(truncated)
+}
+
+#[tauri::command]
+async fn browser_get_url(app: tauri::AppHandle) -> Result<String, String> {
+    let window = ensure_browser_window(&app).await?;
+    let url = eval_webview(&window, "window.location.href").await?;
+    Ok(url)
+}
+
+// ===== ADR-0022 v2: 显隐 toggle =====
+// FE 右上角 button → toggle_browser_panel
+//   状态机: 不存在 (未创建) | hidden | visible
+//     - 不存在: ensure_browser_window 创建 + dock + show
+//     - hidden: dock (主窗口可能移了) + show
+//     - visible: hide (不 destroy, 保留 webview state, 下次 toggle 复用)
+// user 点 webview 窗口的 X 触发 Destroyed → BROWSER_CREATED=false + emit event FE 同步
+
+#[derive(serde::Serialize)]
+struct BrowserPanelState {
+    visible: bool,
+}
+
+#[tauri::command]
+async fn toggle_browser_panel(app: tauri::AppHandle) -> Result<BrowserPanelState, String> {
+    // 1. 已存在 (可能 hidden 或 visible)
+    if BROWSER_CREATED.load(Ordering::SeqCst) {
+        if let Some(w) = app.get_webview_window("pi-browser-panel") {
+            let currently_visible = w.is_visible().unwrap_or(false);
+            if currently_visible {
+                w.hide().map_err(|e| format!("hide: {e}"))?;
+                log::info!("[browser] panel hidden (toggle)");
+                return Ok(BrowserPanelState { visible: false });
+            } else {
+                // hidden → 显示, 先 dock 同步位置再 show
+                let _ = dock_browser_to_main(&w);
+                w.show().map_err(|e| format!("show: {e}"))?;
+                w.set_focus().ok();
+                log::info!("[browser] panel shown (toggle from hidden)");
+                return Ok(BrowserPanelState { visible: true });
+            }
+        }
+        // BROWSER_CREATED=true 但 window 已不存在 (user 点了 X),
+        // flag 会被 Destroyed 事件清掉, 这里也兜底一下
+        BROWSER_CREATED.store(false, Ordering::SeqCst);
+    }
+    // 2. 不存在 → 创建
+    let window = ensure_browser_window(&app).await?;
+    // 3. dock 一次 (新窗口没位置)
+    let _ = dock_browser_to_main(&window);
+    window.show().map_err(|e| format!("show: {e}"))?;
+    window.set_focus().ok();
+    log::info!("[browser] panel created+shown (toggle from non-existent)");
+    Ok(BrowserPanelState { visible: true })
+}
+
+#[tauri::command]
+async fn get_browser_panel_state(app: tauri::AppHandle) -> Result<BrowserPanelState, String> {
+    if BROWSER_CREATED.load(Ordering::SeqCst) {
+        if let Some(w) = app.get_webview_window("pi-browser-panel") {
+            return Ok(BrowserPanelState {
+                visible: w.is_visible().unwrap_or(false),
+            });
+        }
+        // 兜底: BROWSER_CREATED=true 但 window 已 destroy
+        BROWSER_CREATED.store(false, Ordering::SeqCst);
+    }
+    Ok(BrowserPanelState { visible: false })
+}
+
+// ===== ADR-0022 v3: Browser Panel 主动控制 (FE 顶部 URL bar 调用) =====
+// 之前只有 agent 工具 (sidecar 调 web_navigate), 现在 user 也能在主窗口内
+//   直接控制 webview: 输入 URL / 后退 / 前进 / 刷新 — 不走 agent
+// 这 4 个 command 都调 ensure_browser_window 让 webview 存在(没创建就创建),
+//   然后直接 dispatch 到 webview 自身 API 或 history 操纵, 不返回内容 (user 视觉可见 webview).
+
+#[tauri::command]
+async fn browser_navigate_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let parsed = url::Url::parse(&url).map_err(|e| format!("invalid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("only http/https, got: {}", parsed.scheme()));
+    }
+    log::info!("[browser] browser_navigate_url (user): {url}");
+    let window = ensure_browser_window(&app).await?;
+    window.navigate(parsed).map_err(|e| format!("navigate: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn browser_navigate_back(app: tauri::AppHandle) -> Result<(), String> {
+    let window = ensure_browser_window(&app).await?;
+    // window.eval 即可 (不需要返回值, fire-and-forget); JS 抛异常 wry 吞, 不阻塞
+    window
+        .eval("history.back()")
+        .map_err(|e| format!("eval history.back: {e}"))?;
+    log::info!("[browser] history.back()");
+    Ok(())
+}
+
+#[tauri::command]
+async fn browser_navigate_forward(app: tauri::AppHandle) -> Result<(), String> {
+    let window = ensure_browser_window(&app).await?;
+    window
+        .eval("history.forward()")
+        .map_err(|e| format!("eval history.forward: {e}"))?;
+    log::info!("[browser] history.forward()");
+    Ok(())
+}
+
+#[tauri::command]
+async fn browser_navigate_refresh(app: tauri::AppHandle) -> Result<(), String> {
+    let window = ensure_browser_window(&app).await?;
+    window
+        .eval("location.reload()")
+        .map_err(|e| format!("eval location.reload: {e}"))?;
+    log::info!("[browser] location.reload()");
+    Ok(())
+}
+
+// ===== ADR-0022 v3.2: webview 截图 (agent 识图工具) =====
+// 背景: agent 之前只有 text-based 工具 (web_navigate / web_get_text / web_get_url),
+//   看 webview 视觉内容 (例如判断 UI 渲染、识别图片/SVG/canvas) 必须用截图.
+// Tauri 2 + wry 都没暴露 screenshot API, 我们用 Windows API PrintWindow + PNG 编码.
+// 关键 flag: PW_RENDERFULLCONTENT (0x2) — WebView2 是 GPU 合成层, 默认 GDI 截不到
+//   实际内容, 必须传这 flag.
+//
+// 返: base64-encoded PNG bytes (FE 方便当 image 块发 LLM).
+//   (sidecar 走文件队列, 不能直接传 raw bytes; base64 string OK, 1MB 截图 = 1.3MB base64)
+#[tauri::command]
+async fn browser_screenshot(app: tauri::AppHandle) -> Result<String, String> {
+    let window = ensure_browser_window(&app).await?;
+    // 拿底层 HWND (WindowHandle 不是 Send, block 完立即 drop)
+    let hwnd_isize: isize = {
+        use raw_window_handle::HasWindowHandle;
+        let handle = window
+            .window_handle()
+            .map_err(|e| format!("get window_handle: {e}"))?;
+        let raw: raw_window_handle::RawWindowHandle = handle.as_raw();
+        match raw {
+            raw_window_handle::RawWindowHandle::Win32(h) => h.hwnd.get() as isize,
+            _ => {
+                return Err("non-Windows window handle, screenshot only supports Windows".into());
+            }
+        }
+    };
+    // 拿 size: 用 Tauri 的 outer_size() 拿 frame 尺寸 (含 title bar),
+    //   比 GetClientRect 稳 — 不依赖 window 是不是 decorated / client area 计算
+    //   (之前 GetClientRect 在某些情况下返 0, GetDIBits 返 lines=0 → "截图失败")
+    let outer = window
+        .outer_size()
+        .map_err(|e| format!("outer_size: {e}"))?;
+    let width = outer.width as i32;
+    let height = outer.height as i32;
+    // Fallback: outer_size 返 0 时 (罕见, e.g. minimized 或 race) 用 builder default 800x450
+    let (width, height) = if width <= 0 || height <= 0 {
+        log::warn!(
+            "[browser] screenshot: outer_size=0, fallback to 800x450"
+        );
+        (800, 450)
+    } else {
+        (width, height)
+    };
+    log::info!(
+        "[browser] screenshot start: hwnd={hwnd_isize} {width}x{height}"
+    );
+    // PrintWindow + PNG 编码在 tokio 阻塞池跑 (同步 API)
+    let png_bytes = tokio::task::spawn_blocking(move || {
+        crate::screenshot::screenshot_hwnd_png(hwnd_isize, width, height)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {e}"))??;
+    // base64 编码方便 JSON 返
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+    log::info!(
+        "[browser] screenshot ok: {} raw bytes, {} base64",
+        png_bytes.len(),
+        b64.len()
+    );
+    Ok(b64)
 }
 
 // ====== v0.4.4 Skills (Pi SDK 暴露) ======
@@ -1879,13 +2480,22 @@ async fn send_prompt(
     session_id: String,
     content: String,
     config: ClientConfig,
+    // ADR-0022 v3.5 (2026-08-23): 多模态 — image content blocks
+    //   Pi SDK 0.84.2 RpcCommand.prompt.images 字段原生支持
+    //   vision model 接收后看图, 文本模型忽略
+    //   FE 端从 composer 粘贴/拖拽图片 -> 上传 Tauri -> 拿 base64 -> 拼到 images 数组
+    images: Option<Vec<ImageContent>>,
 ) -> Result<(), String> {
     debug_log(&format!(
-        "send_prompt: session={}, content_len={}, provider={}, model={}, providerId={}, baseUrl={:?}",
-        session_id, content.len(), config.provider, config.model, config.provider_id, config.base_url
+        "send_prompt: session={}, content_len={}, images={}, provider={}, model={}",
+        session_id,
+        content.len(),
+        images.as_ref().map(|v| v.len()).unwrap_or(0),
+        config.provider,
+        config.model,
     ));
-    if content.trim().is_empty() {
-        return Err("content is empty".to_string());
+    if content.trim().is_empty() && images.as_ref().map(|v| v.is_empty()).unwrap_or(true) {
+        return Err("content and images are both empty".to_string());
     }
     // 从 keychain 取 key (永不出现在前端, 不进日志)
     let api_key = match keyring::get(&config.provider_id) {
@@ -1929,12 +2539,21 @@ async fn send_prompt(
     // v0.5.0: 构造 Pi SDK RpcCommand.prompt 协议 (跟 Pi SDK main.ts 一致)
     // RpcCommand.prompt schema: { id?, type: "prompt", message, images?, streamingBehavior?: "steer" | "followUp" }
     // Pi SDK 0.84.2 runRpcMode 接收后 emit preflightResult 调 success(id, "prompt") → RpcResponse.
-    let prompt_cmd = serde_json::json!({
+    // ADR-0022 v3.5: 透传 images 数组给 Pi SDK, vision model 看图
+    let mut prompt_cmd = serde_json::json!({
         "id": format!("prompt-{session_id}"),
         "type": "prompt",
         "message": content,
         "streamingBehavior": "steer",
     });
+    if let Some(imgs) = images {
+        if !imgs.is_empty() {
+            prompt_cmd.as_object_mut().unwrap().insert(
+                "images".to_string(),
+                serde_json::to_value(imgs).map_err(|e| format!("ser images: {e}"))?,
+            );
+        }
+    }
     let prompt_cmd_json = serde_json::to_string(&prompt_cmd)
         .map_err(|e| format!("ser prompt cmd: {e}"))?;
 
@@ -3405,6 +4024,21 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map(|p| std::fs::create_dir_all(p));
+            // ADR-0022 dock 联动: 主窗口 Moved/Resized 时同步 webview 位置 (贴住)
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = MAIN_WINDOW_LABEL.set("main".to_string());
+                let app_handle = app.handle().clone();
+                main.on_window_event(move |event| match event {
+                    tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                        if let Some(webview) =
+                            app_handle.get_webview_window("pi-browser-panel")
+                        {
+                            let _ = dock_browser_to_main(&webview);
+                        }
+                    }
+                    _ => {}
+                });
+            }
             log::info!("Pi Agent Desktop started");
             Ok(())
         })
@@ -3414,10 +4048,28 @@ pub fn run() {
             list_api_keys,
             has_api_key,
             send_prompt,
+            // ADR-0022 v3.5 (2026-08-23): user 上传 (粘贴图片 / 拖文件) — Tauri 存盘后返绝对路径
+            save_uploaded_file,
+            // ADR-0022 v3.8: 文件预览 (读 text 前 N 行, 给 useAttachmentPreview 用)
+            read_text_file_preview,
             compact_session,  // Bug #2 修 (2026-08-18): 独立 compact invoke
             kill_sidecar,  // v0.4.6 修 (2026-08-18): abort 兜底时 force kill 旧 sidecar
             fetch_provider_models,
             verify_provider_connection,  // P0 #1: 测试连接按钮
+            // ADR-0022: WebView2 内嵌浏览器 (Tauri WebviewWindow, 走 reverse RPC)
+            browser_navigate,
+            browser_get_text,
+            browser_get_url,
+            // ADR-0022 v2: FE 右上角按钮 toggle 显隐
+            toggle_browser_panel,
+            get_browser_panel_state,
+            // ADR-0022 v3: FE 顶部 URL bar 主动控制 (不依赖 agent)
+            browser_navigate_url,
+            browser_navigate_back,
+            browser_navigate_forward,
+            browser_navigate_refresh,
+            // ADR-0022 v3.2: webview 截图 (agent 识图工具, vision model 看图)
+            browser_screenshot,
             get_model_catalog,  // v0.5.0-D D213: 静态 catalog
             migrate_from_env,
             ensure_default_workspace,

@@ -46,6 +46,19 @@ export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
+  /**
+   * ADR-0022 v3.7 (2026-08-23): user 消息附带的 image
+   *   - 跟 Pi SDK ImageContent schema 对齐: { data: base64, mimeType }
+   *   - 渲染: 消息气泡里以 <img> 缩略图展示, 可点击放大预览
+   *   - assistant 消息不需要 (LLM 响应 text 包含图片引用)
+   */
+  images?: Array<{ data: string; mimeType: string }>;
+  /**
+   * ADR-0022 v3.7: user 消息附带的 file paths
+   *   - 跟 attachments store 一样, LLM 看到 <file> tag 自己 read
+   *   - 渲染: 消息气泡里显示文件名 chip (跟 file-ref chip 类似)
+   */
+  files?: Array<{ path: string; filename: string; mimeType: string; bytes: number }>;
   createdAt: string;
   /**
    * v0.4.1 step 累加: 一次 LLM run 可能跑多个 turn (tool_call 链), 每个 turn = 1 step.

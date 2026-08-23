@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
+import { piTauri } from '@/lib/tauri';
 
 export type SidebarTab = 'work' | 'code' | 'design';
 
@@ -61,6 +62,10 @@ export const useUiStore = defineStore('ui', () => {
   // Task Drawer (right)
   const drawerCollapsed = ref(false);
 
+  // ADR-0022 v2 (2026-08-23): Browser Panel (WebView2, agent 控制的浏览器) 显隐
+  //   默认 false, 启动时从 Rust 同步, FE 右上角按钮调 toggleBrowserPanel 切
+  const browserPanelVisible = ref(false);
+
   // Layout widths (拖动持久化)
   const widths = ref<ColumnWidths>(loadWidths());
 
@@ -107,6 +112,34 @@ export const useUiStore = defineStore('ui', () => {
   }
   function setDrawerCollapsed(v: boolean) {
     drawerCollapsed.value = v;
+  }
+
+  // ADR-0022 v2: Browser Panel 显隐 toggle
+  //   调 piTauri.toggleBrowserPanel(), Rust 端创建/dock/show/hide 都会同步状态回来
+  //   失败时 (e.g. webview create 报错) 保持当前 state, 不乐观更新
+  // ADR-0022 v3: 打开时自动收起 TaskDrawer (右侧区域避免 2 个 panel 重叠)
+  //   关闭时不动 drawer (用户自己决定是否打开)
+  async function toggleBrowserPanel() {
+    try {
+      const state = await piTauri.toggleBrowserPanel();
+      browserPanelVisible.value = state.visible;
+      if (state.visible && !drawerCollapsed.value) {
+        drawerCollapsed.value = true;
+      }
+    } catch (e) {
+      console.error('[ui] toggleBrowserPanel failed', e);
+    }
+  }
+
+  /** ADR-0022 v2: 启动时从 Rust 同步初始 Browser Panel 状态 */
+  async function initBrowserPanelState() {
+    const state = await piTauri.getBrowserPanelState();
+    browserPanelVisible.value = state.visible;
+  }
+
+  /** ADR-0022 v2: webview 被 user 主动点 X 销毁时, Rust emit browser-panel:destroyed */
+  function onBrowserPanelDestroyed() {
+    browserPanelVisible.value = false;
   }
 
   function setActiveTab(t: SidebarTab) {
@@ -203,6 +236,7 @@ export const useUiStore = defineStore('ui', () => {
     // state
     sidebarCollapsed,
     drawerCollapsed,
+    browserPanelVisible,  // ADR-0022 v2
     activeTab,
     widths,
     viewMode,
@@ -215,6 +249,9 @@ export const useUiStore = defineStore('ui', () => {
     setSidebarCollapsed,
     toggleDrawer,
     setDrawerCollapsed,
+    toggleBrowserPanel,  // ADR-0022 v2
+    initBrowserPanelState,  // ADR-0022 v2
+    onBrowserPanelDestroyed,  // ADR-0022 v2
     setActiveTab,
     setSidebarWidth,
     setDrawerWidth,

@@ -296,6 +296,11 @@ class PiTauriClient {
   async sendPrompt(
     sessionId: string,
     content: string,
+    // ADR-0022 v3.5 (2026-08-23): 多模态 image content blocks
+    //   Pi SDK 0.84.2 RpcCommand.prompt.images 字段原生支持
+    //   vision model 看图, 文本模型忽略
+    //   数组为空/undefined 时 Rust 端不构造 images 字段 (兼容老逻辑)
+    images: Array<{ type: 'image'; data: string; mimeType: string }> = [],
     configGetter: () => {
       providerId: string;
       provider: string;
@@ -341,6 +346,8 @@ class PiTauriClient {
       const res = await invoke('send_prompt', {
         sessionId,
         content,
+        // ADR-0022 v3.5: 透传 image content blocks 给 Pi SDK
+        images: images.length > 0 ? images : null,
         config: {
           providerId: cfg.providerId,
           provider: cfg.provider,
@@ -402,6 +409,111 @@ class PiTauriClient {
     } catch (e) {
       console.error('[pi-tauri] killSidecar FAILED', e);
       return false;
+    }
+  }
+
+  /**
+   * ADR-0022 v2 (2026-08-23): 切换 Browser Panel 显隐 (右上角 button 调用)
+   *   - 不存在 → 创建 + dock 主窗口右侧 + show
+   *   - hidden → dock 同步位置 + show
+   *   - visible → hide (不 destroy, 保留 webview state, 下次 toggle 复用)
+   * @returns 新状态 { visible: boolean }
+   */
+  async toggleBrowserPanel(): Promise<{ visible: boolean }> {
+    try {
+      const res = await invoke<{ visible: boolean }>('toggle_browser_panel');
+      console.log('[pi-tauri] toggleBrowserPanel →', res);
+      return res;
+    } catch (e) {
+      console.error('[pi-tauri] toggleBrowserPanel FAILED', e);
+      throw e;
+    }
+  }
+
+  /** ADR-0022 v2: 启动时同步 Browser Panel 初始状态 (visible/hidden/不存在) */
+  async getBrowserPanelState(): Promise<{ visible: boolean }> {
+    try {
+      return await invoke<{ visible: boolean }>('get_browser_panel_state');
+    } catch (e) {
+      console.error('[pi-tauri] getBrowserPanelState FAILED', e);
+      return { visible: false };
+    }
+  }
+
+  /**
+   * ADR-0022 v3.5 (2026-08-23): user 上传 (粘贴图片 / 拖文件) 存盘
+   * 把 blob/arraybuffer 转成 Uint8Array, 传 bytes 给 Tauri 写盘
+   * 返绝对路径, FE 再用路径拼到 message text (file) 或 images[] (image)
+   *
+   * 限制: 10 MB / 块, 扩展名白名单 (FE 端也校验一次, Rust 端兜底)
+   */
+  async saveUploadedFile(data: Uint8Array, filename: string): Promise<string> {
+    try {
+      // Tauri command 期望 Vec<u8>, JS 传 number[] 序列化为 JSON 时会失败 (会变成 array of numbers, deserialize 失败)
+      // 用 invoke 直接传: Tauri 2 支持 Uint8Array 跨 IPC, 自动序列化
+      const path = await invoke<string>('save_uploaded_file', { data, filename });
+      console.log('[pi-tauri] saveUploadedFile', { filename, path, bytes: data.byteLength });
+      return path;
+    } catch (e) {
+      console.error('[pi-tauri] saveUploadedFile FAILED', e);
+      throw e;
+    }
+  }
+
+  /**
+   * ADR-0022 v3.8 (2026-08-23): 读 text 文件前 N 行, 给 useAttachmentPreview 用 (Composer file chip 点开预览用, TaskDrawer 文件点开预览用, ChatMessage 用户上传文件点开预览用)
+   * Rust 端 spawn_blocking 跑 sync std::fs (防阻塞 async runtime), 限 max_lines <= 10_000 防 OOM
+   */
+  async readTextFilePreview(path: string, maxLines: number = 200): Promise<string> {
+    try {
+      const content = await invoke<string>('read_text_file_preview', { path, maxLines });
+      return content || '';
+    } catch (e) {
+      console.error('[pi-tauri] readTextFilePreview FAILED', e);
+      throw e;
+    }
+  }
+
+  /**
+   * ADR-0022 v3 (2026-08-23): FE 顶部 URL bar 主动导航 (不依赖 agent)
+   * 跟 sidecar 调 web_navigate 一样的 URL 校验, 但不返回 text (user 视觉可见 webview)
+   */
+  async browserNavigateUrl(url: string): Promise<void> {
+    try {
+      await invoke('browser_navigate_url', { url });
+    } catch (e) {
+      console.error('[pi-tauri] browserNavigateUrl FAILED', e);
+      throw e;
+    }
+  }
+
+  /** ADR-0022 v3: webview 后退 (调 webview history.back()) */
+  async browserNavigateBack(): Promise<void> {
+    try {
+      await invoke('browser_navigate_back');
+    } catch (e) {
+      console.error('[pi-tauri] browserNavigateBack FAILED', e);
+      throw e;
+    }
+  }
+
+  /** ADR-0022 v3: webview 前进 (调 webview history.forward()) */
+  async browserNavigateForward(): Promise<void> {
+    try {
+      await invoke('browser_navigate_forward');
+    } catch (e) {
+      console.error('[pi-tauri] browserNavigateForward FAILED', e);
+      throw e;
+    }
+  }
+
+  /** ADR-0022 v3: webview 刷新 (调 webview location.reload()) */
+  async browserNavigateRefresh(): Promise<void> {
+    try {
+      await invoke('browser_navigate_refresh');
+    } catch (e) {
+      console.error('[pi-tauri] browserNavigateRefresh FAILED', e);
+      throw e;
     }
   }
 

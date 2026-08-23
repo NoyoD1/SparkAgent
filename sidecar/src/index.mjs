@@ -28,8 +28,10 @@
 //   - 现在: 写 config 1 行, 后续 RpcCommand 走 passthrough (Tauri 不用解析)
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, lstatSync, readlinkSync, statSync, appendFileSync, renameSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, lstatSync, readlinkSync, statSync, appendFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve as pathResolve } from 'node:path';
+// ADR-0022: Type.Object 跟 Pi SDK builtin tool 一致
+import { Type } from '@sinclair/typebox';
 
 import {
   createAgentSessionFromServices,
@@ -699,10 +701,11 @@ The re-read is a single tool call — a small cost for correctness. Skipping it 
   // P2-2: 装 fs watcher, config 改完自动 reload
   installMcpWatcher();
 
-  // 合并 user tool + MCP tool 成一个 customTools 列表
-  const allCustomTools = [...userTools, ...mcpCustomTools];
+  // 合并 user tool + MCP tool + ADR-0022 chromiumoxide browser tool 成一个 customTools 列表
+  const browserTools = loadBrowserTools();
+  const allCustomTools = [...userTools, ...mcpCustomTools, ...browserTools];
   if (allCustomTools.length > 0) {
-    console.error(`[sidecar] total customTools: ${allCustomTools.length} (user=${userTools.length}, mcp=${mcpCustomTools.length})`);
+    console.error(`[sidecar] total customTools: ${allCustomTools.length} (user=${userTools.length}, mcp=${mcpCustomTools.length}, browser=${browserTools.length})`);
   }
 
   // 2026-08-21 P2-1 fix: tools 白名单合并 builtin + customTools 名字.
@@ -1773,3 +1776,150 @@ console.error(`[sidecar] synced ${initialMessages.length} messages from session 
     process.exit(1);
   }
 })();
+
+// ====== ADR-0022 (2026-08-23): chromiumoxide 等价的 sidecar 实现 ======
+//   sidecar 自己启 Edge + Node 20.19+ 内置 WebSocket/fetch 走 CDP, 0 外部 npm 包
+//   PoC 范围: 只 web_browse_url 1 个 tool
+//   Tauri 那边的 chromiumoxide 代码暂时 dead code (没反向 RPC), 后续用
+
+const WEB_CACHE_TTL_MS = 5 * 60 * 1000;
+const WEB_CACHE_MAX = 100;
+const webCache = new Map();
+
+function webCacheGet(cacheKey) {
+  const entry = webCache.get(cacheKey);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { webCache.delete(cacheKey); return null; }
+  return entry.value;
+}
+
+function webCacheSet(cacheKey, value) {
+  if (webCache.size >= WEB_CACHE_MAX) {
+    const firstKey = webCache.keys().next().value;
+    if (firstKey !== undefined) webCache.delete(firstKey);
+  }
+  webCache.set(cacheKey, { value, expiresAt: Date.now() + WEB_CACHE_TTL_MS });
+}
+
+// ====== ADR-0022 (2026-08-23): WebView2 内嵌浏览器 (文件队列路径) ======
+//   为啥不用 stdin reverse RPC: Pi SDK 100% 接管 sidecar stdin (runRpcMode 协议),
+//     写 tauri_call_response 进去会被当成 RpcCommand 处理, 不能干净绕开
+//   走文件队列: sidecar 写 <agentDir>/browser_request.json, Tauri 轮询处理,
+//     写真实结果到 <agentDir>/browser_response.json, sidecar 轮询读
+//   Tauri 那边 WebviewWindow 是 Tauri 进程内的 WebView2 (真内嵌, 不是外部 Edge)
+//
+//   PoC 范围: 2 个 tool
+//     - web_navigate(url):  导航 + 拿 innerText, 返 LLM
+//     - web_get_text():     读当前页 innerText, 返 LLM
+//   agent 控制循环: navigate → read → 从 read 结果里找链接 → 拼 URL → navigate → 读 ...
+//   click/type/scroll 后续 P2
+
+const BROWSER_REQ_PATH = join(agentDir, 'browser_request.json');
+const BROWSER_RES_PATH = join(agentDir, 'browser_response.json');
+let tauriCallId = 0;
+
+function callTauriCommand(command, args) {
+  return new Promise(async (resolve, reject) => {
+    const id = `tcall-${++tauriCallId}-${Date.now()}`;
+    const req = { id, command, args: args || {} };
+    // 清掉旧 response (防 stale)
+    try { unlinkSync(BROWSER_RES_PATH); } catch {}
+    // 写请求
+    try {
+      writeFileSync(BROWSER_REQ_PATH, JSON.stringify(req), 'utf-8');
+    } catch (e) {
+      reject(new Error(`write request failed: ${e instanceof Error ? e.message : String(e)}`));
+      return;
+    }
+    // 轮询 response (60s 超时, 100ms 间隔)
+    const start = Date.now();
+    const poll = () => {
+      if (Date.now() - start > 60_000) {
+        reject(new Error(`tauri_call ${command} timeout 60s`));
+        return;
+      }
+      if (existsSync(BROWSER_RES_PATH)) {
+        try {
+          const content = readFileSync(BROWSER_RES_PATH, 'utf-8');
+          const res = JSON.parse(content);
+          if (res.id === id) {
+            // 拿到了, 清文件
+            try { unlinkSync(BROWSER_RES_PATH); } catch {}
+            if (res.error) reject(new Error(res.error));
+            else resolve(res.result);
+            return;
+          }
+        } catch { /* 还在写, 等下 */ }
+      }
+      setTimeout(poll, 100);
+    };
+    poll();
+  });
+}
+
+function loadBrowserTools() {
+  return [
+    {
+      name: 'web_navigate',
+      description: 'Navigate a real WebView2 browser (embedded in the Tauri app) to a URL and return the page main text. The browser panel opens automatically and stays visible — you can see exactly what the LLM is reading. Use this when web_fetch (HTTP-only) is not enough, or when you need to read JS-rendered pages. To click links or interact, first navigate then read the page text, extract the next URL, and call web_navigate again.',
+      parameters: Type.Object({
+        url: Type.String({ description: 'Full URL, e.g. "https://www.rust-lang.org" or "http://wiki.corp.local/page/123" (internal URLs work too)' }),
+      }),
+      execute: async (_toolCallId, params) => {
+        const url = params?.url;
+        if (typeof url !== 'string' || !url) {
+          return { content: [{ type: 'text', text: 'Error: web_navigate 需要 url 参数' }] };
+        }
+        try {
+          new URL(url);  // 校验
+        } catch {
+          return { content: [{ type: 'text', text: `Error: 无效 URL: ${url}` }] };
+        }
+        try {
+          const text = await callTauriCommand('browser_navigate', { url });
+          console.error(`[browser] navigate ok: ${url.slice(0, 80)} → ${String(text).length} bytes`);
+          return { content: [{ type: 'text', text: String(text) }] };
+        } catch (e) {
+          return { content: [{ type: 'text', text: `Error: web_navigate 失败: ${e instanceof Error ? e.message : String(e)}` }] };
+        }
+      },
+    },
+    {
+      name: 'web_get_text',
+      description: 'Read the current page main text from the embedded WebView2 browser (no navigation). Use after web_navigate to read a page, or to re-read after waiting. Returns the same format as web_navigate.',
+      parameters: Type.Object({}),
+      execute: async (_toolCallId, _params) => {
+        try {
+          const text = await callTauriCommand('browser_get_text', {});
+          console.error(`[browser] get_text → ${String(text).length} bytes`);
+          return { content: [{ type: 'text', text: String(text) }] };
+        } catch (e) {
+          return { content: [{ type: 'text', text: `Error: web_get_text 失败: ${e instanceof Error ? e.message : String(e)}` }] };
+        }
+      },
+    },
+    {
+      name: 'web_screenshot',
+      // ADR-0022 v3.2 (2026-08-23): webview 截图, 给 vision model 看的图
+      //   返回 base64 PNG (data URL 格式, 方便 LLM API 直接吃)
+      //   使用场景: agent 需要视觉判断时 (e.g. 看 webview 上是否渲染了某个 UI,
+      //   识别 webview 内的图片/SVG/canvas, 验证 navigate 后页面长啥样)
+      //   重要: 这个工具只在 LLM 是 vision model 时才有用. Pi SDK 会根据 model 配置
+      //   自动决定是否把 image content 发给模型. 普通文本模型会忽略.
+      description: 'Capture a screenshot of the current webview content as base64-encoded PNG (data URL). Use when you need to visually inspect the page (e.g. identify UI elements, images, SVG/canvas content) that text-based tools cannot describe. Returns { content: [{ type: "image", data: "data:image/png;base64,..." }] }. Vision-capable models can directly analyze the returned image.',
+      parameters: Type.Object({}),
+      execute: async (_toolCallId, _params) => {
+        try {
+          const b64 = await callTauriCommand('browser_screenshot', {});
+          // Pi SDK ImageContent.data 是 raw base64 (无 data URL 前缀)
+          //   详见 @earendil-works/pi-ai/dist/types.d.ts ImageContent
+          console.error(`[browser] screenshot → ${String(b64).length} base64 chars`);
+          return { content: [{ type: 'image', data: b64, mimeType: 'image/png' }] };
+        } catch (e) {
+          return { content: [{ type: 'text', text: `Error: web_screenshot 失败: ${e instanceof Error ? e.message : String(e)}` }] };
+        }
+      },
+    },
+  ];
+}
+}
