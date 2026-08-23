@@ -29,8 +29,6 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, lstatSync, readlinkSync, statSync, appendFileSync, renameSync, unlinkSync } from 'node:fs';
-// ADR-0021 P0-3: 写 web_search / web_fetch tool definition, 用 Type.Object 跟 Pi SDK builtin tool 一致
-import { Type } from '@sinclair/typebox';
 import { join, resolve as pathResolve } from 'node:path';
 
 import {
@@ -701,11 +699,10 @@ The re-read is a single tool call — a small cost for correctness. Skipping it 
   // P2-2: 装 fs watcher, config 改完自动 reload
   installMcpWatcher();
 
-  // 合并 user tool + MCP tool + ADR-0021 web tool 成一个 customTools 列表
-  const webTools = loadWebTools(config.webSearchKey);
-  const allCustomTools = [...userTools, ...mcpCustomTools, ...webTools];
+  // 合并 user tool + MCP tool 成一个 customTools 列表
+  const allCustomTools = [...userTools, ...mcpCustomTools];
   if (allCustomTools.length > 0) {
-    console.error(`[sidecar] total customTools: ${allCustomTools.length} (user=${userTools.length}, mcp=${mcpCustomTools.length}, web=${webTools.length})`);
+    console.error(`[sidecar] total customTools: ${allCustomTools.length} (user=${userTools.length}, mcp=${mcpCustomTools.length})`);
   }
 
   // 2026-08-21 P2-1 fix: tools 白名单合并 builtin + customTools 名字.
@@ -714,7 +711,7 @@ The re-read is a single tool call — a small cost for correctness. Skipping it 
   //   LLM 才会真正看到 mcp_*/user_* 工具.
   const allTools = [...builtinTools, ...allCustomTools.map((t) => t.name)];
 
-  console.error(`[sidecar] creating agent session: model=${model.provider}/${model.id} thinking=${config.thinkingLevel ?? 'medium'} tools=${allTools.join(',')} userTools=${userTools.length} mcpTools=${mcpCustomTools.length} webTools=${webTools.length} permissionMode=${config.permissionMode ?? 'ask'}`);
+  console.error(`[sidecar] creating agent session: model=${model.provider}/${model.id} thinking=${config.thinkingLevel ?? 'medium'} tools=${allTools.join(',')} userTools=${userTools.length} mcpTools=${mcpCustomTools.length} permissionMode=${config.permissionMode ?? 'ask'}`);
 
   return createAgentSessionFromServices({
     services,
@@ -968,238 +965,6 @@ function loadUserTools(cwd, agentDir) {
     }
   }
   return customTools;
-}
-
-// ====== ADR-0021 P0-3 (2026-08-23): Web 工具 (web_search + web_fetch) ======
-//   - key 走 Tauri keychain → sidecar stdin config.webSearchKey (跟 LLM apiKey 同 path)
-//   - 5 分钟 LRU 缓存 (per ADR-0019 S-2, 节流省 Brave 配额)
-//   - web_fetch HTML→text 用手写 strip (P1 换 html-to-text)
-const WEB_CACHE_TTL_MS = 5 * 60 * 1000;  // 5 分钟
-const WEB_CACHE_MAX = 100;  // LRU 上限
-const webCache = new Map();  // key -> { value: string, expiresAt: number }
-
-function webCacheGet(cacheKey) {
-  const entry = webCache.get(cacheKey);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    webCache.delete(cacheKey);
-    return null;
-  }
-  return entry.value;
-}
-
-function webCacheSet(cacheKey, value) {
-  // 简化 LRU: 超过上限删最早插入的 (Map 保插入序)
-  if (webCache.size >= WEB_CACHE_MAX) {
-    const firstKey = webCache.keys().next().value;
-    if (firstKey !== undefined) webCache.delete(firstKey);
-  }
-  webCache.set(cacheKey, { value, expiresAt: Date.now() + WEB_CACHE_TTL_MS });
-}
-
-/**
- * 手写 HTML→text (P0-3 MVP 80 分够用, P1 换 html-to-text crate 升 90 分)
- *   1. 剥 <script> / <style> 整块
- *   2. block tags (p/div/br/li 等) → 换行
- *   3. 剥剩余 <tag>
- *   4. 解码常见 HTML entities
- *   5. 压缩多空行
- */
-function htmlToText(html) {
-  let s = html;
-  // script / style 整块剥
-  s = s.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '');
-  s = s.replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, '');
-  // block tags → \n
-  s = s.replace(/<\/?(p|div|br|h[1-6]|li|tr|td|th|blockquote|pre|hr|section|article|header|footer|nav|aside)\b[^>]*>/gi, '\n');
-  // 剥剩余 tag
-  s = s.replace(/<[^>]+>/g, '');
-  // HTML entities
-  s = s.replace(/&nbsp;/g, ' ');
-  s = s.replace(/&amp;/g, '&');
-  s = s.replace(/&lt;/g, '<');
-  s = s.replace(/&gt;/g, '>');
-  s = s.replace(/&quot;/g, '"');
-  s = s.replace(/&#39;/g, "'");
-  s = s.replace(/&#x27;/g, "'");
-  // 压缩多空行
-  s = s.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n\n').trim();
-  return s;
-}
-
-/**
- * ADR-0021 P0-3: web 工具 LLM definition
- *   - web_search: 调 Brave Search API, 返回 markdown snippet 列表
- *   - web_fetch: 任意 URL GET 抓 HTML, 转 text 给 LLM
- *   - key 通过 config.webSearchKey (Tauri 从 keychain 读)
- *   - key 缺失 → tool 返回明确 error, LLM 知道去 Settings 配
- *   - 5min 内存 cache, 跟 ADR-0019 S-2 一致
- *
- * @param webSearchKey: Brave Search API key (来自 stdin config), null 表示 user 还没配
- * @returns ToolDefinition[] (0-2 个, key 缺失时只返回 web_fetch, web_search 给 error 提示)
- */
-function loadWebTools(webSearchKey) {
-  const tools = [];
-
-  // ====== web_search: 调 Brave Search API ======
-  tools.push({
-    name: 'web_search',
-    description: 'Search the web using Brave Search. Returns up to 10 results as markdown (title, url, description). Use this when the user asks about current events, latest versions, recent news, or any information that may have changed after the model\'s training cutoff. Requires a Brave Search API key configured in Settings → Web 搜索.',
-    parameters: Type.Object({
-      query: Type.String({ description: 'Search query (Brave Search supports the same syntax as a web search engine, e.g. "Pi Agent Desktop latest version" or "TypeScript 5.5 release notes")' }),
-      count: Type.Optional(Type.Number({ description: 'Number of results to return (1-20, default 10)' })),
-    }),
-    execute: async (_toolCallId, params) => {
-      const query = params?.query;
-      if (typeof query !== 'string' || !query.trim()) {
-        return { content: [{ type: 'text', text: 'Error: web_search 需要 query 参数 (非空字符串)' }] };
-      }
-
-      // key 缺失 → 明确报错
-      if (!webSearchKey) {
-        return { content: [{ type: 'text', text: 'Error: Brave Search API key 未配置. 请到 Settings → Web 搜索 录入 API key, 重启 Tauri.' }] };
-      }
-
-      // 缓存
-      const count = Math.min(Math.max(params?.count ?? 10, 1), 20);
-      const cacheKey = `search:${count}:${query}`;
-      const cached = webCacheGet(cacheKey);
-      if (cached) {
-        console.error(`[web] cache hit: search "${query.slice(0, 60)}"`);
-        return { content: [{ type: 'text', text: cached }] };
-      }
-
-      // 调 Brave API
-      const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`;
-      let response;
-      try {
-        response = await fetch(url, {
-          method: 'GET',
-          headers: {
-            'X-Subscription-Token': webSearchKey,
-            'Accept': 'application/json',
-          },
-          signal: AbortSignal.timeout(10_000),  // 10s 超时
-        });
-      } catch (e) {
-        return { content: [{ type: 'text', text: `Error: Brave Search API 调用失败 (网络错误): ${e instanceof Error ? e.message : String(e)}` }] };
-      }
-
-      if (!response.ok) {
-        // 错误分类 (跟 P2-6 errorSanitizer 同思路)
-        let hint = '';
-        if (response.status === 401) hint = ' (API key 无效, 请检查 Settings → Web 搜索)';
-        else if (response.status === 429) hint = ' (rate limit, 5 分钟后再试)';
-        return { content: [{ type: 'text', text: `Error: Brave Search 返回 ${response.status}${hint}` }] };
-      }
-
-      let body;
-      try {
-        body = await response.json();
-      } catch (e) {
-        return { content: [{ type: 'text', text: `Error: Brave Search 响应解析失败: ${e instanceof Error ? e.message : String(e)}` }] };
-      }
-
-      // 解析 results
-      const results = body?.web?.results;
-      if (!Array.isArray(results) || results.length === 0) {
-        return { content: [{ type: 'text', text: `Brave Search 无结果: "${query}"` }] };
-      }
-
-      // 转 markdown
-      const lines = [`# 搜索: ${query}\n`];
-      for (let i = 0; i < results.length; i++) {
-        const r = results[i];
-        const title = r.title || '(无标题)';
-        const url = r.url || '';
-        const desc = r.description || '';
-        lines.push(`${i + 1}. [${title}](${url})\n   ${desc}\n`);
-      }
-      const md = lines.join('\n');
-
-      // 缓存
-      webCacheSet(cacheKey, md);
-      console.error(`[web] search ok: "${query.slice(0, 60)}" → ${results.length} results`);
-      return { content: [{ type: 'text', text: md }] };
-    },
-  });
-
-  // ====== web_fetch: 抓 URL, HTML→text ======
-  // 不需要 API key, 任何 URL 都能抓
-  tools.push({
-    name: 'web_fetch',
-    description: 'Fetch a web page by URL and return the text content (HTML stripped). Use this when the user gives a specific URL and wants its content, or to read articles found via web_search. Output is truncated to 50KB.',
-    parameters: Type.Object({
-      url: Type.String({ description: 'Full URL to fetch, e.g. "https://github.com/user/repo"' }),
-    }),
-    execute: async (_toolCallId, params) => {
-      const url = params?.url;
-      if (typeof url !== 'string' || !url) {
-        return { content: [{ type: 'text', text: 'Error: web_fetch 需要 url 参数' }] };
-      }
-
-      // 简单 URL 校验
-      let parsed;
-      try {
-        parsed = new URL(url);
-      } catch {
-        return { content: [{ type: 'text', text: `Error: 无效 URL: ${url}` }] };
-      }
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        return { content: [{ type: 'text', text: `Error: 只支持 http/https, got ${parsed.protocol}` }] };
-      }
-
-      // 缓存
-      const cacheKey = `fetch:${url}`;
-      const cached = webCacheGet(cacheKey);
-      if (cached) {
-        console.error(`[web] cache hit: fetch ${url.slice(0, 80)}`);
-        return { content: [{ type: 'text', text: cached }] };
-      }
-
-      // 抓
-      let response;
-      try {
-        response = await fetch(url, {
-          method: 'GET',
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PiAgent/0.7',
-            'Accept': 'text/html,application/xhtml+xml,text/plain',
-          },
-          signal: AbortSignal.timeout(10_000),  // 10s 超时
-        });
-      } catch (e) {
-        return { content: [{ type: 'text', text: `Error: GET ${url} 失败: ${e instanceof Error ? e.message : String(e)}` }] };
-      }
-
-      if (!response.ok) {
-        return { content: [{ type: 'text', text: `Error: GET ${url} 返回 ${response.status}` }] };
-      }
-
-      let html;
-      try {
-        html = await response.text();
-      } catch (e) {
-        return { content: [{ type: 'text', text: `Error: 读取响应失败: ${e instanceof Error ? e.message : String(e)}` }] };
-      }
-
-      // HTML→text
-      const text = htmlToText(html);
-      const MAX_BYTES = 50_000;
-      let output = text;
-      if (text.length > MAX_BYTES) {
-        output = text.slice(0, MAX_BYTES) + `\n\n[truncated, total ${text.length} bytes]`;
-      }
-
-      // 缓存
-      webCacheSet(cacheKey, output);
-      console.error(`[web] fetch ok: ${url.slice(0, 80)} → ${output.length} bytes`);
-      return { content: [{ type: 'text', text: output }] };
-    },
-  });
-
-  console.error(`[sidecar] P0-3 web tools: ${tools.length} loaded (webSearchKey configured: ${webSearchKey ? 'yes' : 'no'})`);
-  return tools;
 }
 
 /**

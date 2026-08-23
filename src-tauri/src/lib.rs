@@ -194,44 +194,6 @@ async fn has_api_key(provider_id: String) -> Result<bool, String> {
     Ok(keyring::get(&provider_id)?.is_some())
 }
 
-// ====== ADR-0021 P0-3 (2026-08-23): Web 搜索 API key 走 keychain ======
-//   跟 LLM apiKey 同 service="pi-agent", username="search-brave" (跟 LLM provider 区分)
-//   sidecar 启动时 Tauri 从 keychain 读, 写到 stdin config 的 webSearchKey 字段
-//   sidecar 用这个 key 调 Brave Search API (web_search tool)
-//   key 生命周期跟 sidecar 一致, 内存持有, 不写盘
-pub const WEB_SEARCH_PROVIDER_ID: &str = "search-brave";
-
-#[tauri::command]
-async fn save_web_search_key(app: AppHandle, api_key: String) -> Result<(), String> {
-    if api_key.is_empty() {
-        return Err("api_key is empty".to_string());
-    }
-    keyring::save(WEB_SEARCH_PROVIDER_ID, &api_key)?;
-    index_file::add(&app, WEB_SEARCH_PROVIDER_ID)?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn delete_web_search_key(app: AppHandle) -> Result<(), String> {
-    keyring::delete(WEB_SEARCH_PROVIDER_ID)?;
-    index_file::remove(&app, WEB_SEARCH_PROVIDER_ID)?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn has_web_search_key() -> Result<bool, String> {
-    Ok(keyring::get(WEB_SEARCH_PROVIDER_ID)?.is_some())
-}
-
-#[tauri::command]
-async fn get_web_search_key_masked() -> Result<Option<String>, String> {
-    // 给 FE 显示用, mask 后 4 字符 (跟 LLM key 一致 pattern)
-    match keyring::get(WEB_SEARCH_PROVIDER_ID)? {
-        Some(k) => Ok(Some(crate::keyring::mask(&k))),
-        None => Ok(None),
-    }
-}
-
 // ====== v0.4.4 Skills (Pi SDK 暴露) ======
 
 #[derive(Debug, Deserialize)]
@@ -3451,11 +3413,6 @@ pub fn run() {
             delete_api_key,
             list_api_keys,
             has_api_key,
-            // ADR-0021 P0-3: Web 搜索 API key 管理 (Brave Search)
-            save_web_search_key,
-            delete_web_search_key,
-            has_web_search_key,
-            get_web_search_key_masked,
             send_prompt,
             compact_session,  // Bug #2 修 (2026-08-18): 独立 compact invoke
             kill_sidecar,  // v0.4.6 修 (2026-08-18): abort 兜底时 force kill 旧 sidecar

@@ -25,7 +25,7 @@ import { ref, computed, onMounted } from 'vue';
 import { useSessionStore } from '@/stores/session';
 import { useUiStore } from '@/stores/ui';
 import { piTauri, type TauriBashConfig, type TauriShellInfo, type TauriWhitelistItem } from '@/lib/tauri';
-import { Archive, Info, Terminal, Search, X, FlaskConical, CheckCircle2, AlertCircle, Shield, Plus, Globe, Eye, EyeOff } from 'lucide-vue-next';
+import { Archive, Info, Terminal, Search, X, FlaskConical, CheckCircle2, AlertCircle, Shield, Plus } from 'lucide-vue-next';
 
 const sessionStore = useSessionStore();
 const uiStore = useUiStore();
@@ -329,111 +329,11 @@ async function onToggle() {
   }
 }
 
-// ====== ADR-0021 P0-3 (2026-08-23): Web 搜索 (Brave Search) ======
-//   key 存 Tauri keychain, sidecar 启动时 Tauri 从 keychain 读, 写到 stdin config 的 webSearchKey
-//   改完需要重启 Tauri (跟 LLM apiKey 一样的"等重启"语义, Q7 拍板)
-const webSearchProvider = ref<'brave'>('brave');  // 暂时只支持 Brave, 后续 multi-provider 扩展
-const webSearchKeyInput = ref('');  // password input
-const webSearchKeyMasked = ref<string | null>(null);  // 从 keychain 读出的 mask (有 key 时显示)
-const webSearchKeyConfigured = ref(false);
-const webSearchKeyShowInput = ref(false);
-const webSearchIsSaving = ref(false);
-const webSearchIsDeleting = ref(false);
-const webSearchIsTesting = ref(false);
-const webSearchTestResult = ref<{ ok: boolean; message: string } | null>(null);
-
-async function loadWebSearchKey() {
-  try {
-    webSearchKeyConfigured.value = await piTauri.hasWebSearchKey();
-    if (webSearchKeyConfigured.value) {
-      webSearchKeyMasked.value = await piTauri.getWebSearchKeyMasked();
-    } else {
-      webSearchKeyMasked.value = null;
-    }
-    console.log(`[GeneralTab] web search key configured: ${webSearchKeyConfigured.value}`);
-  } catch (e) {
-    console.warn('[GeneralTab] has_web_search_key 失败:', e);
-    webSearchKeyConfigured.value = false;
-    webSearchKeyMasked.value = null;
-  }
-}
-
-async function saveWebSearchKey() {
-  if (webSearchIsSaving.value) return;
-  const key = webSearchKeyInput.value.trim();
-  if (!key) {
-    useUiStore().showToast('API key 不能为空', 'warning', 2000);
-    return;
-  }
-  webSearchIsSaving.value = true;
-  try {
-    await piTauri.saveWebSearchKey(key);
-    webSearchKeyInput.value = '';
-    webSearchKeyShowInput.value = false;
-    await loadWebSearchKey();
-    useUiStore().showToast('已保存 Web 搜索 API key. 重启 Tauri 生效.', 'success', 3000);
-    console.log('[GeneralTab] save_web_search_key OK, need restart Tauri to take effect');
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    useUiStore().showToast(`保存失败: ${msg}`, 'error', 5000);
-    console.error('[GeneralTab] save_web_search_key failed:', e);
-  } finally {
-    webSearchIsSaving.value = false;
-  }
-}
-
-async function deleteWebSearchKey() {
-  if (webSearchIsDeleting.value) return;
-  if (!webSearchKeyConfigured.value) return;
-  if (!confirm('确认删除 Web 搜索 API key? 删除后 web_search 工具将不可用.')) return;
-  webSearchIsDeleting.value = true;
-  try {
-    await piTauri.deleteWebSearchKey();
-    await loadWebSearchKey();
-    useUiStore().showToast('已删除. 重启 Tauri 生效.', 'success', 2500);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    useUiStore().showToast(`删除失败: ${msg}`, 'error', 5000);
-  } finally {
-    webSearchIsDeleting.value = false;
-  }
-}
-
-async function testWebSearchKey() {
-  if (webSearchIsTesting.value) return;
-  if (!webSearchKeyConfigured.value) {
-    useUiStore().showToast('请先保存 API key', 'warning', 2000);
-    return;
-  }
-  webSearchIsTesting.value = true;
-  webSearchTestResult.value = null;
-  try {
-    // 用 Brave API 自检: GET 一个简单 query, 200 = OK
-    // 注意: 这是从 sidecar 调, 不是直接 Tauri command. 因为 reverse RPC 复杂,
-    //       这里我们只能"间接"测试: 提示 user 重启后用 LLM 试 web_search.
-    // MVP 简化: 测试就是 reload 配置, 验证 key 已写到 keychain
-    await loadWebSearchKey();
-    webSearchTestResult.value = {
-      ok: webSearchKeyConfigured.value,
-      message: webSearchKeyConfigured.value
-        ? 'Key 已写入 keychain. 重启 Tauri 后, LLM 调 web_search 才能用.'
-        : 'Key 未配置, 请先保存.',
-    };
-    useUiStore().showToast(webSearchTestResult.value.message, webSearchTestResult.value.ok ? 'info' : 'warning', 3000);
-  } catch (e) {
-    webSearchTestResult.value = { ok: false, message: String(e) };
-    useUiStore().showToast(`测试失败: ${String(e)}`, 'error', 5000);
-  } finally {
-    webSearchIsTesting.value = false;
-  }
-}
-
 // 通用 tab 打开时读一次
 onMounted(() => {
   loadInitial();
   void loadBashInitial();
   void loadWhitelist();
-  void loadWebSearchKey();
 });
 </script>
 
@@ -660,112 +560,6 @@ onMounted(() => {
           <strong>Pi SDK 0.84.2 限制：</strong>触发阈值（92%）和保留 token 数（reserveTokens=16384）由 Pi SDK 内部写死，
           <strong>暂不能在 UI 调整</strong>。详见 <code>ADR-0016</code>。
         </span>
-      </div>
-    </div>
-
-    <!-- ADR-0021 P0-3 (2026-08-23): Web 搜索 (Brave Search API) -->
-    <div class="pad-general-section">
-      <div class="pad-general-section-head">
-        <Globe :size="16" :stroke-width="1.75" class="pad-general-section-icon" />
-        <h3 class="pad-general-section-title">Web 搜索</h3>
-        <span class="pad-general-section-tag" :class="webSearchKeyConfigured ? 'is-manual' : 'is-auto'">
-          {{ webSearchKeyConfigured ? '已配置' : '未配置' }}
-        </span>
-      </div>
-      <p class="pad-general-section-desc">
-        给 LLM 加 <code>web_search</code> + <code>web_fetch</code> 两个联网工具.
-        Provider 用 <strong>Brave Search</strong> (隐私优先 + free 2000 req/月 + JSON API 简单).
-        API key 存 OS keychain, 不会落盘.
-      </p>
-
-      <div class="pad-general-form">
-        <label class="pad-general-label">
-          <span>Provider</span>
-          <select v-model="webSearchProvider" class="pad-general-input" disabled>
-            <option value="brave">Brave Search</option>
-          </select>
-        </label>
-
-        <div class="pad-general-label">
-          <span>API Key</span>
-          <div class="pad-general-input-row">
-            <input
-              v-if="webSearchKeyShowInput"
-              v-model="webSearchKeyInput"
-              type="password"
-              class="pad-general-input"
-              placeholder="粘贴 Brave Search API key (留空 = 不变)"
-              :disabled="webSearchIsSaving"
-              @keyup.enter="saveWebSearchKey()"
-            />
-            <input
-              v-else
-              :value="webSearchKeyMasked ?? '(未配置)'"
-              type="text"
-              class="pad-general-input"
-              disabled
-            />
-            <button
-              class="pad-general-button"
-              :title="webSearchKeyShowInput ? '隐藏' : '显示输入框'"
-              @click="webSearchKeyShowInput = !webSearchKeyShowInput"
-            >
-              <component :is="webSearchKeyShowInput ? EyeOff : Eye" :size="14" :stroke-width="1.75" />
-            </button>
-          </div>
-          <p class="pad-general-hint" v-if="webSearchKeyConfigured && !webSearchKeyShowInput">
-            已配置: <code>{{ webSearchKeyMasked }}</code> — 重启 Tauri 生效
-          </p>
-          <p class="pad-general-hint" v-else-if="!webSearchKeyConfigured">
-            在 <a href="https://api.search.brave.com/" target="_blank" rel="noopener">api.search.brave.com</a>
-            注册 → Dashboard → Get API key for Free AI (2000 req/月)
-          </p>
-        </div>
-
-        <div class="pad-general-actions">
-          <button
-            v-if="webSearchKeyShowInput"
-            class="pad-general-button is-primary"
-            :disabled="webSearchIsSaving || !webSearchKeyInput.trim()"
-            @click="saveWebSearchKey()"
-          >
-            {{ webSearchIsSaving ? '保存中…' : '保存' }}
-          </button>
-          <button
-            v-if="webSearchKeyConfigured"
-            class="pad-general-button is-danger"
-            :disabled="webSearchIsDeleting"
-            @click="deleteWebSearchKey()"
-          >
-            {{ webSearchIsDeleting ? '删除中…' : '删除' }}
-          </button>
-          <button
-            class="pad-general-button"
-            :disabled="webSearchIsTesting || !webSearchKeyConfigured"
-            :title="webSearchKeyConfigured ? '检查 key 是否在 keychain' : '先保存 key'"
-            @click="testWebSearchKey()"
-          >
-            <FlaskConical :size="13" :stroke-width="1.75" />
-            {{ webSearchIsTesting ? '检查中…' : '检查 Key' }}
-          </button>
-        </div>
-
-        <div v-if="webSearchTestResult" class="pad-general-info">
-          <Info :size="13" :stroke-width="1.75" />
-          <span>{{ webSearchTestResult.message }}</span>
-        </div>
-
-        <div class="pad-general-info">
-          <Info :size="13" :stroke-width="1.75" />
-          <span>
-            <strong>生效时机：</strong>key 改完需要<strong>重启 Tauri</strong>, 因为 sidecar 启动时一次性读 keychain.
-            LLM 端使用时通过 <code>web_search({ query, count? })</code> 调用, Brave API 返回 markdown 格式.
-            <br /><br />
-            <strong>缓存：</strong>5 分钟 LRU (per ADR-0019 S-2), 重复 query 不消耗 key 配额.
-            <br />
-            <strong>不做的：</strong>多 provider 切换 / 高级搜索参数解析 / 持久化缓存 (P1 阶段).
-          </span>
-        </div>
       </div>
     </div>
 
