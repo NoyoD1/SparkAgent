@@ -14,7 +14,7 @@ mod screenshot;      // ADR-0022 v3.2: webview 截图 (agent 识图工具)
 mod sidecar;
 
 use serde::{Deserialize, Serialize};
-use crate::sidecar::kill_sidecar;  // v0.4.6: register tauri command (force kill sidecar on abort)
+use crate::sidecar::{kill_sidecar, restart_all_sidecars};  // v0.4.6: register tauri command (force kill sidecar on abort) + ADR-0023 静默重启
 use tauri::{AppHandle, Emitter, Manager, State};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
@@ -4103,6 +4103,10 @@ pub fn run() {
             read_image_as_data_url,
             compact_session,  // Bug #2 修 (2026-08-18): 独立 compact invoke
             kill_sidecar,  // v0.4.6 修 (2026-08-18): abort 兜底时 force kill 旧 sidecar
+            // ADR-0023 (2026-08-23): 静默重启机制 — 改了"需要重启"的配置 (MCP server /
+            //   external tool / dangerousWhitelist / bash.path) 后, FE 触发, Tauri
+            //   kill 所有 active sidecar, 下次 send_prompt lazy spawn 走新 config.
+            restart_all_sidecars,
             fetch_provider_models,
             verify_provider_connection,  // P0 #1: 测试连接按钮
             // ADR-0022: WebView2 内嵌浏览器 (Tauri WebviewWindow, 走 reverse RPC)

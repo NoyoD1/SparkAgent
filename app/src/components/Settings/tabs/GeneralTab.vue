@@ -100,6 +100,8 @@ async function addWhitelistItem() {
     newWhitelistPattern.value = '';
     newWhitelistNote.value = '';
     console.log(`[GeneralTab] add_dangerous_whitelist_item OK: pattern=${pattern}`);
+    // ADR-0023: 危险命令白名单改动 → restart sidecar (Extension 工厂 state)
+    void piTauri.restartAllSidecars('dangerous_whitelist_changed');
   } catch (e) {
     useUiStore().showToast(`添加失败: ${e instanceof Error ? e.message : String(e)}`, 'error', 4000);
   } finally {
@@ -117,6 +119,8 @@ async function removeWhitelistItem(item: TauriWhitelistItem) {
     whitelist.value = await piTauri.removeDangerousWhitelistItem({ pattern: item.pattern });
     useUiStore().showToast(`已移除: ${item.pattern}`, 'success', 2000);
     console.log(`[GeneralTab] remove_dangerous_whitelist_item OK: pattern=${item.pattern}`);
+    // ADR-0023: 危险命令白名单改动 → restart sidecar
+    void piTauri.restartAllSidecars('dangerous_whitelist_changed');
   } catch (e) {
     useUiStore().showToast(`移除失败: ${e instanceof Error ? e.message : String(e)}`, 'error', 4000);
   } finally {
@@ -192,11 +196,13 @@ async function setBashPath(path: string, source: 'auto' | 'manual') {
     bashPath.value = saved.path;
     bashVerifyResult.value = { ok: true, version: saved.version };
     useUiStore().showToast(
-      `已保存 Bash 路径 (source=${source}, version=${saved.version ?? '?'})${source === 'manual' ? ', 下次启动 sidecar 生效' : ''}`,
+      `已保存 Bash 路径 (source=${source}, version=${saved.version ?? '?'})`,
       'success',
       3000,
     );
     console.log(`[GeneralTab] set_bash_config OK: path=${path} source=${source} version=${saved.version ?? '?'}`);
+    // ADR-0023: bash.path 改动 → restart sidecar (Pi SDK 0.84.2 settings.shellPath 启动时读)
+    void piTauri.restartAllSidecars('bash_path_changed');
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     bashVerifyResult.value = { ok: false, error: msg };

@@ -93,23 +93,42 @@ export const useUserToolsStore = defineStore('userTools', () => {
     validateName(name);
     validateBody(body);
     const sessionStore = useSessionStore();
-    return await piTauri.writeUserTool({
+    const result = await piTauri.writeUserTool({
       scope,
       workspacePath: sessionStore.activeWorkspace?.path ?? null,
       agentDir: null,
       name,
       body,
     });
+    // ADR-0023: user tool 改动 → restart sidecar (Pi SDK tool list 重新注册)
+    void triggerRestart('user_tool_changed');
+    return result;
   }
 
   async function remove(scope: UserToolScope, name: string): Promise<boolean> {
     const sessionStore = useSessionStore();
-    return await piTauri.deleteUserTool({
+    const result = await piTauri.deleteUserTool({
       scope,
       workspacePath: sessionStore.activeWorkspace?.path ?? null,
       agentDir: null,
       name,
     });
+    // ADR-0023: user tool 改动 → restart sidecar
+    void triggerRestart('user_tool_changed');
+    return result;
+  }
+
+  /**
+   * ADR-0023 (2026-08-23): 静默重启 sidecar (fire-and-forget)
+   *   跟 mcpServers.triggerRestart 同 pattern, 改 user tool 也要 restart
+   *   才能让 LLM 看到新 tool 列表.
+   */
+  async function triggerRestart(reason: string): Promise<void> {
+    try {
+      await piTauri.restartAllSidecars(reason);
+    } catch (e) {
+      console.warn('[userTools] triggerRestart failed:', e);
+    }
   }
 
   /**

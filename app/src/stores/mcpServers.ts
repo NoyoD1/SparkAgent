@@ -116,13 +116,16 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
     validateName(name);
     validateBody(body);
     const wsPath = await ensureActiveWorkspace();
-    return await piTauri.writeMcpServer({
+    const result = await piTauri.writeMcpServer({
       scope,
       workspacePath: wsPath,
       agentDir: null,
       name,
       body,
     });
+    // ADR-0023: MCP server 改动 → restart sidecar
+    void triggerRestart('mcp_server_changed');
+    return result;
   }
 
   /**
@@ -146,23 +149,49 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
     if (scope === 'global' && !agentDir) {
       throw new Error('global scope 需要 agentDir (Tauri 端应该用 <user.home>/.pi/agent 兜底, 但这次没拿到)');
     }
-    return await piTauri.writeMcpServer({
+    const result = await piTauri.writeMcpServer({
       scope,
       workspacePath,
       agentDir,
       name,
       body,
     });
+    // ADR-0023: MCP server 改动 → restart sidecar (Pi SDK tool list 重新注册)
+    void triggerRestart('mcp_server_changed');
+    return result;
   }
 
   async function remove(scope: McpServerScope, name: string): Promise<boolean> {
     const wsPath = await ensureActiveWorkspace();
-    return await piTauri.deleteMcpServer({
+    const result = await piTauri.deleteMcpServer({
       scope,
       workspacePath: wsPath,
       agentDir: null,
       name,
     });
+    // ADR-0023: MCP server 改动需要 restart sidecar (Pi SDK tool list 重新注册)
+    //   fire-and-forget, 不阻塞返回值. 失败仅 log, 不影响 user 的删除操作.
+    void triggerRestart('mcp_server_changed');
+    return result;
+  }
+
+  /**
+   * ADR-0023 (2026-08-23): 静默重启 sidecar (fire-and-forget)
+   *   触发场景: MCP server / external tool / dangerousWhitelist / bash.path 改动后,
+   *   Pi SDK 0.84.2 的 tool 注册只在 createAgentSession 时一次, 必须新 sidecar 才生效.
+   *   实现: 调 piTauri.restartAllSidecars(reason), 杀所有 active sidecar.
+   *   下次 send_prompt 时 Tauri lazy spawn 读新 config.
+   *   UI: App.vue 监听 sidecar:event 弹 "已保存, 新配置将在下次对话生效" toast.
+   *
+   * 不阻塞: 用 void 标记 fire-and-forget, store caller 不需要 await.
+   * 失败安全: 静默 catch + log, 重启失败不影响 user 刚做的 save (save 已经成功).
+   */
+  async function triggerRestart(reason: string): Promise<void> {
+    try {
+      await piTauri.restartAllSidecars(reason);
+    } catch (e) {
+      console.warn('[mcp] triggerRestart failed:', e);
+    }
   }
 
   /**
@@ -217,6 +246,8 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
     // 写完整体 refresh 一次, 让 UI 看到最新列表
     if (imported.length > 0) {
       await refresh();
+      // ADR-0023: 批量导入成功 → restart sidecar 让新 MCP tool 列表对 LLM 可见
+      void triggerRestart('mcp_server_changed');
     }
 
     return { imported, skipped, failed };

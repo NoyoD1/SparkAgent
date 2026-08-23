@@ -413,6 +413,30 @@ class PiTauriClient {
   }
 
   /**
+   * ADR-0023 (2026-08-23): 静默重启所有 active sidecar
+   *   触发场景: 改了"需要重启"的配置 (MCP server / external tool / dangerousWhitelist /
+   *     bash.path / system prompt override / user tool preset), Pi SDK tool 注册只在
+   *     createAgentSession 时一次, 必须新 sidecar 进程才生效.
+   *   行为: 杀所有 active sidecar children + emit `sidecar:event` 事件. 下次 send_prompt
+   *     时 Tauri run_prompt 走 lazy spawn 路径, 读新 config 起新 sidecar. FE 无感
+   *     (1-2 秒, 不弹 modal, 不阻塞 UI).
+   *   副作用: 正在 streaming 的 LLM 响应会被断掉, run_prompt task 走 synthesized
+   *     agent_end 路径, FE 收到后走正常 error 收尾视觉.
+   * @param reason 给 log + UI toast 用的描述 (e.g. "mcp_server_changed", "external_tool_added")
+   * @returns killed count (被杀的 child 数, 0 表示当前没 active sidecar, 啥都不影响)
+   */
+  async restartAllSidecars(reason: string): Promise<number> {
+    try {
+      const res = await invoke<number>('restart_all_sidecars', { reason });
+      console.log('[pi-tauri] restartAllSidecars', { reason, killed: res });
+      return res;
+    } catch (e) {
+      console.error('[pi-tauri] restartAllSidecars FAILED', e);
+      return 0;
+    }
+  }
+
+  /**
    * ADR-0022 v2 (2026-08-23): 切换 Browser Panel 显隐 (右上角 button 调用)
    *   - 不存在 → 创建 + dock 主窗口右侧 + show
    *   - hidden → dock 同步位置 + show

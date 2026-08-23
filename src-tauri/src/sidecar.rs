@@ -511,6 +511,65 @@ pub async fn kill_sidecar(
     Ok(existed)
 }
 
+/// ADR-0023 (2026-08-23): 静默重启所有 active sidecar
+///
+/// 触发场景: 改了"需要重启"的配置 (MCP server / external tool / dangerousWhitelist / bash.path
+///   / system prompt override / user tool preset), Pi SDK 0.84.2 的 tool 注册只在
+///   createAgentSession 时一次, 必须新 sidecar 进程才生效.
+///
+/// 实现: 列 `ActiveSidecars` map, 对每个 child kill (Windows TerminateProcess),
+///   移除 map entry. 下次 send_prompt 时 Tauri run_prompt 走 lazy spawn 路径,
+///   读新 config 起新 sidecar. FE 无感 (1-2 秒, 不弹 modal).
+///
+/// 副作用: 正在 streaming 的 LLM 响应会被断掉, run_prompt task 走 "stream ended
+///   without agent_end" 路径发 synthesized agent_end (line 308), FE 收到后
+///   弹 "response interrupted by restart" 提示 (跟正常 error 一样的视觉).
+///
+/// 同时 emit `sidecar:restart` 事件 (全局), FE 监听这个事件弹 "已保存, 新配置将在
+///   下次对话生效" toast (跟 agent_end 事件解耦, 即使没 active sidecar 也能感知).
+///
+/// @param reason 给 log + FE 弹 toast 用的描述 (e.g. "mcp_server_changed")
+/// @returns killed count (u32), FE 可选择性忽略
+#[tauri::command]
+pub async fn restart_all_sidecars(
+    reason: String,
+    active: State<'_, Arc<ActiveSidecars>>,
+    app: AppHandle,
+) -> Result<u32, String> {
+    let mut map = active.0.lock().await;
+    let session_ids: Vec<String> = map.keys().cloned().collect();
+    let count = session_ids.len() as u32;
+    log::info!("[sidecar] restart_all_sidecars: reason={reason} killing {count} sidecar(s)");
+    for session_id in &session_ids {
+        if let Some(mut child) = map.remove(session_id) {
+            log::warn!(
+                "[sidecar] restart_all_sidecars: session={session_id} killing (reason={reason})"
+            );
+            let _ = child.kill();
+            // 注意: 不要在这里 emit agent_end. run_prompt task 自己会 emit synthesized
+            //   agent_end 走 stream-ended-without-agent_end 路径. 那个事件已经被 FE
+            //   处理为 streaming=false + error indicator, 跟"被 restart 打断"是
+            //   一样的视觉, 没必要多发一次.
+        } else {
+            log::info!("[sidecar] restart_all_sidecars: session={session_id} not in map (race?)");
+        }
+    }
+    // 全局事件: 通知 FE "已经 restart, 新配置下次 send_prompt 生效"
+    let event = serde_json::json!({
+        "type": "sidecar_restarted",
+        "reason": reason,
+        "killed": count,
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    });
+    if let Err(e) = app.emit("sidecar:event", &event) {
+        log::error!("[sidecar] restart_all_sidecars: emit sidecar:event failed: {e}");
+    }
+    Ok(count)
+}
+
 /// v0.5.0: 通用 stdin 透传 — FE 端发任意 RpcCommand 写到指定 sidecar stdin.
 /// 之前 v0.4.x 的 send_permission_response / set_permission_mode / compact_session 3 个
 /// 特殊 invoke 全部合并到这一个 — Rust 端不解析 RpcCommand, 直接 JSON.stringify 后

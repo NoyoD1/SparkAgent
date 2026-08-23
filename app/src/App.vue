@@ -23,6 +23,8 @@ const ui = useUiStore();
 const ready = ref(false);
 const migrationNotice = ref<string>('');
 let unlistenBrowserDestroyed: UnlistenFn | null = null;
+// ADR-0023 (2026-08-23): 监听全局 sidecar 事件 (e.g. restart, ready, error)
+let unlistenSidecarEvent: UnlistenFn | null = null;
 
 onMounted(async () => {
   // v0.3.8.16: 启动时把保存的主题应用到 <html> 上, 避免初始闪烁
@@ -61,10 +63,52 @@ onMounted(async () => {
   } catch (e) {
     console.error('[App] listen browser-panel:destroyed failed', e);
   }
+  // ADR-0023 (2026-08-23): 监听全局 sidecar 事件
+  //   当前用: sidecar_restarted (静默重启完成) → 弹 toast 通知 user
+  //   未来扩展: sidecar_ready, sidecar_error 等
+  try {
+    unlistenSidecarEvent = await listen<{ type: string; reason?: string; killed?: number }>(
+      'sidecar:event',
+      (e) => {
+        const evt = e.payload;
+        if (evt?.type === 'sidecar_restarted') {
+          const killed = evt.killed ?? 0;
+          // 跟 event reason 翻译成 user 友好的中文
+          const reasonMap: Record<string, string> = {
+            mcp_server_changed: 'MCP server',
+            external_tool_changed: '外部 tool',
+            dangerous_whitelist_changed: '危险命令白名单',
+            bash_path_changed: 'Bash 路径',
+            user_tool_changed: '自定义 tool',
+            system_prompt_changed: '系统提示',
+          };
+          const label = reasonMap[evt.reason ?? ''] ?? '配置';
+          if (killed > 0) {
+            ui.showToast(
+              `${label} 已保存, 重启服务中… 新配置将在下次对话生效`,
+              'info',
+              2500,
+            );
+          } else {
+            // 没 active sidecar 被杀, 直接说"新配置下次对话生效"
+            ui.showToast(
+              `${label} 已保存, 新配置将在下次对话生效`,
+              'info',
+              2000,
+            );
+          }
+        }
+        // 未来可加: sidecar_ready / sidecar_error 等
+      },
+    );
+  } catch (e) {
+    console.error('[App] listen sidecar:event failed', e);
+  }
 });
 
 onUnmounted(() => {
   unlistenBrowserDestroyed?.();
+  unlistenSidecarEvent?.();
 });
 </script>
 
