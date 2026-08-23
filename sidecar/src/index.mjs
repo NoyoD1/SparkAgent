@@ -1912,37 +1912,35 @@ function webCacheSet(cacheKey, value) {
 //   agent 控制循环: navigate → read → 从 read 结果里找链接 → 拼 URL → navigate → 读 ...
 //   click/type/scroll 后续 P2
 
-const BROWSER_REQ_PATH = join(agentDir, 'browser_request.json');
-const BROWSER_RES_PATH = join(agentDir, 'browser_response.json');
+// 2026-08-24 P3-E: path 在函数内部 inline `join(agentDir, ...)` 避免 const hoisting bug
 let tauriCallId = 0;
 
 function callTauriCommand(command, args) {
   return new Promise(async (resolve, reject) => {
     const id = `tcall-${++tauriCallId}-${Date.now()}`;
     const req = { id, command, args: args || {} };
-    // 清掉旧 response (防 stale)
-    try { unlinkSync(BROWSER_RES_PATH); } catch {}
-    // 写请求
+    // 关键: 在函数内部 call `join`, 不是 const, 避免 bun minify 弄丢 const 初始化
+    const reqPath = join(agentDir, 'browser_request.json');
+    const resPath = join(agentDir, 'browser_response.json');
+    try { unlinkSync(resPath); } catch {}
     try {
-      writeFileSync(BROWSER_REQ_PATH, JSON.stringify(req), 'utf-8');
+      writeFileSync(reqPath, JSON.stringify(req), 'utf-8');
     } catch (e) {
       reject(new Error(`write request failed: ${e instanceof Error ? e.message : String(e)}`));
       return;
     }
-    // 轮询 response (60s 超时, 100ms 间隔)
     const start = Date.now();
     const poll = () => {
       if (Date.now() - start > 60_000) {
         reject(new Error(`tauri_call ${command} timeout 60s`));
         return;
       }
-      if (existsSync(BROWSER_RES_PATH)) {
+      if (existsSync(resPath)) {
         try {
-          const content = readFileSync(BROWSER_RES_PATH, 'utf-8');
+          const content = readFileSync(resPath, 'utf-8');
           const res = JSON.parse(content);
           if (res.id === id) {
-            // 拿到了, 清文件
-            try { unlinkSync(BROWSER_RES_PATH); } catch {}
+            try { unlinkSync(resPath); } catch {}
             if (res.error) reject(new Error(res.error));
             else resolve(res.result);
             return;
