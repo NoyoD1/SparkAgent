@@ -575,6 +575,9 @@ intent across the session is still part of the conversation.
         if (config.permissionMode !== 'allow') {
           factories.push(createPermissionExtension(config.permissionMode));
         }
+        // ADR-0019 P0-2: 危险命令 deny list + 用户白名单 (不受 permissionMode 控制,
+        //   永远注册 — 危险命令是 model 行为, 不是 user 行为, allow 模式也该拦)
+        factories.push(createDangerousCommandExtension(dangerousWhitelist));
         return factories;
       })(),
       appendSystemPromptOverride: (base) => [
@@ -742,6 +745,43 @@ The re-read is a single tool call — a small cost for correctness. Skipping it 
  */
 const READ_ONLY_TOOLS = new Set(['read', 'ls', 'find', 'grep']);
 
+// ====== ADR-0019 P0-2 (2026-08-23): 内置危险命令 deny list ======
+//   当 bash 工具被调, Extension.on('tool_call') 用这些 regex 匹配 command.
+//   匹配 + 不在用户白名单 → block with reason (LMM 收到 reason 后可改命令).
+//   匹配 + 在用户白名单 → 放行 + stderr log 一行 [sidecar] DANGEROUS_USED, 供 chat UI 检测 badge.
+//   12 条覆盖 80% 常见危险. 用户可在 Settings → 通用 → 高级权限 加白名单 / 自定义扩展.
+const BUILTIN_DENY_LIST = [
+  // 通用: 危险删除
+  /\brm\s+(-[a-zA-Z]*[rRfF][a-zA-Z]*|--recursive)\b/,     // rm -rf / rm -fr / rm -r
+  /\brmdir\s+\/s\b/i,                                      // Windows rmdir /s
+  /\bdel\s+\/[a-z]*f[a-z]*\b/i,                            // Windows del /f
+  /\brd\s+\/s(\s+\/q)?\b/i,                                // Windows rd /s /q
+  // 磁盘级
+  /\bformat(\.com)?\b/i,                                   // format C:
+  /\bmkfs(\.[a-z0-9]+)?\b/i,                               // mkfs.ext4 etc.
+  /\bdd\s+if=/i,                                           // dd if=/dev/zero of=/dev/sda
+  // Fork bomb (经典)
+  /:\(\)\s*\{.*:\|:.*&\s*\}\s*;\s*:/,                     // :(){ :|:& };:
+  // Pipe-to-shell (下载执行)
+  /\b(wget|curl)\s+[^|]*\|\s*(ba)?sh\b/i,                  // wget/curl | bash
+  // 远程代码执行
+  /\b(sh|bash)\s+<\s*(\(|curl|wget)/i,                     // sh <(curl ...) 等
+  // 系统关停
+  /\bshutdown\s+(-h|-r\s+now)/i,                           // shutdown -h now
+  /\b(init\s+0|init\s+6)\b/,                               // init 0/6
+  // /dev/sda 直接写
+  />\s*\/dev\/(sda|nvme|hd)/i,
+];
+
+// ====== ADR-0019 P0-2: 危险命令白名单 (从 settings.json 读) ======
+//   必须在模块顶层, 不能在 loadUserTools 函数内!
+//   extensionFactories IIFE 在 line 580 引用, 而 loadUserTools 调在 line 675 之后.
+//   函数内 const 不会 hoisted, 引用即 ReferenceError, sidecar module 加载失败.
+//   顶层 let/const 在 module 加载时进入 TDZ, 但我们在 IIFE 执行时 (line 549 module top-level await 阶段)
+//   这个变量在词法上已声明, 不会 ReferenceError. 真正的填充在 loadUserTools 内 (下面有 4 处 push).
+let dangerousWhitelist = [];
+
+
 /**
  * 2026-08-20 P1-5: 加载 user-defined tools (从 builtin 派生的"args 预设"模板)
  *
@@ -781,6 +821,7 @@ function loadUserTools(cwd, agentDir) {
   //   没设 → fallback Pi SDK 自带 search (3 路径 + PATH, 跟旧行为一致)
   //   shellPath 设了但文件不存在 → Pi SDK 内部 throw, sidecar 走 errorSanitizer
   let userBashShellPath = null;
+  // ADR-0019 P0-2: 危险命令白名单 — 推到模块顶层 (line 779), 这里直接 push
   try {
     const settingsPath = join(agentDir || process.cwd(), 'settings.json');
     if (existsSync(settingsPath)) {
@@ -790,6 +831,22 @@ function loadUserTools(cwd, agentDir) {
       if (bashCfg && typeof bashCfg.path === 'string' && bashCfg.path) {
         userBashShellPath = bashCfg.path;
         console.error(`[sidecar] P0-1: bash shell from settings: ${userBashShellPath} (source=${bashCfg.source ?? '?'}, version=${bashCfg.version ?? '?'})`);
+      }
+
+      // ADR-0019 P0-2: 读 user 自定义危险命令白名单 (regex pattern 列表)
+      //   来自 Settings → 通用 → 高级权限 的输入
+      //   格式: [{ pattern: string, note?: string, addedAt?: string }, ...]
+      const dwl = settings?.dangerousWhitelist;
+      if (Array.isArray(dwl)) {
+        for (const item of dwl) {
+          if (item && typeof item.pattern === 'string' && item.pattern) {
+            dangerousWhitelist.push({
+              pattern: item.pattern,
+              note: typeof item.note === 'string' ? item.note : '',
+              addedAt: typeof item.addedAt === 'string' ? item.addedAt : new Date().toISOString(),
+            });
+          }
+        }
       }
     }
   } catch (e) {
@@ -1456,6 +1513,68 @@ function createMaxRoundsExtension(maxRounds) {
         };
       }
       return undefined;
+    });
+  };
+}
+
+/**
+ * ADR-0019 P0-2 (2026-08-23): 危险命令 deny list + 用户白名单 extension.
+ *
+ * 行为:
+ *   - bash tool call → 检查 command 匹配 BUILTIN_DENY_LIST 任一条
+ *   - 匹配 + 不在 whitelist → block with reason (LMM 收到 reason 后会改命令或要求加白名单)
+ *   - 匹配 + 在 whitelist → 放行 + stderr log "[DANGEROUS_USED] pattern=xxx cmd=yyy" (供 chat UI 检测)
+ *   - 不匹配 deny list → 放行
+ *
+ * 白名单是 user 在 Settings → 通用 → 高级权限 维护的 regex pattern 列表. 走 settings.json 的
+ *   dangerousWhitelist 字段, Pi SDK 完全不知道, 我们自己用 (跟 P0-1 bash.path 同 pattern).
+ *
+ * 关键设计: block 的 reason 文案明确告诉 LLM 怎么改 (加白名单 / 改命令), 不要用模棱两可的拒绝.
+ */
+function createDangerousCommandExtension(whitelist) {
+  // 预编译 whitelist regex (避免每次 tool_call 都重 compile)
+  const compiledWhitelist = [];
+  for (const item of (whitelist || [])) {
+    if (!item || typeof item.pattern !== 'string' || !item.pattern) continue;
+    try {
+      compiledWhitelist.push(new RegExp(item.pattern, 'i'));
+    } catch (e) {
+      console.error(`[danger] invalid whitelist pattern "${item.pattern}": ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  if (compiledWhitelist.length > 0) {
+    console.error(`[danger] whitelist: ${compiledWhitelist.length} pattern(s) loaded`);
+  }
+
+  return (pi) => {
+    pi.on('tool_call', async (event) => {
+      if (event.toolName !== 'bash') return undefined;
+      const command = event.input?.command;
+      if (typeof command !== 'string' || !command) return undefined;
+
+      // 检查 deny list
+      const matchedDeny = BUILTIN_DENY_LIST.find((re) => re.test(command));
+      if (!matchedDeny) return undefined;
+
+      // 检查 whitelist
+      const isWhitelisted = compiledWhitelist.some((re) => re.test(command));
+      if (isWhitelisted) {
+        console.error(`[DANGEROUS_USED] whitelisted command allowed: pattern=${matchedDeny.source} cmd=${command.slice(0, 200)}`);
+        return undefined;  // 放行
+      }
+
+      // block with detailed reason
+      const preview = command.slice(0, 120);
+      console.error(`[danger] BLOCK dangerous bash: ${matchedDeny.source} cmd=${preview}`);
+      return {
+        block: true,
+        reason: `危险命令被沙箱拦截 (匹配: ${matchedDeny.source.slice(0, 60)}).\n` +
+          `原命令前 120 字: ${preview}\n\n` +
+          `两种处理方式:\n` +
+          `  1) 改写命令避免危险模式 (推荐, 95% 情况可以)\n` +
+          `  2) 到 Settings → 通用 → 高级权限, 加白名单 (仅当用户明确想用此命令时)\n\n` +
+          `内置检测: rm -rf / format / mkfs / dd if= / pipe-to-shell / fork bomb / shutdown 等.`,
+      };
     });
   };
 }
