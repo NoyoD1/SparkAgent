@@ -2234,23 +2234,25 @@ async fn list_external_tools(
         workspace_override: bool,
     ) -> Result<(), String> {
         if !dir.exists() { return Ok(()); }
+        // 扫子目录 (external tool 是 <dir>/<tool_name>/manifest.json 结构)
+        //   跟 sidecar/src/externalTools.mjs::scanAndAppend 同 pattern
         let entries = std::fs::read_dir(dir)
             .map_err(|e| format!("read_dir({}): {}", dir.display(), e))?;
         for entry in entries.flatten() {
             let p = entry.path();
-            if !p.is_file() { continue; }
-            if p.file_name().and_then(|n| n.to_str()) != Some("manifest.json") { continue; }
-            // 父目录就是 tool folder, name = 文件夹名
-            let tool_name = match p.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()) {
+            if !p.is_dir() { continue; }  // v3.18 fix: 之前 is_file() 错, 跳过了 tool folder 子目录
+            let tool_name = match p.file_name().and_then(|s| s.to_str()) {
                 Some(s) => s.to_string(),
                 None => continue,
             };
+            let manifest_path = p.join("manifest.json");
+            if !manifest_path.is_file() { continue; }
             // workspace 覆盖: 同名删旧的
             if workspace_override && seen_names.contains(&tool_name) {
                 tools.retain(|t| t.name != tool_name);
             }
             seen_names.insert(tool_name.clone());
-            tools.push(parse_external_tool_manifest(&tool_name, &p, scope));
+            tools.push(parse_external_tool_manifest(&tool_name, &manifest_path, scope));
         }
         Ok(())
     }
