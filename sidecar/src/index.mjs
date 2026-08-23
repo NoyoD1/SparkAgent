@@ -111,6 +111,11 @@ import { loadSkills, formatSkillsForPrompt } from '@earendil-works/pi-coding-age
 //   用官方 SDK (@modelcontextprotocol/sdk) 走 JSON-RPC over stdio.
 //   跟 P1-5 user tool 走同一个 customTools path (merge 到 LLM 可见的 tools list).
 import { McpServerClient, McpServerError, jsonSchemaToTypeBox } from './mcpClient.mjs';
+// ADR-0023 P3-B (2026-08-23): External tools — user drop 一个文件夹到
+//   <workspace>/.pi/tools/external/<name>/ 或 <agentDir>/tools/external/<name>/,
+//   sidecar 扫到后启 subprocess (python/node/bun) 走 stdio JSON-RPC,
+//   包成 Pi SDK ToolDefinition 让 LLM 调用.
+import { loadExternalTools } from './externalTools.mjs';
 // v0.6.3-rc1 P2-6: 工具错误分类 + 人类可读化 (401/403/5xx/网络错误 → user 看得懂的提示)
 import { classifyToolError, formatToolError } from './errorSanitizer.mjs';
 // v0.6.3-rc1 P2-2: MCP config dir 热重载 watcher (fs.watch + debounce)
@@ -701,11 +706,14 @@ The re-read is a single tool call — a small cost for correctness. Skipping it 
   // P2-2: 装 fs watcher, config 改完自动 reload
   installMcpWatcher();
 
-  // 合并 user tool + MCP tool + ADR-0022 chromiumoxide browser tool 成一个 customTools 列表
+  // 合并 user tool + MCP tool + ADR-0022 chromiumoxide browser tool + ADR-0023 external tool
+  //   成一个 customTools 列表
   const browserTools = loadBrowserTools();
-  const allCustomTools = [...userTools, ...mcpCustomTools, ...browserTools];
+  // ADR-0023 P3-B: 扫 external tool 文件夹, 启 subprocess, 跟其它 tool 同样 merge
+  const externalTools = loadExternalTools(workspacePath, agentDir);
+  const allCustomTools = [...userTools, ...mcpCustomTools, ...browserTools, ...externalTools];
   if (allCustomTools.length > 0) {
-    console.error(`[sidecar] total customTools: ${allCustomTools.length} (user=${userTools.length}, mcp=${mcpCustomTools.length}, browser=${browserTools.length})`);
+    console.error(`[sidecar] total customTools: ${allCustomTools.length} (user=${userTools.length}, mcp=${mcpCustomTools.length}, browser=${browserTools.length}, external=${externalTools.length})`);
   }
 
   // 2026-08-21 P2-1 fix: tools 白名单合并 builtin + customTools 名字.

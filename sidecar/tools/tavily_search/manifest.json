@@ -1,0 +1,36 @@
+{
+  "name": "tavily_search",
+  "description": "Web search via Tavily API. Returns ranked search results with title, URL, content snippet, and optional AI-generated answer. Use this for: current events, documentation lookup, news, prices, or any info that needs a fresh web search. Supports search_depth='basic' (fast) or 'advanced' (slower but more thorough, includes answer). Requires TAVILY_API_KEY env var.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Search query. Be specific: include year, version, exact terms. e.g. 'Rust 1.81 async fn in traits 2024' instead of 'Rust async'."
+      },
+      "max_results": {
+        "type": "integer",
+        "description": "Maximum number of search results to return. Default 5, max 20.",
+        "default": 5,
+        "minimum": 1,
+        "maximum": 20
+      },
+      "search_depth": {
+        "type": "string",
+        "description": "Search depth: 'basic' (fast, 1 credit per request) or 'advanced' (slower, 2 credits, includes AI answer).",
+        "enum": ["basic", "advanced"],
+        "default": "basic"
+      },
+      "topic": {
+        "type": "string",
+        "description": "Topic category for filtering. Default 'general'. Use 'news' for current events.",
+        "enum": ["general", "news"],
+        "default": "general"
+      }
+    },
+    "required": ["query"]
+  },
+  "runtime": "python",
+  "entry": "tavily_search.py",
+  "timeout": 30000
+}

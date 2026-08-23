@@ -30,7 +30,7 @@ if (existsSync(tmpDir)) {
 }
 mkdirSync(tmpDir, { recursive: true });
 
-const files = ['index.mjs', 'mcpClient.mjs', 'mcpWatcher.mjs', 'errorSanitizer.mjs'];
+const files = ['index.mjs', 'mcpClient.mjs', 'mcpWatcher.mjs', 'errorSanitizer.mjs', 'externalTools.mjs'];
 for (const f of files) {
   const srcPath = join(sidecarSrc, f);
   if (!existsSync(srcPath)) {
