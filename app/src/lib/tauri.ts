@@ -479,6 +479,26 @@ class PiTauriClient {
     return (await invoke('has_api_key', { providerId })) as boolean;
   }
 
+  // ====== ADR-0021 P0-3 (2026-08-23): Web 搜索 API key (Brave Search) ======
+  //   跟 LLM apiKey 同 service="pi-agent", username="search-brave" (keychain 区分)
+  //   Sidecar 启动时 Tauri 从 keychain 读, 写到 stdin config 的 webSearchKey 字段
+  //   改完需要重启 Tauri (跟 LLM apiKey 一样的"等重启"语义)
+  async saveWebSearchKey(apiKey: string): Promise<void> {
+    await invoke('save_web_search_key', { apiKey });
+  }
+
+  async deleteWebSearchKey(): Promise<void> {
+    await invoke('delete_web_search_key');
+  }
+
+  async hasWebSearchKey(): Promise<boolean> {
+    return (await invoke('has_web_search_key')) as boolean;
+  }
+
+  async getWebSearchKeyMasked(): Promise<string | null> {
+    return (await invoke('get_web_search_key_masked')) as string | null;
+  }
+
   async listApiKeys(): Promise<
     Array<{ providerId: string; configured: boolean; preview: string | null }>
   > {

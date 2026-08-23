@@ -161,6 +161,18 @@ pub fn run_prompt(
     debug_log(&format!("run_prompt: session={session_id}"));
     tauri::async_runtime::spawn(async move {
         // v0.5.0: config 走 argv[1] (跟 Pi SDK main.ts pattern 一致)
+        // ADR-0021 P0-3: 加 webSearchKey 字段, sidecar 拿这个 key 调 Brave Search API
+        let web_search_key = crate::keyring::get(crate::WEB_SEARCH_PROVIDER_ID).ok().flatten();
+        if let Some(ref k) = web_search_key {
+            debug_log(&format!(
+                "run_prompt: webSearchKey loaded from keychain ({} chars, masked={})",
+                k.len(),
+                crate::keyring::mask(k)
+            ));
+        } else {
+            debug_log("run_prompt: webSearchKey 未配置 (Settings → Web 搜索 录入 key)");
+        }
+
         let config_arg = match serde_json::to_string(&serde_json::json!({
             "type": "config",
             "provider": config.provider,
@@ -174,6 +186,8 @@ pub fn run_prompt(
             "skills": config.skills,        // v0.4.4 Skills (Pi SDK 暴露)
             "modelMetadata": config.model_metadata,  // v0.4.4.6 model metadata
             // v0.5.0-v0.1: 删 activeAgent 字段 (multi-agent persona 回滚)
+            // ADR-0021 P0-3: web 工具的 API key (Brave Search), 跟 LLM key 同路径走 stdin config
+            "webSearchKey": web_search_key,
         })) {
             Ok(s) => s,
             Err(e) => {
