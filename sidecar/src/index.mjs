@@ -729,7 +729,9 @@ The re-read is a single tool call — a small cost for correctness. Skipping it 
   const browserTools = loadBrowserTools();
   // ADR-0023 P3-B: 扫 external tool 文件夹, 启 subprocess, 跟其它 tool 同样 merge
   // P3-C: 传 resolveSecretEnv, 让 external tool manifest.env 也能用 keychain: 引用
-  const externalTools = loadExternalTools(workspacePath, agentDir, resolveSecretEnv);
+  // 2026-08-24 P3-E fix: loadExternalTools 改 async 了 (P3-C bug: scanAndAppend 没 await,
+  //   Promise 进 out, LLM 看到 [null,null] 烂工具列表). 必须 await.
+  const externalTools = await loadExternalTools(workspacePath, agentDir, resolveSecretEnv);
   const allCustomTools = [...userTools, ...mcpCustomTools, ...browserTools, ...externalTools];
   if (allCustomTools.length > 0) {
     console.error(`[sidecar] total customTools: ${allCustomTools.length} (user=${userTools.length}, mcp=${mcpCustomTools.length}, browser=${browserTools.length}, external=${externalTools.length})`);

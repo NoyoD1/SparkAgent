@@ -113,19 +113,19 @@ export async function callExternalToolByName(name, args) {
  *   (来自 index.mjs, 走 callTauriCommand("resolve_secrets") 通道)
  * @returns ToolDefinition[] (跟 builtin 22 tool 同样的 schema)
  */
-export function loadExternalTools(workspacePath, agentDir, resolveSecretEnv) {
+export async function loadExternalTools(workspacePath, agentDir, resolveSecretEnv) {
   const out = [];
   const seen = new Set();
 
   // 1. global scope: <agentDir>/tools/external/*/manifest.json
   if (agentDir) {
     const globalDir = join(agentDir, 'tools', 'external');
-    scanAndAppend(globalDir, out, seen, 'global', resolveSecretEnv);
+    await scanAndAppend(globalDir, out, seen, 'global', resolveSecretEnv);
   }
   // 2. workspace scope: <workspacePath>/.pi/tools/external/*/manifest.json (同名覆盖 global)
   if (workspacePath) {
     const wsDir = join(workspacePath, '.pi', 'tools', 'external');
-    scanAndAppend(wsDir, out, seen, 'workspace', resolveSecretEnv);
+    await scanAndAppend(wsDir, out, seen, 'workspace', resolveSecretEnv);
   }
   return out;
 }
@@ -139,26 +139,33 @@ function scanAndAppend(dir, out, seen, scope, resolveSecretEnv) {
     console.error(`[externalTools] scan ${dir} failed:`, e);
     return;
   }
-  for (const entry of entries) {
-    const fullDir = join(dir, entry);
-    try {
-      const stat = statSync(fullDir);
-      if (!stat.isDirectory()) continue;
-    } catch {
-      continue;
+  // 2026-08-24 P3-E bug fix: tryBuildToolFromManifest 是 async (P3-C 加了 await resolveSecretEnv 后),
+  //   scanAndAppend 必须 await 它才能拿到真 ToolDefinition. 之前漏了 await, Promise 直接进 out,
+  //   后续 .name 返 undefined, LLM API 收到 [null, null] 烂工具列表报 "tools.10.function.name is empty".
+  //   改用 for...of + await (顺序处理, 跟之前 while 行为一致, 启动 0.x s 多花在 await subprocess spawn).
+  return (async () => {
+    for (const entry of entries) {
+      const fullDir = join(dir, entry);
+      try {
+        const stat = statSync(fullDir);
+        if (!stat.isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      const manifestPath = join(fullDir, 'manifest.json');
+      if (!existsSync(manifestPath)) continue;
+      // 关键: await, 拿 resolved value (ToolDefinition 或 null)
+      const def = await tryBuildToolFromManifest(manifestPath, scope, resolveSecretEnv);
+      if (!def) continue;
+      if (seen.has(def.name)) {
+        // 同名: workspace 覆盖 global (跟 user tool 一致)
+        const idx = out.findIndex((t) => t.name === def.name);
+        if (idx >= 0) out.splice(idx, 1);
+      }
+      seen.add(def.name);
+      out.push(def);
     }
-    const manifestPath = join(fullDir, 'manifest.json');
-    if (!existsSync(manifestPath)) continue;
-    const def = tryBuildToolFromManifest(manifestPath, scope, resolveSecretEnv);
-    if (!def) continue;
-    if (seen.has(def.name)) {
-      // 同名: workspace 覆盖 global (跟 user tool 一致)
-      const idx = out.findIndex((t) => t.name === def.name);
-      if (idx >= 0) out.splice(idx, 1);
-    }
-    seen.add(def.name);
-    out.push(def);
-  }
+  })();
 }
 
 /**
