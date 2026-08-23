@@ -577,7 +577,10 @@ intent across the session is still part of the conversation.
         }
         // ADR-0019 P0-2: 危险命令 deny list + 用户白名单 (不受 permissionMode 控制,
         //   永远注册 — 危险命令是 model 行为, 不是 user 行为, allow 模式也该拦)
-        factories.push(createDangerousCommandExtension(dangerousWhitelist));
+        //   2026-08-23 bug fix: 之前传数组引用 + 工厂立即 compile, 跟 loadUserTools 填白名单
+        //   有时序竞争 — 工厂跑的时候 dangerousWhitelist 还是 [], 编译出来 compiledWhitelist
+        //   锁死成空, 之后 push 进去也看不到. 改成传 getter, handler 内 lazy 编译 + 缓存.
+        factories.push(createDangerousCommandExtension(() => dangerousWhitelist));
         return factories;
       })(),
       appendSystemPromptOverride: (base) => [
@@ -1531,22 +1534,37 @@ function createMaxRoundsExtension(maxRounds) {
  *
  * 关键设计: block 的 reason 文案明确告诉 LLM 怎么改 (加白名单 / 改命令), 不要用模棱两可的拒绝.
  */
-function createDangerousCommandExtension(whitelist) {
-  // 预编译 whitelist regex (避免每次 tool_call 都重 compile)
-  const compiledWhitelist = [];
-  for (const item of (whitelist || [])) {
-    if (!item || typeof item.pattern !== 'string' || !item.pattern) continue;
-    try {
-      compiledWhitelist.push(new RegExp(item.pattern, 'i'));
-    } catch (e) {
-      console.error(`[danger] invalid whitelist pattern "${item.pattern}": ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-  if (compiledWhitelist.length > 0) {
-    console.error(`[danger] whitelist: ${compiledWhitelist.length} pattern(s) loaded`);
-  }
-
+function createDangerousCommandExtension(getWhitelist) {
+  // 2026-08-23 bug fix: 之前工厂立即预编译 (line 1536), 跟 loadUserTools 填白名单有时序竞争 —
+  //   createAgentSessionServices 跑的时候 (line 549) dangerousWhitelist 还是 [],
+  //   编译出空 compiledWhitelist 锁死, 之后 push 进去也看不到.
+  //   修: 传 getter + handler 内 lazy 编译, 第一次 tool_call 触发编译, 此时 loadUserTools 已跑完.
+  //   缓存逻辑: 用 source 数组 length 当 key, list 变了就重编译 (覆盖未来热更场景).
   return (pi) => {
+    let cachedCompiled = null;
+    let cachedSourceLen = -1;  // 强制首次编译
+
+    const getCompiledWhitelist = () => {
+      const list = getWhitelist() || [];
+      if (list.length !== cachedSourceLen || cachedCompiled === null) {
+        const fresh = [];
+        for (const item of list) {
+          if (!item || typeof item.pattern !== 'string' || !item.pattern) continue;
+          try {
+            fresh.push(new RegExp(item.pattern, 'i'));
+          } catch (e) {
+            console.error(`[danger] invalid whitelist pattern "${item.pattern}": ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        cachedCompiled = fresh;
+        cachedSourceLen = list.length;
+        if (fresh.length > 0) {
+          console.error(`[danger] whitelist: ${fresh.length} pattern(s) loaded (lazy compiled on first tool_call)`);
+        }
+      }
+      return cachedCompiled;
+    };
+
     pi.on('tool_call', async (event) => {
       if (event.toolName !== 'bash') return undefined;
       const command = event.input?.command;
@@ -1556,7 +1574,8 @@ function createDangerousCommandExtension(whitelist) {
       const matchedDeny = BUILTIN_DENY_LIST.find((re) => re.test(command));
       if (!matchedDeny) return undefined;
 
-      // 检查 whitelist
+      // 检查 whitelist (lazy 编译, 第一次 tool_call 才真正 compile)
+      const compiledWhitelist = getCompiledWhitelist();
       const isWhitelisted = compiledWhitelist.some((re) => re.test(command));
       if (isWhitelisted) {
         console.error(`[DANGEROUS_USED] whitelisted command allowed: pattern=${matchedDeny.source} cmd=${command.slice(0, 200)}`);

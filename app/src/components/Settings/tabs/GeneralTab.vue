@@ -24,8 +24,8 @@
 import { ref, computed, onMounted } from 'vue';
 import { useSessionStore } from '@/stores/session';
 import { useUiStore } from '@/stores/ui';
-import { piTauri, type TauriBashConfig, type TauriShellInfo } from '@/lib/tauri';
-import { Archive, Info, Terminal, Search, X, FlaskConical, CheckCircle2, AlertCircle } from 'lucide-vue-next';
+import { piTauri, type TauriBashConfig, type TauriShellInfo, type TauriWhitelistItem } from '@/lib/tauri';
+import { Archive, Info, Terminal, Search, X, FlaskConical, CheckCircle2, AlertCircle, Shield, Plus } from 'lucide-vue-next';
 
 const sessionStore = useSessionStore();
 const uiStore = useUiStore();
@@ -49,6 +49,80 @@ const bashIsSaving = ref(false);
 const bashIsVerifying = ref(false);
 const bashVerifyResult = ref<{ ok: boolean; version?: string; error?: string } | null>(null);
 const bashHasAutoPicked = ref(false);
+
+// ====== ADR-0019 P0-2 (2026-08-23): 高级权限 (危险命令白名单) ======
+//   内置 deny list 12 类 — 跟 sidecar/src/index.mjs 的 BUILTIN_DENY_LIST 一一对应
+//   顺序就是侧车扫描顺序, 展示给 user 看 (只读, 不可关)
+//   description 是白话版本, regex 跟 sidecar 同步
+const BUILTIN_DENY_DESCRIPTIONS = [
+  'rm -rf / rm -r / --recursive (递归删)',
+  'rmdir /s (Windows 递归删目录)',
+  'del /f (Windows 强删文件)',
+  'rd /s /q (Windows 强删目录)',
+  'format (Windows 格式化磁盘)',
+  'mkfs (Linux 格式化分区, mkfs.ext4 等)',
+  'dd if= (磁盘级复制, 可擦盘)',
+  ':(){ :|:& };: (Fork bomb)',
+  'wget|curl ... | bash (下载并执行)',
+  'sh|bash <(curl|wget) (进程替换 + 下载执行)',
+  'shutdown -h / -r now (关机/重启)',
+  'init 0/6 (Linux 切换运行级别)',
+  '> /dev/sda (直接写磁盘设备)',
+];
+
+const whitelist = ref<TauriWhitelistItem[]>([]);
+const whitelistIsSaving = ref(false);
+const newWhitelistPattern = ref('');
+const newWhitelistNote = ref('');
+
+async function loadWhitelist() {
+  try {
+    whitelist.value = await piTauri.getDangerousWhitelist();
+    console.log(`[GeneralTab] loaded dangerousWhitelist: ${whitelist.value.length} item(s)`);
+  } catch (e) {
+    console.warn('[GeneralTab] get_dangerous_whitelist failed:', e);
+    whitelist.value = [];
+  }
+}
+
+async function addWhitelistItem() {
+  if (whitelistIsSaving.value) return;
+  const pattern = newWhitelistPattern.value.trim();
+  const note = newWhitelistNote.value.trim();
+  if (!pattern) {
+    useUiStore().showToast('pattern 不能为空', 'warning', 2000);
+    return;
+  }
+  whitelistIsSaving.value = true;
+  try {
+    whitelist.value = await piTauri.addDangerousWhitelistItem({ pattern, note });
+    useUiStore().showToast(`已添加白名单: ${pattern}`, 'success', 2500);
+    newWhitelistPattern.value = '';
+    newWhitelistNote.value = '';
+    console.log(`[GeneralTab] add_dangerous_whitelist_item OK: pattern=${pattern}`);
+  } catch (e) {
+    useUiStore().showToast(`添加失败: ${e instanceof Error ? e.message : String(e)}`, 'error', 4000);
+  } finally {
+    whitelistIsSaving.value = false;
+  }
+}
+
+async function removeWhitelistItem(item: TauriWhitelistItem) {
+  if (whitelistIsSaving.value) return;
+  if (!confirm(`确认从白名单移除?\n\npattern: ${item.pattern}\n${item.note ? `备注: ${item.note}\n` : ''}\n移除后, 匹配此 pattern 的危险命令会被 LLM 拦截.`)) {
+    return;
+  }
+  whitelistIsSaving.value = true;
+  try {
+    whitelist.value = await piTauri.removeDangerousWhitelistItem({ pattern: item.pattern });
+    useUiStore().showToast(`已移除: ${item.pattern}`, 'success', 2000);
+    console.log(`[GeneralTab] remove_dangerous_whitelist_item OK: pattern=${item.pattern}`);
+  } catch (e) {
+    useUiStore().showToast(`移除失败: ${e instanceof Error ? e.message : String(e)}`, 'error', 4000);
+  } finally {
+    whitelistIsSaving.value = false;
+  }
+}
 
 async function loadBashInitial() {
   try {
@@ -259,6 +333,7 @@ async function onToggle() {
 onMounted(() => {
   loadInitial();
   void loadBashInitial();
+  void loadWhitelist();
 });
 </script>
 
@@ -360,6 +435,91 @@ onMounted(() => {
       <div v-if="bashVerifyResult?.ok === false && bashVerifyResult.error" class="pad-bash-error">
         <AlertCircle :size="13" :stroke-width="1.75" />
         <span>{{ bashVerifyResult.error }}</span>
+      </div>
+    </div>
+
+    <!-- ADR-0019 P0-2 (2026-08-23): 高级权限 (危险命令白名单) -->
+    <div class="pad-general-section">
+      <div class="pad-general-section-head">
+        <Shield :size="16" :stroke-width="1.75" class="pad-general-section-icon" />
+        <h3 class="pad-general-section-title">高级权限</h3>
+        <span class="pad-general-section-tag is-manual">{{ whitelist.length }} 条白名单</span>
+      </div>
+      <p class="pad-general-section-desc">
+        Pi Agent 内置检测 <strong>12 类危险命令</strong> (rm -rf / format / mkfs / dd if= / pipe-to-shell / fork bomb 等).
+        匹配的命令会被 LLM 拦截 (除非加白名单). 白名单走<strong>正则</strong>, 匹配就放行 + sidecar 标记
+        <code>[DANGEROUS_USED]</code> 供排查. <strong>非必要别加</strong>, 95% 情况改写命令就行.
+      </p>
+
+      <details v-if="BUILTIN_DENY_DESCRIPTIONS.length > 0" class="pad-bash-candidates" style="margin-top: 4px">
+        <summary class="pad-bash-candidates-summary">
+          内置检测的 12 类危险命令 (只读, 不可关闭)
+        </summary>
+        <ul class="pad-bash-candidates-list">
+          <li v-for="(d, i) in BUILTIN_DENY_DESCRIPTIONS" :key="`deny-${i}`" class="pad-bash-candidate" style="cursor: default">
+            <span class="pad-bash-candidate-type">DANGER</span>
+            <span class="pad-bash-candidate-path">{{ d }}</span>
+          </li>
+        </ul>
+      </details>
+
+      <div class="pad-bash-row" style="margin-top: 12px">
+        <input
+          v-model="newWhitelistPattern"
+          type="text"
+          class="pad-bash-input"
+          placeholder="正则 pattern, e.g. rm\\s+-rf\\s+/tmp/.*"
+          spellcheck="false"
+          :disabled="whitelistIsSaving"
+        />
+        <input
+          v-model="newWhitelistNote"
+          type="text"
+          class="pad-bash-input"
+          placeholder="备注 (可选, e.g. 清理 /tmp)"
+          spellcheck="false"
+          :disabled="whitelistIsSaving"
+          style="min-width: 180px; flex: 0.6"
+        />
+        <button
+          class="pad-general-btn pad-general-btn--primary"
+          :disabled="whitelistIsSaving || !newWhitelistPattern.trim()"
+          @click="addWhitelistItem"
+          title="添加正则到白名单 (匹配后放行危险命令)"
+        >
+          <Plus :size="13" :stroke-width="1.75" />
+          <span>{{ whitelistIsSaving ? '添加中…' : '添加' }}</span>
+        </button>
+      </div>
+
+      <div v-if="whitelist.length > 0" style="margin-top: 10px">
+        <div
+          v-for="item in whitelist"
+          :key="item.pattern + item.addedAt"
+          class="pad-bash-candidate"
+          style="cursor: default; border-radius: var(--pad-radius-sm, 6px)"
+        >
+          <span class="pad-bash-candidate-type">WHITELIST</span>
+          <span class="pad-bash-candidate-path" :title="item.pattern">{{ item.pattern }}</span>
+          <span v-if="item.note" class="pad-bash-candidate-source" style="opacity: 0.8">{{ item.note }}</span>
+          <span class="pad-bash-candidate-source" style="opacity: 0.5">·</span>
+          <button
+            class="pad-general-btn pad-general-btn--danger"
+            style="height: 22px; padding: 0 8px; font-size: 11px"
+            :disabled="whitelistIsSaving"
+            @click="removeWhitelistItem(item)"
+            title="从白名单移除"
+          >
+            <X :size="11" :stroke-width="1.75" />
+            <span>删除</span>
+          </button>
+        </div>
+      </div>
+      <div v-else class="pad-bash-status is-warn" style="margin-top: 8px">
+        <Info :size="13" :stroke-width="1.75" />
+        <span class="pad-bash-status-text">
+          暂无白名单. 危险命令 (rm -rf / 等) 会被 LLM 拦截, 走改写命令路径.
+        </span>
       </div>
     </div>
 

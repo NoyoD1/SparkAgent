@@ -864,6 +864,21 @@ class PiTauriClient {
     return (await invoke('detect_bash_candidates')) as TauriShellInfo[];
   }
 
+  // ====== ADR-0019 P0-2 (2026-08-23): 危险命令白名单 ======
+  //   存储在 ~/.pi/agent/settings.json 的 dangerousWhitelist 字段
+  //   sidecar 启动时读, BUILTIN_DENY_LIST 匹配 + 不在 whitelist → block bash tool call
+  async getDangerousWhitelist(): Promise<TauriWhitelistItem[]> {
+    return (await invoke('get_dangerous_whitelist')) as TauriWhitelistItem[];
+  }
+
+  async addDangerousWhitelistItem(args: { pattern: string; note?: string }): Promise<TauriWhitelistItem[]> {
+    return (await invoke('add_dangerous_whitelist_item', { args })) as TauriWhitelistItem[];
+  }
+
+  async removeDangerousWhitelistItem(args: { pattern: string }): Promise<TauriWhitelistItem[]> {
+    return (await invoke('remove_dangerous_whitelist_item', { args })) as TauriWhitelistItem[];
+  }
+
   // ====== 2.1: 文件树浏览器 ======
   //   读 workspace 目录树, UI 用. 不走 sidecar, 走 Tauri 直 invoke.
   async listWorkspaceTree(path: string, maxDepth = 2): Promise<WorkspaceTreeNode[]> {
@@ -1053,6 +1068,22 @@ export interface TauriShellInfo {
   /** 'PATH' | 'registry' | 'common' | 'wsl', 排查用 */
   source: 'PATH' | 'registry' | 'common' | 'wsl';
   version?: string;
+}
+
+/**
+ * ADR-0019 P0-2 (2026-08-23): Tauri 端 get/add/remove_dangerous_whitelist 返回的单条白名单
+ *   存储在 ~/.pi/agent/settings.json 的 dangerousWhitelist 字段
+ *   sidecar 启动时读, 跟 BUILTIN_DENY_LIST 一起判断:
+ *     - 匹配 deny + 不在 whitelist → block bash tool call (LLM 收到 reason)
+ *     - 匹配 deny + 在 whitelist → 放行 + stderr log [DANGEROUS_USED] (供 dev 排查)
+ */
+export interface TauriWhitelistItem {
+  /** JavaScript 正则字符串, sidecar 编译成 new RegExp(pattern, 'i') */
+  pattern: string;
+  /** 用户加这条时的备注, UI 显示, 不参与匹配 */
+  note: string;
+  /** Unix epoch ms (跟 bash.lastVerified 格式一致) */
+  addedAt: string;
 }
 
 /**

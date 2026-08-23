@@ -3021,6 +3021,188 @@ async fn detect_bash_candidates() -> Result<Vec<ShellInfo>, String> {
     Ok(candidates)
 }
 
+// ====== ADR-0019 P0-2 (2026-08-23): 危险命令白名单 ======
+//   存储: ~/.pi/agent/settings.json 的 dangerousWhitelist 字段
+//   格式: [{ pattern: string, note: string, addedAt: ISO 8601 }, ...]
+//   sidecar 启动时读, BUILTIN_DENY_LIST 匹配 + 不在 whitelist → block bash tool call.
+//   设计原则:
+//   - 跟 P0-1 bash 字段同 pattern (单一文件多字段, 走 pi_settings_path)
+//   - pattern 必须是合法 RegExp (FE 端也校验一次, Rust 端二次防御)
+//   - 排序按 addedAt asc (后加的在后面), UI 列表稳定
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WhitelistItem {
+    /// JavaScript 风格正则 (Rust 编译成 RegExp 之前会被 RejectSyntax 自检)
+    pattern: String,
+    /// 用户加这条时的备注 (UI 显示, 不参与匹配)
+    #[serde(default)]
+    note: String,
+    /// ISO 8601 时间戳
+    #[serde(default)]
+    added_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddWhitelistArgs {
+    pattern: String,
+    #[serde(default)]
+    note: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveWhitelistArgs {
+    /// 跟 add 时一样, 用 pattern 唯一定位 (允许同 pattern 不同 note 共存, 删第一个匹配)
+    pattern: String,
+}
+
+/// 读 settings.json 的 dangerousWhitelist 数组 (跟 read_bash_config_from_settings 同 pattern)
+fn read_dangerous_whitelist_from_settings(value: &serde_json::Value) -> Vec<WhitelistItem> {
+    let Some(arr) = value.get("dangerousWhitelist").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in arr {
+        let Some(obj) = item.as_object() else { continue };
+        let Some(pattern) = obj.get("pattern").and_then(|p| p.as_str()) else { continue };
+        if pattern.is_empty() { continue }
+        out.push(WhitelistItem {
+            pattern: pattern.to_string(),
+            note: obj.get("note").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+            added_at: obj.get("addedAt").and_then(|a| a.as_str()).unwrap_or("").to_string(),
+        });
+    }
+    out
+}
+
+/// 校验 whitelist pattern 合法性. 返回 Err 给 FE 端弹 toast.
+fn validate_whitelist_pattern(pattern: &str) -> Result<(), String> {
+    if pattern.is_empty() {
+        return Err("pattern 不能为空".to_string());
+    }
+    if pattern.len() > 256 {
+        return Err(format!("pattern 长度 {} 超过 256 字符", pattern.len()));
+    }
+    // 跟 JS 一样拒绝 /regex/ literal flags, 只走纯 pattern + 'i' flag (sidecar 编译时也是 'i')
+    if pattern.starts_with('/') {
+        return Err("pattern 不能以 '/' 开头 (我们只接受 pattern 字符串, 不接受 /regex/flags literal)".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_dangerous_whitelist(app: AppHandle) -> Result<Vec<WhitelistItem>, String> {
+    let path = pi_settings_path(&app)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read settings.json: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("parse settings.json: {e}"))?;
+    Ok(read_dangerous_whitelist_from_settings(&value))
+}
+
+#[tauri::command]
+async fn add_dangerous_whitelist_item(
+    app: AppHandle,
+    args: AddWhitelistArgs,
+) -> Result<Vec<WhitelistItem>, String> {
+    validate_whitelist_pattern(&args.pattern)?;
+    if args.note.len() > 200 {
+        return Err(format!("note 长度 {} 超过 200 字符", args.note.len()));
+    }
+    let path = pi_settings_path(&app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create_dir_all({}): {e}", parent.display()))?;
+    }
+    let mut value: serde_json::Value = if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read settings.json: {e}"))?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !value.is_object() {
+        value = serde_json::json!({});
+    }
+    let obj = value.as_object_mut().unwrap();
+
+    // 拿到现有 list (允许同 pattern 多条, user 可能不同 note)
+    let list = obj.entry("dangerousWhitelist".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    if !list.is_array() {
+        *list = serde_json::json!([]);
+    }
+    let arr = list.as_array_mut().unwrap();
+    arr.push(serde_json::json!({
+        "pattern": args.pattern,
+        "note": args.note,
+        "addedAt": now_epoch_ms_iso(),
+    }));
+
+    let pretty = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings: {e}"))?;
+    std::fs::write(&path, pretty)
+        .map_err(|e| format!("write settings.json: {e}"))?;
+
+    debug_log(&format!(
+        "add_dangerous_whitelist_item: pattern={} note={}",
+        args.pattern, args.note
+    ));
+    Ok(read_dangerous_whitelist_from_settings(&value))
+}
+
+#[tauri::command]
+async fn remove_dangerous_whitelist_item(
+    app: AppHandle,
+    args: RemoveWhitelistArgs,
+) -> Result<Vec<WhitelistItem>, String> {
+    let path = pi_settings_path(&app)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read settings.json: {e}"))?;
+    let mut value: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("parse settings.json: {e}"))?;
+    let Some(list) = value.get_mut("dangerousWhitelist").and_then(|v| v.as_array_mut()) else {
+        return Ok(Vec::new());
+    };
+    // 删第一个 pattern 匹配的 (允许同 pattern 多条, 删最旧)
+    let before_len = list.len();
+    list.retain(|item| {
+        let p = item.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+        p != args.pattern
+    });
+    let removed = before_len - list.len();
+    if removed == 0 {
+        return Err(format!("没找到 pattern={} 的白名单条目", args.pattern));
+    }
+    let pretty = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings: {e}"))?;
+    std::fs::write(&path, pretty)
+        .map_err(|e| format!("write settings.json: {e}"))?;
+
+    debug_log(&format!(
+        "remove_dangerous_whitelist_item: pattern={} removed={}",
+        args.pattern, removed
+    ));
+    Ok(read_dangerous_whitelist_from_settings(&value))
+}
+
+/// now_epoch_ms_iso — 跟 set_bash_config 用的一致, 这里复用 (放同模块)
+fn now_epoch_ms_iso() -> String {
+    // 直接返回 epoch ms 数字字符串. ISO 8601 字符串需要 chrono, 简单用数字即可 (跟 bash.lastVerified 一致).
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_else(|_| "0".to_string())
+}
+
 // ====== 2.1: 文件树浏览器 ======
 //   读 workspace 目录树, 给 sidebar UI 用. 不走 sidecar (UI-only, 不需要 LLM 介入).
 //   - 限制 max_depth (默认 2 层, 防 node_modules 把 UI 撑爆)
@@ -3298,6 +3480,13 @@ pub fn run() {
             read_mcp_server,
             write_mcp_server,
             delete_mcp_server,
+            // ADR-0019 P0-2 (2026-08-23): 危险命令白名单
+            //   存储: ~/.pi/agent/settings.json 的 dangerousWhitelist 字段
+            //   格式: [{ pattern: string, note: string, addedAt: ISO 8601 }, ...]
+            //   sidecar 启动时读, BUILTIN_DENY_LIST 匹配 + 不在 whitelist → block bash tool call
+            get_dangerous_whitelist,
+            add_dangerous_whitelist_item,
+            remove_dangerous_whitelist_item,
             // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
             sidecar::send_rpc_command,
         ])
