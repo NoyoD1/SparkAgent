@@ -790,18 +790,31 @@ export const useChatStore = defineStore('chat', () => {
   function getContextTokens(sessionId: string): number {
     return contextTokensBySession.value[sessionId] ?? 0;
   }
-  function getContextWindow(): number {
-    // v0.4.4.6: 优先读 activeModel.contextWindow, 缺省回退到 200K.
-    //   activeModel 来自 configStore.activeProvider?.activeModelId 找到的 model
-    //   v0.5.0-D 第21轮 (D208) BUG FIX: 之前用 `??` 只处理 null/undefined, 但 model
-    //   配了 contextWindow=0 (Settings 留空 / 导入 / 用户填 0) 时 ?? 不回退, 直接返 0
-    //   → contextWindow=0 → percent = tokens/0 = 0% (用户看到的"上下文 0%"现象)
-    //   修法: 用 `||` 把 0 也视为 fallback. 任何非正数都回退到 DEFAULT_CONTEXT_WINDOW
-    const active = sessionStore.activeSessionId;  // sessionId 不会影响 getContextWindow, 保留为了语义
-    void active;
-    const activeModel = configStore.activeModel;
-    const cw = activeModel?.contextWindow;
-    return cw && cw > 0 ? cw : DEFAULT_CONTEXT_WINDOW;
+  /**
+   * 2026-08-24 v3.29: per-session contextWindow. 之前 v0.4.4.6 只读全局 activeModel.contextWindow,
+   *   user 反馈: '我切换了模型, 明明设置的是100W, 但显示200K' — Composer 切的是 per-session
+   *   model (getSessionModelId), 但 getContextWindow 拿全局, 导致切了 model 仍显示旧 ctx.
+   *   修法: 跟 currentModelLabel 一致, 先拿 session modelId, fallback 到全局 active.
+   *   sessionId 不传时 (向后兼容), 退到 v0.4.4.6 全局行为.
+   */
+  function getContextWindow(sessionId?: string): number {
+    const sid = sessionId ?? sessionStore.activeSessionId;
+    const models = configStore.allEnabledModels;
+    const findCw = (id: string | null | undefined): number => {
+      if (!id) return 0;
+      const found = models.find((x) => x.model.id === id);
+      return found?.model.contextWindow ?? 0;
+    };
+    // 1. per-session 优先 (跟 getSessionModelId 同步)
+    if (sid) {
+      const sessionModelId = sessionStore.getSessionModelId(sid);
+      const cw = findCw(sessionModelId);
+      if (cw > 0) return cw;
+    }
+    // 2. 全局 active fallback (老 config 没 per-session modelId 时的兜底)
+    const activeModelId = configStore.activeModel?.id;
+    const cw = findCw(activeModelId);
+    return cw > 0 ? cw : DEFAULT_CONTEXT_WINDOW;
   }
   function isCompacting(sessionId: string): boolean {
     return compactionBySession.value[sessionId] === 'in_progress';
@@ -1801,17 +1814,22 @@ export const useChatStore = defineStore('chat', () => {
         ? config.providers.find((p) => p.id === sessionProviderId) ?? null
         : null;
       if (!effectiveProvider) effectiveProvider = active;
-      let effectiveModel = sessionModelId
-        ? effectiveProvider.models.find((m) => m.id === sessionModelId) ?? null
+      // 2026-08-24 v3.27: 显式 narrowing 让 TS 知道 effectiveProvider 非空 (后面 ?? null 兜底);
+      //   final check 在 line 1818 还会再判, 这里 narrowing 是局部优化.
+      const provider = effectiveProvider;
+      let effectiveModel: typeof model = sessionModelId && provider
+        ? provider.models.find((m) => m.id === sessionModelId) ?? null
         : null;
-      if (!effectiveModel) effectiveModel = effectiveProvider.models.find((m) => m.id === effectiveProvider.activeModelId) ?? null;
+      if (!effectiveModel && provider) {
+        effectiveModel = provider.models.find((m) => m.id === provider.activeModelId) ?? null;
+      }
       if (!effectiveModel) effectiveModel = model;  // 全局 active
       // 2026-08-24 v3.27: 兜底 — provider.models[0] (之前是 throw, 但 user 痛点说 '用户在会话时自己选模型',
       //   不应阻塞发消息). 实际场景: user 选了 provider 但没设 activeModelId, 或 model 字段没保存.
       //   兜底用 provider 第一个 model, 弹 toast 提示, 让 user 在 model picker 显式选.
       let autoFallbackUsed = false;
-      if (!effectiveModel && effectiveProvider?.models.length) {
-        effectiveModel = effectiveProvider.models[0];
+      if (!effectiveModel && provider?.models.length) {
+        effectiveModel = provider.models[0];
         autoFallbackUsed = true;
       }
       console.log('[chat] sendPrompt: session=', sessionId, 'effectiveProvider=', effectiveProvider?.label, 'model=', effectiveModel?.id, 'permissionMode=', sessionPermissionMode);
@@ -1832,6 +1850,43 @@ export const useChatStore = defineStore('chat', () => {
           'info',
           3500,
         );
+      }
+      // 2026-08-24 v3.29: 超 contextWindow 自动压缩.
+      //   user 反馈: '如果当前会话已经超过切换后模型最大支持的上下文窗口了, 那么在发送消息后
+      //   会自动压缩'. 场景: 之前用大模型 (e.g. 200K) 累积了 150K 历史, 切到 100K 模型
+      //   (effectiveModel.contextWindow 变了) → 实际超 100K. send 前 await 压缩, 让
+      //   压缩后 history 落到新 ctx window 内再 send. 压缩完后 Pi SDK 走 same session,
+      //   activeModel 已经是新模型, 接着 send 不会超.
+      //   阈值: 跟 Pi SDK overflow 触发同 (>= contextWindow), 给 user 留点 buffer
+      //   (Pi SDK 内部 reserveTokens=16384 算 auto threshold, 我们保守 95% 触发避免
+      //   一次压缩压不到位).
+      //   isCompacting 守卫: 防止重入 (e.g. 上次没完又触发).
+      const cw = effectiveModel.contextWindow ?? 0;
+      const currentTokens = getContextTokens(sessionId!);
+      const sessionActive = sessionStore.activeSessionId === sessionId;
+      const fmtCtx = (n: number): string => {
+        if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+        if (n >= 1000) return `${(n / 1000).toFixed(0)}K`;
+        return String(n);
+      };
+      if (cw > 0 && currentTokens >= cw * 0.95 && !isCompacting(sessionId!)) {
+        console.log(
+          `[chat] sendPrompt: 历史 ${currentTokens} >= ${cw} * 0.95, 自动压缩 before send (session=${sessionId})`,
+        );
+        useUiStore().showToast(
+          `context 超过新模型 ${effectiveModel.id} 的 ${fmtCtx(cw)} (已用 ${fmtCtx(currentTokens)}), 自动压缩中…`,
+          'warning',
+          3000,
+        );
+        try {
+          await compact(sessionId!);
+          // 压缩完 send 接着走 (effectiveModel 还是新模型, compact 不改 model)
+        } catch (e) {
+          // 压缩失败仍让 send 走 (Pi SDK overflow 会兜底, 或 send fail), 不阻塞
+          const msg = e instanceof Error ? e.message : String(e);
+          console.warn(`[chat] auto-compact failed: ${msg}`);
+        }
+        void sessionActive;  // 占位, 防止 lint 报 unused
       }
       const cfgFn = () => ({
         providerId: effectiveProvider.id,

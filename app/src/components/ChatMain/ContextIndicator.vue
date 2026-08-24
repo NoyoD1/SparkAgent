@@ -66,7 +66,12 @@ const contextTokens = computed(() => {
   if (!sid) return 0;
   return chatStore.getContextTokens(sid);
 });
-const contextWindow = computed(() => chatStore.getContextWindow());
+// v3.29: per-session context window. 拿当前 session 的 model, 跟切 model 同步.
+const contextWindow = computed(() => {
+  const sid = activeSession.value?.id;
+  if (!sid) return chatStore.getContextWindow();
+  return chatStore.getContextWindow(sid);
+});
 const percent = computed(() => {
   if (contextWindow.value === 0) return 0;
   return Math.min(100, Math.round((contextTokens.value / contextWindow.value) * 100));
@@ -192,28 +197,17 @@ const buttonTitle = computed(() => {
 
     <!-- Popover 二级展开 (Claude Code 风格) -->
     <div v-if="showPopover" class="pad-ctx-popover" @click.stop>
-      <!-- v0.6 (N6): 总合计 + 容量 + 占比 + model 名 (高亮 summary 行, 让 user 一眼看清)
-           跟 user 反馈 "不显示总合计用了多少, 模型可处理量占比多少也不准" 对应
-           主数字: 用了多少 (formatTokens contextTokens)
-           次数字: / 容量 (formatTokens contextWindow, 跟 activeModel 绑)
-           meta: 占比 (percent) + model 名 (activeModel.label || id)
-           颜色: 70% 高亮 (走 is-high class) -->
-      <div class="pad-ctx-popover-summary" :class="{ 'is-high': isHigh }">
-        <div class="pad-ctx-popover-summary-main">
-          <span class="pad-ctx-popover-summary-tokens">{{ formatTokens(contextTokens) }}</span>
-          <span class="pad-ctx-popover-summary-divider">/</span>
-          <span class="pad-ctx-popover-summary-window">{{ formatTokens(contextWindow) }}</span>
-        </div>
-        <div class="pad-ctx-popover-summary-meta">
-          <span class="pad-ctx-popover-summary-percent">{{ percent }}%</span>
-          <span class="pad-ctx-popover-summary-dot">·</span>
-          <span class="pad-ctx-popover-summary-model" :title="currentModelLabel">
-            {{ currentModelLabel }}
-          </span>
-        </div>
-      </div>
+      <!-- v3.29: 删 popover 顶部 summary 行 (6.3K / 200K / 3% / model 名).
+           user 反馈: '上面计数的3%不要重复两个, 顶部那个删了, 因为下面有详情图显示了'.
+           6.3K 在 '合计 X tokens' 行有, 200K 在 '上下文窗口' 标题 + 0% 表示, 3% 在
+           head 段 '压缩 | 0%' + 进度条有, model 名挪到 head 段 (紧跟 '上下文窗口' 标题后).
+           删 summary 减少 1 个 3% 重复, popover 视觉更紧凑, 详情图主导. -->
       <div class="pad-ctx-popover-head">
         <span class="pad-ctx-popover-title">上下文窗口</span>
+        <!-- v3.29: model 名挪到这里 (之前在 summary 行, summary 删了) -->
+        <span class="pad-ctx-popover-model" :title="currentModelLabel">
+          {{ currentModelLabel }}
+        </span>
         <!-- v0.4.3.2.5 (user 原话 2026-08-18 02:30): 压缩按钮紧跟 "上下文窗口" 标题 x 轴后面
          *   我之前 4 轮都理解成"放在 0% 后面", 完全错. user 凌晨 2:30 强烈不满.
          *   现在改成: 标题文字 [4px gap] 压缩 text link [auto gap] 0%
