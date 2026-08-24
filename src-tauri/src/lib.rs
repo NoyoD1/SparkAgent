@@ -268,55 +268,28 @@ async fn list_secrets(app: AppHandle) -> Result<Vec<KeychainInfoDto>, String> {
 
 #[tauri::command]
 async fn resolve_secrets(values: Vec<String>) -> Result<Vec<String>, String> {
-    // 给 sidecar 调: 批量解析 env 值, 把 "keychain:..." 替换成实际值
-    //   - 输入: env values 列表 (跟 mcp/external tool 的 env dict 同 shape)
-    //   - 输出: 解析后的 values 列表, 跟输入 1:1 对应
-    //   - 失败 (keychain 找不到): 返错误, 让 caller 决定是 fail-fast 还是 fallback
+    // v3.36 (2026-08-24): 回滚 P3-C keychain 解析, 改 identity pass-through.
+    //   背景: P3-C 引入 keychain 引用 ("keychain:pi-agent:MCP_XXX") 让 MCP / external tool
+    //     env 里的 secret 走 OS keychain 解析. 副作用: sidecar 启动 MCP / external tool 时
+    //     调 resolve_secrets 走 callTauriCommand, keychain 解析失败 / 找不到 secret 走
+    //     60s timeout 兜底 — 整条 send_prompt 链路要等 60s.
+    //   user 反馈: "key 都在本地个人电脑, 直填到 mcp / tool 配置就行, 为什么要走 keychain?"
+    //     user 角度完全合理 — 1 分延迟大头是 keychain 60s timeout, 不是 LLM API.
+    //   修法 (回滚 v3.22 之前行为): Tauri 端 resolve_secrets 改 identity, env values 原样返.
+    //     - sidecar 端 resolveSecretEnv 立即拿到原值, 不 60s timeout
+    //     - MCP / external tool 拿到 env 原值 (含 "keychain:..." literal), 实际 fail
+    //       但启动快 (0s wait, 不影响 main vision 流程)
+    //     - user 后续自己改 MCP / external tool config, 把 "keychain:..." 引用换成明文 key
+    //   backward compat: sidecar binary 没改, 仍调 callTauriCommand("resolve_secrets"),
+    //     Tauri 端 identity 返, sidecar 立即收到.
     //
-    // ADR-0023 P3-C (2026-08-24): 用 keyring::get_secret 走 SERVICE_SECRET 独立 keychain,
-    //   不会拿到 LLM apiKey (就算 user 配了同名 entry 也不行, 命名空间完全隔离)
+    // 之前 v3.22 行为 (keyring 解析, 60s timeout) 注释保留在下面 reference, 方便对比:
     //
-    // 不在 keychain 引用 (没有 "keychain:" 前缀) 直接 pass-through
-    //
-    // 2026-08-24 v3.22 P3-F+: lookup 太严格 bug fix — user 配 "keychain:pi-agent:MCP_MINIMAX_API_KEY"
-    //   但实际存的 secret 是 short name "MCP_MINIMAX_API_KEY" (Settings → Secrets 加时只填 name,
-    //   不会带 service 前缀). 老逻辑用整个 "pi-agent:MCP_MINIMAX_API_KEY" 去 SERVICE_SECRET
-    //   找 → 永远 None. 改用 last-segment 做 fallback: 先试整个 name, None 就试最后一个 ":" 后面的.
-    //   例:
-    //     "MCP_MINIMAX_API_KEY"               → 直接拿
-    //     "pi-agent:MCP_MINIMAX_API_KEY"      → 试 "pi-agent:MCP_MINIMAX_API_KEY", None 就试 "MCP_MINIMAX_API_KEY"
-    //     "pi-agent-secret:MCP_MINIMAX_API_KEY" → 同上, 试 "MCP_MINIMAX_API_KEY"
-    //   跟 LLM apiKey service (SERVICE_LLM="pi-agent") 完全隔离 — 只 fallback 到 short name
-    //   (跟 SERVICE_SECRET 走), 不会撞 SERVICE_LLM 的 entry.
-    const PREFIX: &str = "keychain:";
-    let mut out = Vec::with_capacity(values.len());
-    for v in values {
-        if let Some(name) = v.strip_prefix(PREFIX) {
-            // 1) 先按整个 name 找 (兼容 "keychain:MCP_XXX" 短引用)
-            let secret = keyring::get_secret(name)?
-                // 2) fallback: 取 last ":" 后面的 short name (兼容 "keychain:service:NAME" 长引用)
-                .or_else(|| {
-                    name.rsplit(':').next().and_then(|short| {
-                        if short != name {
-                            keyring::get_secret(short).ok().flatten()
-                        } else {
-                            None
-                        }
-                    })
-                });
-            match secret {
-                Some(s) => out.push(s),
-                None => return Err(format!(
-                    "keychain 引用 '{v}' 解析失败: 找不到 secret '{name}' (请在 Settings → Secrets 加 — name 字段填 \"{name}\" 即可)"
-                )),
-            }
-        } else {
-            out.push(v);
-        }
-    }
-    Ok(out)
+    //   P3-C: 用 keyring::get_secret 走 SERVICE_SECRET 独立 keychain
+    //   P3-F+: lookup fallback (试整个 name + last-segment short name)
+    //   PREFIX = "keychain:", 不在 keychain 引用 (没 "keychain:" 前缀) 直接 pass-through
+    Ok(values)
 }
-
 // ====== ADR-0022 (2026-08-23): WebView2 内嵌浏览器 — Tauri command ======
 //   走 Tauri 2 的 WebviewWindow (底层 WebView2, 跑在 Tauri 进程里, 真内嵌)
 //   - 0 外部进程: 不像 chromiumoxide 启 Edge.exe
