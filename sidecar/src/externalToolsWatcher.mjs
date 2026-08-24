@@ -10,6 +10,11 @@
 //   - dir 级别监听, 覆盖 add/remove/modify
 //   - debounce 防多文件连改触发多次
 //   - 错误降级: watcher 挂了只 log, 不 crash sidecar
+//   - **2026-08-25 修 (D213 OOM 真凶 #2)**: 启动 grace period, 抑制 fs.watch 启动后 5s 内
+//     Windows ReadDirectoryChangesW 延迟事件. 不然 sidecar 启动后 4 秒内就被 silent restart 杀
+//     → LLM call 中断, 流式数据 0 emit, chat store 创建空 message, user 看到"多次空回复" +
+//     多次 sendPrompt 累积 → WebView2 OOM. 修法: 装 watcher 时记 readyAt, callback 触发
+//     时 Date.now() - readyAt < GRACE_MS 静默 skip.
 //
 // 跟 mcpWatcher 唯一区别: callback 触发后 sidecar 端不能热更新 Pi SDK tool list
 //   (Pi SDK 0.84.2 tool 注册只在 createAgentSession 时一次), 必须 restart sidecar.
@@ -20,6 +25,11 @@ import { watch, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 const DEBOUNCE_MS = 300;
+// 2026-08-25: 启动 grace period 5s. fs.watch 在 Windows 上 ReadDirectoryChangesW 启动后有几秒延迟事件
+//   (装 watcher 时 mtime 扫描 / 目录加载 / 跟 IDE 同步, etc.), 触发后 silent restart 4 秒内 kill 掉
+//   正在跑 LLM call 的 sidecar → 流式 0 emit → 空 message 累积. 5s 宽限期足够 fs.watch 缓过来,
+//   5s 后 user 真改 tool 正常触发.
+const STARTUP_GRACE_MS = 5_000;
 
 /**
  * 装 watcher 监听两个 external tool config dir.
@@ -46,10 +56,19 @@ export function watchExternalToolsDirs(workspacePath, agentDir, onChange) {
 
   const watchers = [];
   let debounceTimer = null;
+  // 2026-08-25: 装 watcher 时记 readyAt, 5s grace period 内 callback 触发静默 skip
+  const readyAt = Date.now();
+  let suppressedInGrace = 0;  // 诊断用: 宽限期被抑制的次数
   const debouncedFire = () => {
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
+      // 2026-08-25: 启动 grace period 抑制 fs.watch 延迟事件 (D213 OOM 真凶 #2)
+      if (Date.now() - readyAt < STARTUP_GRACE_MS) {
+        suppressedInGrace++;
+        console.error(`[sidecar] P3-G: fs.watch event suppressed (startup grace ${STARTUP_GRACE_MS}ms, suppressed count=${suppressedInGrace})`);
+        return;
+      }
       try {
         onChange();
       } catch (e) {
@@ -79,7 +98,7 @@ export function watchExternalToolsDirs(workspacePath, agentDir, onChange) {
     }
   }
 
-  console.error(`[sidecar] P3-G: watcher installed on ${watchers.length} dir(s): [${dirs.join(', ')}] (debounce=${DEBOUNCE_MS}ms)`);
+  console.error(`[sidecar] P3-G: watcher installed on ${watchers.length} dir(s): [${dirs.join(', ')}] (debounce=${DEBOUNCE_MS}ms, startupGrace=${STARTUP_GRACE_MS}ms)`);
 
   return {
     close: () => {

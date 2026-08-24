@@ -14,10 +14,15 @@
 //   - debounce 300ms: 防多文件连改触发多次 reload
 //   - 错误降级: watcher 挂了只 log, 不 crash sidecar
 //   - 退出时 close 所有 watcher (防 fd 泄漏)
+//   - **2026-08-25 修 (D213 OOM 真凶 #2)**: 启动 grace period, 抑制 fs.watch 启动后 5s 内
+//     Windows ReadDirectoryChangesW 延迟事件. 修法: 装 watcher 时记 readyAt, callback 触发
+//     时 Date.now() - readyAt < GRACE_MS 静默 skip.
 import { watch, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 const DEBOUNCE_MS = 300;
+// 2026-08-25: 启动 grace period 5s, 同 externalToolsWatcher
+const STARTUP_GRACE_MS = 5_000;
 
 /**
  * 装 watcher 监听两个 user tool config dir.
@@ -44,10 +49,18 @@ export function watchUserToolsDirs(workspacePath, agentDir, onChange) {
 
   const watchers = [];
   let debounceTimer = null;
+  // 2026-08-25: 启动 grace period (D213 OOM 真凶 #2)
+  const readyAt = Date.now();
+  let suppressedInGrace = 0;
   const debouncedFire = () => {
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
+      if (Date.now() - readyAt < STARTUP_GRACE_MS) {
+        suppressedInGrace++;
+        console.error(`[sidecar] v3.40: fs.watch event suppressed (startup grace ${STARTUP_GRACE_MS}ms, suppressed count=${suppressedInGrace})`);
+        return;
+      }
       try {
         onChange();
       } catch (e) {
@@ -76,7 +89,7 @@ export function watchUserToolsDirs(workspacePath, agentDir, onChange) {
     }
   }
 
-  console.error(`[sidecar] v3.40: user tools watcher installed on ${watchers.length} dir(s): [${dirs.join(', ')}] (debounce=${DEBOUNCE_MS}ms)`);
+  console.error(`[sidecar] v3.40: user tools watcher installed on ${watchers.length} dir(s): [${dirs.join(', ')}] (debounce=${DEBOUNCE_MS}ms, startupGrace=${STARTUP_GRACE_MS}ms)`);
 
   return {
     close: () => {
