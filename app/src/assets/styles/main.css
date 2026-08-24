@@ -31,14 +31,7 @@
 html,
 body,
 #app {
-  /* v3.41 (2026-08-24): 改 height: 100dvh + min-height: 100% 解决 Tauri 2 WebView2 拖拽窗口
-     * resize 不响应. 之前 height: 100% 链式依赖, Tauri 2 WebView2 resize 时 100% 不立即
-     * 同步到新 viewport height, streaming 期间 layout chain 锁住, message_end 才完整 reflow.
-     * 100dvh (dynamic viewport height) 是现代浏览器标准, resize 立即响应.
-     * min-height: 100% 兜底老浏览器 (Safari < 15.4 等不支持 100dvh).
-     * 配 body { overflow: hidden } 保持原本"整页不滚, 内部各自滚"行为. */
-  height: 100dvh;
-  min-height: 100%;
+  height: 100%;
   margin: 0;
   padding: 0;
   overflow: hidden;
