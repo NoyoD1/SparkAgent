@@ -225,7 +225,9 @@ function renderMessageContent(content: string): string {
     .replace(/"/g, '&quot;');
   // 2. 把 marker 替换成 chip HTML
   //   注意: kind/name 已经是 escape 过的版本 (e.g. "<x>" → "&lt;x&gt;"), 浏览器会正确反解析显示
-  const REF_RE = /\[\[ref:(skill|tool|mcp):([^\s\]]+)\]\]/g;
+  // 2026-08-24 v3.25: 接受任意 kind (不限定 skill/tool/mcp/extension/command), 兼容 user 笔误
+  //   (e.g. "[[ref:commands:sayhello]]" 复数 s 仍渲染成 chip, label 显示 "commands")
+  const REF_RE = /\[\[ref:([a-zA-Z][a-zA-Z0-9_-]*):([^\s\]]+)\]\]/g;
   result = result.replace(REF_RE, (_, kind, name) => {
     return `<span class="pad-composer__ref-chip" data-ref-kind="${kind}" data-ref-name="${name}"><span class="pad-composer__ref-chip-label">${kind}</span><span class="pad-composer__ref-chip-name">${name}</span></span>`;
   });

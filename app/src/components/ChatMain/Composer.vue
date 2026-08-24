@@ -1379,16 +1379,39 @@ async function send() {
   //                       userText → message.content (ChatMessage v-html 渲染成 user 气泡)
   let llmText = text;
   if (refs.length > 0) {
-    const refSection = refs
-      .map((r) => `<reference type="${r.kind}" name="${r.name}">\n${r.body}\n</reference>`)
-      .join('\n\n');
-    // 2026-08-24 P3-G+: 加 "请使用此" instruction, 防止 LLM 看到 reference body 但忽略 (把 marker 当普通文本)
-    //   user 痛点: "现在我明确引用了'/'的指令, LLM 容易理解偏"
-    //   让 LLM 明确知道 user 主动引用了这些 resource, 优先用这些回答
-    const instruction = refs
-      .map((r) => `- 请使用此 ${r.kind}: ${r.name}`)
-      .join('\n');
-    llmText = `${refSection}\n\n---\n\n## Instructions (user explicit referenced)\n${instruction}\n\n---\n\n${text}`;
+    // 2026-08-24 v3.25 P3-H: command 跟其他 ref 分流 — command 是 user-defined slash 模板
+    //   (存 <ws>/.pi/commands/<name>.md, body 是 markdown 提示词), 不是 LLM tool/resource.
+    //   之前走 <reference> + "请使用此" instruction, 但 LLM 看到 sayhello 不知道怎么 "use" 它 (没有 tool mechanism).
+    //   改: command 单独走 <command_template> 段 + "请按此 command 模板回答" instruction,
+    //   LLM 看到 prompt 模板会按模板内容回答 (跟 system prompt override 类似).
+    const commandRefs = refs.filter((r) => r.kind === 'command');
+    const resourceRefs = refs.filter((r) => r.kind !== 'command');
+    const sections: string[] = [];
+    if (resourceRefs.length > 0) {
+      const refSection = resourceRefs
+        .map((r) => `<reference type="${r.kind}" name="${r.name}">\n${r.body}\n</reference>`)
+        .join('\n\n');
+      // 2026-08-24 P3-G+: 加 "请使用此" instruction, 防止 LLM 看到 reference body 但忽略 (把 marker 当普通文本)
+      //   user 痛点: "现在我明确引用了'/'的指令, LLM 容易理解偏"
+      //   让 LLM 明确知道 user 主动引用了这些 resource, 优先用这些回答
+      const instruction = resourceRefs
+        .map((r) => `- 请使用此 ${r.kind}: ${r.name}`)
+        .join('\n');
+      sections.push(`${refSection}\n\n## Instructions (user explicit referenced resources)\n${instruction}`);
+    }
+    if (commandRefs.length > 0) {
+      const commandSection = commandRefs
+        .map((r) => `<command_template name="${r.name}">\n${r.body}\n</command_template>`)
+        .join('\n\n');
+      // 跟 reference 不同的 instruction — 是 "按模板回答" 不是 "使用此 tool"
+      const commandInstruction = commandRefs
+        .map((r) => `- 请按此 command 模板 "${r.name}" 的内容回答 user 的问题`)
+        .join('\n');
+      sections.push(`${commandSection}\n\n## Instructions (user selected slash commands)\n${commandInstruction}`);
+    }
+    if (sections.length > 0) {
+      llmText = `${sections.join('\n\n---\n\n')}\n\n---\n\n${text}`;
+    }
     console.log(`[Composer] embedded ${refs.length} reference(s) into LLM prompt: ${refs.map((r) => `${r.kind}:${r.name}`).join(', ')}`);
   }
   // D214 v7: last-mentioned tracking (隐式 ref 续接)
