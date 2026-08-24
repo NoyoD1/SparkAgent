@@ -122,6 +122,9 @@ import { classifyToolError, formatToolError } from './errorSanitizer.mjs';
 import { watchMcpConfigDirs } from './mcpWatcher.mjs';
 // 2026-08-24 ADR-0023 P3-G: external tool config dir 热重载 watcher (跟 mcpWatcher 同 pattern)
 import { watchExternalToolsDirs } from './externalToolsWatcher.mjs';
+// v3.40 (2026-08-24): user tool config dir 热重载 watcher (跟 external 同 pattern,
+//   但监听 tools/*.json 不含 tools/external/ 子目录)
+import { watchUserToolsDirs } from './userToolsWatcher.mjs';
 
 // v0.6.3-rc1 P2-2: MCP subsystem 模块级状态, 让热重载 callback 能访问
 //   - clients: 当前运行的 McpServerClient[] (cleanup 跟 reload 用)
@@ -134,6 +137,8 @@ const mcpState = {
   customTools: [],
   results: [],
   watcherClose: null,
+  externalWatcherClose: null,
+  userToolsWatcherClose: null,  // v3.40: user tool config dir watcher
   workspacePath: null,
   agentDir: null,
 };
@@ -741,9 +746,13 @@ The re-read is a single tool call — a small cost for correctness. Skipping it 
   //   (reload 后的 clients 也要在 sidecar 关闭时被 stop)
   registerMcpCleanup();
 
-  // P2-2: 装 fs watcher, config 改完自动 reload (MCP + external 都 silent restart, v3.39 统一)
+  // P2-2: 装 fs watcher, config 改完自动 reload
+  //   - MCP config: installMcpWatcher → silent restart (v3.39)
+  //   - external tool: installExternalToolsWatcher → silent restart (v3.39 P3-G 修)
+  //   - user tool: installUserToolsWatcher → silent restart (v3.40)
   installMcpWatcher();
   installExternalToolsWatcher(workspacePath, agentDir);
+  installUserToolsWatcher(workspacePath, agentDir);
 
   // 合并 user tool + MCP tool + ADR-0022 chromiumoxide browser tool + ADR-0023 external tool
   //   成一个 customTools 列表
@@ -1863,6 +1872,29 @@ function installExternalToolsWatcher(workspacePath, agentDir) {
   // 保存 close 句柄 (sidecar 退出时调, 防止 fd 泄漏 — 跟 mcpState.watcherClose 同样的防御)
   mcpState.externalWatcherClose = handle.close;
   console.error(`[sidecar] P3-G: external tools watcher installed (active=${handle.status.active}, dirs=[${handle.status.dirs.join(', ')}])`);
+}
+
+/**
+ * v3.40 (2026-08-24): user tool config dir 热重载 watcher
+ *
+ * 跟 installExternalToolsWatcher 100% 同 pattern, 监听路径不同:
+ *   - user tool: <agentDir>/tools/<name>.json + <workspacePath>/.pi/tools/<name>.json
+ *   - external tool: <agentDir>/tools/external/<name>/manifest.json (P3-G 之前)
+ * 两条 watcher 并存, 各自触发 silent restart, reason 区分:
+ *   - 'user_tool_changed' (本函数)
+ *   - 'external_tool_changed' (installExternalToolsWatcher)
+ *   - 'mcp_config_changed' (installMcpWatcher, v3 39 改 silent restart)
+ *
+ * user 改 *.json 后 silent restart 走 file queue → Tauri 端 kill sidecar →
+ *   下次 send_prompt lazy spawn 新 sidecar, 读新 user tool preset.
+ * 之前缺这个 watcher, user 改 file 后热更失效 (跟 v3.39 之前 external tool 同根因).
+ */
+function installUserToolsWatcher(workspacePath, agentDir) {
+  const handle = watchUserToolsDirs(workspacePath, agentDir, () => {
+    writeRestartRequest(agentDir, 'user_tool_changed');
+  });
+  mcpState.userToolsWatcherClose = handle.close;
+  console.error(`[sidecar] v3.40: user tools watcher installed (active=${handle.status.active}, dirs=[${handle.status.dirs.join(', ')}])`);
 }
 
 // ====== ADR-0023 P3-E: file queue watcher — 处理 Tauri → sidecar 的 tool_call_direct ======
