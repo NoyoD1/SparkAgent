@@ -1239,7 +1239,7 @@ async function send() {
   //   兼容老 [[skill:xxx]] marker
   const refs: Array<{ kind: RefKind; name: string; body: string }> = [];
   const allMarkers: Array<{ kind: RefKind; name: string }> = [];
-  const newRe = /\[\[ref:(skill|tool|mcp):([^\s\]]+)\]\]/g;
+  const newRe = /\[\[ref:(skill|tool|mcp|extension):([^\s\]]+)\]\]/g;
   let m: RegExpExecArray | null;
   while ((m = newRe.exec(rawText)) !== null) {
     allMarkers.push({ kind: m[1] as RefKind, name: m[2] });
@@ -1292,6 +1292,37 @@ async function send() {
           name: ref.name,
         });
         refs.push({ kind: 'mcp', name: ref.name, body: raw });
+      } else if (ref.kind === 'extension') {
+        // 2026-08-24 P3-G: external tool 跟 skill/tool/mcp 不一样, body 不在文件, 在 sidecar registry
+        //   (启 subprocess + 包 ToolDefinition). 走 Tauri list_external_tools 拿完整信息
+        //   (含 manifest raw, parameters, runtime, entry, scope), 拼成 JSON body 给 LLM 看到 tool schema.
+        //   注意: ExtensionToolDef 只有 name/label/description/source, 拿不到 parameters/runtime/entry,
+        //   所以这里走 listExternalTools (返回更全).
+        const allExt = await piTauri.listExternalTools(
+          sessionStore.activeWorkspace?.path ?? null,
+          null,
+        );
+        const full = allExt.find((x) => x.name === ref.name);
+        if (!full) {
+          console.warn(`[Composer] extension tool not found: ${ref.name}`);
+          continue;
+        }
+        // 优先用 raw manifest (LLM 看到完整 schema 包括 default / description), 没有就拼简化版
+        let body: string;
+        try {
+          const obj = JSON.parse(full.manifest);
+          body = JSON.stringify(obj, null, 2);
+        } catch {
+          body = JSON.stringify({
+            name: full.name,
+            description: full.description,
+            parameters: full.manifest,  // 兜底
+            runtime: full.runtime,
+            entry: full.entry,
+            scope: full.scope,
+          }, null, 2);
+        }
+        refs.push({ kind: 'extension', name: ref.name, body });
       }
     } catch (e) {
       console.warn(`[Composer] read ${ref.kind} ${ref.name} failed:`, e);

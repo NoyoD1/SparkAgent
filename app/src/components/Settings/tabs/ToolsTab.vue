@@ -250,6 +250,70 @@ async function deleteExternalToolDialog(name: string) {
     toast.value = { type: 'fail', message: `删除失败: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
+
+// ====== 2026-08-24 P3-G: external tool Edit ======
+//   之前 ToolsTab 只能派生 builtin / 导入 ZIP / 删除, 没法直接改已装的 tool.
+//   Edit dialog 改 manifest.json (description / parameters / env 引用 / runtime 等),
+//   改完调 write_external_tool_manifest + silent restart.
+//   试跑 (Run) 走 slash command '/tools:name' → modal 真调, UI 这里不再单独做
+//   (避免 invoke_external_tool 要全 config 的复杂度, Pi SDK 走 modal 路径更顺).
+
+// Edit state
+const editingExtName = ref<string | null>(null);
+const editingExtJson = ref('');
+const editingExtOriginal = ref<string | null>(null);  // 用于拿 manifestPath + scope (写回用)
+const isSavingExt = ref(false);
+
+async function startEditExternal(t: { name: string }) {
+  // ExtensionToolDef 没 manifest 字段, 走 listExternalTools 拿完整 (含 manifest raw + manifestPath + scope)
+  const list = await piTauri.listExternalTools(
+    sessionStore.activeWorkspace?.path ?? null,
+    null,
+  );
+  const full = list.find((x) => x.name === t.name);
+  if (!full) {
+    toast.value = { type: 'fail', message: `找不到 tool '${t.name}'` };
+    return;
+  }
+  editingExtName.value = t.name;
+  editingExtOriginal.value = full.manifest;
+  try {
+    const obj = JSON.parse(full.manifest);
+    editingExtJson.value = JSON.stringify(obj, null, 2);
+  } catch {
+    editingExtJson.value = full.manifest;
+  }
+}
+function cancelEditExternal() {
+  editingExtName.value = null;
+  editingExtJson.value = '';
+  editingExtOriginal.value = null;
+}
+async function saveEditExternal() {
+  const name = editingExtName.value;
+  if (!name) return;
+  isSavingExt.value = true;
+  toast.value = null;
+  try {
+    // 解析验证
+    JSON.parse(editingExtJson.value);
+    await piTauri.writeExternalToolManifest({
+      scope: 'workspace',
+      name,
+      manifest: editingExtJson.value,
+      workspacePath: sessionStore.activeWorkspace?.path ?? null,
+      agentDir: null,
+    });
+    toast.value = { type: 'ok', message: `已保存 ${name}, 静默重启中…` };
+    cancelEditExternal();
+    refreshExtension();
+    void piTauri.restartAllSidecars('external_tool_manifest_changed');
+  } catch (e) {
+    toast.value = { type: 'fail', message: `保存失败: ${e instanceof Error ? e.message : String(e)}` };
+  } finally {
+    isSavingExt.value = false;
+  }
+}
 </script>
 
 <template>
@@ -459,6 +523,14 @@ async function deleteExternalToolDialog(name: string) {
           <button
             v-if="t.source === 'external'"
             class="pad-toolstab__btn pad-toolstab__btn--ghost pad-toolstab__btn--sm"
+            :title="`编辑 ${t.name} 的 manifest.json (env 引用 / parameters / description 等)`"
+            @click="startEditExternal(t)"
+          >
+            <Edit3 :size="12" :stroke-width="1.75" />
+          </button>
+          <button
+            v-if="t.source === 'external'"
+            class="pad-toolstab__btn pad-toolstab__btn--ghost pad-toolstab__btn--sm"
             :title="`导出 ${t.name} 到 ZIP`"
             @click="exportExternalToolDialog(t.name)"
           >
@@ -531,6 +603,37 @@ async function deleteExternalToolDialog(name: string) {
         sidecar 自动把 preset args 跟 LLM 调的 args 合并, 调 builtin tool 的 execute.
         适合"经常跑同一个 command 但不想每次重写 args"的场景.
       </span>
+    </div>
+
+    <!-- 2026-08-24 P3-G: Edit external tool manifest.json dialog -->
+    <div v-if="editingExtName" class="pad-toolstab__modal-backdrop" @click.self="cancelEditExternal">
+      <div class="pad-toolstab__modal">
+        <h3 class="pad-toolstab__modal-title">
+          <Edit3 :size="14" :stroke-width="1.75" />
+          <span>编辑 manifest.json: <code>{{ editingExtName }}</code></span>
+        </h3>
+        <p class="pad-toolstab__modal-desc">
+          改 description / parameters / env (含 <code>keychain:</code> 引用) / runtime / entry 等.
+          保存后触发静默重启, 下次对话生效. entry 文件 (Python 脚本) 不会动, 那个用编辑器改.
+        </p>
+        <textarea
+          v-model="editingExtJson"
+          class="pad-toolstab__modal-textarea"
+          spellcheck="false"
+          :rows="20"
+        />
+        <div class="pad-toolstab__modal-actions">
+          <button class="pad-toolstab__btn pad-toolstab__btn--ghost" @click="cancelEditExternal">取消</button>
+          <button
+            class="pad-toolstab__btn pad-toolstab__btn--primary"
+            :disabled="isSavingExt"
+            @click="saveEditExternal"
+          >
+            <Save :size="12" :stroke-width="1.75" />
+            <span>{{ isSavingExt ? '保存中…' : '保存并重启 sidecar' }}</span>
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -932,6 +1035,108 @@ async function deleteExternalToolDialog(name: string) {
   border-radius: var(--pad-radius-md);
   font-size: var(--pad-fs-12, 12px);
   color: var(--pad-fg-tertiary);
+  line-height: 1.5;
+}
+
+/* 2026-08-24 P3-G: Edit / Run dialog (跟现有 derive dialog 风格一致) */
+.pad-toolstab__modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+.pad-toolstab__modal {
+  background: var(--pad-bg-card);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-md);
+  padding: 20px;
+  max-width: 720px;
+  width: 100%;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+.pad-toolstab__modal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--pad-fs-15, 15px);
+  font-weight: var(--pad-fw-medium);
+  color: var(--pad-fg-primary);
+}
+.pad-toolstab__modal-title code {
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-13, 13px);
+  color: var(--pad-accent);
+}
+.pad-toolstab__modal-desc {
+  margin: 0;
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-secondary);
+  line-height: 1.5;
+}
+.pad-toolstab__modal-desc code {
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-12, 12px);
+  background: var(--pad-bg-input);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.pad-toolstab__modal-textarea {
+  width: 100%;
+  flex: 1;
+  min-height: 200px;
+  padding: 10px 12px;
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-12, 12px);
+  line-height: 1.5;
+  background: var(--pad-bg-input);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm);
+  color: var(--pad-fg-primary);
+  resize: vertical;
+}
+.pad-toolstab__modal-textarea:focus {
+  outline: none;
+  border-color: var(--pad-accent);
+}
+.pad-toolstab__modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.pad-toolstab__modal-result {
+  margin-top: 4px;
+  padding: 10px 12px;
+  background: var(--pad-bg-input);
+  border: 1px solid var(--pad-border);
+  border-radius: var(--pad-radius-sm);
+  max-height: 200px;
+  overflow: auto;
+}
+.pad-toolstab__modal-result.is-fail {
+  border-color: #c44;
+  background: rgba(196, 68, 68, 0.05);
+}
+.pad-toolstab__modal-result h4 {
+  margin: 0 0 6px 0;
+  font-size: var(--pad-fs-13, 13px);
+  font-weight: var(--pad-fw-medium);
+}
+.pad-toolstab__modal-result pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--pad-font-mono);
+  font-size: var(--pad-fs-12, 12px);
+  color: var(--pad-fg-secondary);
   line-height: 1.5;
 }
 </style>

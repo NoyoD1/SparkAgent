@@ -2700,6 +2700,63 @@ async fn delete_external_tool(
     Ok(true)
 }
 
+// 2026-08-24 P3-G: 写 external tool 的 manifest.json (ToolsTab Edit 按钮用).
+//   只改 manifest.json, 不动 entry 文件 (Python 脚本) — 那个用户自己用编辑器改.
+//   改完 FE 端调 triggerRestart, sidecar 走 externalToolsWatcher 触发 reload (P3-G).
+//
+//   校验: JSON 合法 + 必填字段 (name / description / runtime / entry 跟 directory 匹配).
+//   entry 文件存在性由 sidecar 端 loadExternalTools 兜底 (FE 端少一个 IO roundtrip).
+//   跨进程触发顺序: FE write → restartAllSidecars (silent) → 新 sidecar 读 → emit external_tools_changed.
+#[tauri::command]
+async fn write_external_tool_manifest(
+    scope: String,
+    name: String,
+    manifest: String,
+    workspace_path: Option<String>,
+    agent_dir: Option<String>,
+) -> Result<String, String> {
+    // 1. JSON 合法
+    let parsed: serde_json::Value = serde_json::from_str(&manifest)
+        .map_err(|e| format!("manifest 不是合法 JSON: {}", e))?;
+    let obj = parsed.as_object().ok_or("manifest 必须是 JSON object")?;
+    // 2. 必填字段
+    let body_name = obj.get("name").and_then(|v| v.as_str())
+        .ok_or("manifest 缺 'name' 字段")?;
+    if body_name != name {
+        return Err(format!("manifest 里的 name '{}' 跟目录名 '{}' 不一致", body_name, name));
+    }
+    if !obj.get("description").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+        return Err("manifest 缺 'description' 或为空".to_string());
+    }
+    if !obj.get("runtime").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+        return Err("manifest 缺 'runtime' 或为空".to_string());
+    }
+    if !obj.get("entry").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+        return Err("manifest 缺 'entry' 或为空".to_string());
+    }
+    // 3. 路径 (跟 delete_external_tool 同 pattern)
+    let base = if scope == "global" {
+        agent_dir.clone().ok_or("global scope 需要 agent_dir")?
+    } else {
+        workspace_path.clone().ok_or("workspace scope 需要 workspace_path")?
+    };
+    let tool_dir = std::path::PathBuf::from(&base)
+        .join(if scope == "global" { "tools/external" } else { ".pi/tools/external" })
+        .join(&name);
+    if !tool_dir.is_dir() {
+        return Err(format!("tool 目录不存在: {}", tool_dir.display()));
+    }
+    let manifest_path = tool_dir.join("manifest.json");
+    // atomic write: .tmp + rename, 防 reader 拿到半截 JSON
+    let tmp_path = tool_dir.join("manifest.json.tmp");
+    std::fs::write(&tmp_path, manifest.as_bytes())
+        .map_err(|e| format!("write({}): {}", tmp_path.display(), e))?;
+    std::fs::rename(&tmp_path, &manifest_path)
+        .map_err(|e| format!("rename: {}", e))?;
+    debug_log(&format!("write_external_tool_manifest: wrote {}", manifest_path.display()));
+    Ok(manifest_path.display().to_string())
+}
+
 // ====== ADR-0023 P3-E (2026-08-24): user-driven / 真的调 external tool ======
 //   FE 端用户在 Composer 选 /tools:tavily_search → modal 填 args → Run
 //   → 调本命令 → 转发到 sidecar 的 file queue watcher → 拿到结果
@@ -4808,6 +4865,8 @@ pub fn run() {
             import_external_tool,
             // v3.19: 删除 external tool (跟 import/export 配套)
             delete_external_tool,
+            // 2026-08-24 P3-G: ToolsTab Edit 按钮写 manifest.json
+            write_external_tool_manifest,
             // v3.21 ADR-0023 P3-E: user-driven / 真调 external tool (file queue ↔ sidecar)
             invoke_external_tool,
             fetch_provider_models,

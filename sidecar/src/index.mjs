@@ -120,6 +120,8 @@ import { loadExternalTools, getExternalToolsSnapshot, callExternalToolByName } f
 import { classifyToolError, formatToolError } from './errorSanitizer.mjs';
 // v0.6.3-rc1 P2-2: MCP config dir 热重载 watcher (fs.watch + debounce)
 import { watchMcpConfigDirs } from './mcpWatcher.mjs';
+// 2026-08-24 ADR-0023 P3-G: external tool config dir 热重载 watcher (跟 mcpWatcher 同 pattern)
+import { watchExternalToolsDirs } from './externalToolsWatcher.mjs';
 
 // v0.6.3-rc1 P2-2: MCP subsystem 模块级状态, 让热重载 callback 能访问
 //   - clients: 当前运行的 McpServerClient[] (cleanup 跟 reload 用)
@@ -1787,21 +1789,22 @@ try {
 //   Tauri 端: 收到 stdout 走 chat:event emit, FE 听 type="mcp_status" 更新 mcpServersStore.
 //   McpTab 渲染: 状态(✓/✗) + toolCount + tools 列表 + 错误信息. 让用户能 self-check 配置后状态.
 {
-  // 1. 构造 mcpCustomToolsByName: tool name → ToolDefinition (name, description)
-  //   mcpState.customTools 是 ToolDefinition 数组 (从 mcpClient.mjs 的 McpServerClient.toolDefinitions 拼出来的)
-  const mcpToolDefs = mcpState.customTools || [];
-  // 2. 按 server name 分组: mcp_<server>_<tool> 形式
+  // 1. 按 server name 分组: 直接用 mcpState.clients (不用正则拆 customTools 的 tool name)
+  //   之前 v3.22 用正则 /^mcp_([^_]+(?:_[^_]+)*)_(.+)$/ 拆 mcp_<server>_<tool>, 有 bug:
+  //   贪心会让 server 吃太长 (e.g. mcp_MiniMax_query_with_reasoning_effort 拆成
+  //   server=MiniMax_query, 跟 mcpState.results 里的 MiniMax 不匹配 → byServer.get('MiniMax') 返空
+  //   → McpTab details 永远不展开).
+  //   修法: clients 数组里每个 client.config.name 就是 server name, getTools() 是 server
+  //   提供的 tool 列表, 一一对应, 不用正则拆.
   const byServer = new Map();
-  for (const td of mcpToolDefs) {
-    const m = /^mcp_([^_]+(?:_[^_]+)*)_(.+)$/.exec(td.name);
-    if (m) {
-      const serverName = m[1];
-      const toolName = m[2];
-      if (!byServer.has(serverName)) byServer.set(serverName, []);
-      byServer.get(serverName).push({ name: toolName, description: td.description || '' });
+  for (const client of (mcpState.clients || [])) {
+    const serverName = client.config.name;
+    if (!byServer.has(serverName)) byServer.set(serverName, []);
+    for (const t of (client.getTools() || [])) {
+      byServer.get(serverName).push({ name: t.name, description: t.description || '' });
     }
   }
-  // 3. 构造 server 列表 (按 mcpState.results 顺序, 保持 config 顺序)
+  // 2. 构造 server 列表 (按 mcpState.results 顺序, 保持 config 顺序)
   const servers = (mcpState.results || []).map((r) => {
     const tools = byServer.get(r.name) || [];
     return {
@@ -1821,6 +1824,44 @@ try {
     servers,
   }) + '\n');
   console.error(`[sidecar] P3-F: mcp_status emitted (${servers.length} server(s), ${servers.filter((s) => s.status === 'started').length} started, ${servers.filter((s) => s.status === 'failed').length} failed)`);
+}
+
+// ====== 2026-08-24 ADR-0023 P3-G: external tool config dir 热重载 watcher ======
+//   跟 mcpWatcher 100% 同 pattern, 但 reload 路径不同:
+//   - MCP: 走 reloadMcpSubsystem() (kill clients + 重 init + 替换 mcpState, Pi SDK 下一轮 turn 看到新 tool)
+//   - external: Pi SDK 0.84.2 tool 注册只在 createAgentSession 时一次, 不能 mid-session 替换.
+//     修法: watcher 触发后写 <agentDir>/external_tools_restart_request.json, Tauri 端
+//     ensure_external_tools_watcher 100ms 轮询看到 → 调 restart_all_sidecars("external_tool_manifest_changed").
+//     走 file queue 而不 emit stdout: 此刻 runRpcMode 已经接管 stdout, write 会被吞.
+//     writeFileSync 走 fs, 跟 stdout 无关, 安全.
+//
+//   emit reason: "manifest_modified" / "tool_added" / "tool_removed" — 都 restart, 不区分细节
+//   (区分没意义, restart 后新 sidecar 自然读到最新状态).
+{
+  const externalRestartReqPath = join(agentDir, 'external_tools_restart_request.json');
+  const handle = watchExternalToolsDirs(workspacePath, agentDir, () => {
+    try {
+      const payload = JSON.stringify({
+        ts: Date.now(),
+        reason: 'manifest_modified',
+      });
+      // atomic write: 写 .tmp 再 rename, 防 Tauri 读到半截 JSON
+      const tmp = externalRestartReqPath + '.tmp';
+      writeFileSync(tmp, payload, 'utf-8');
+      try {
+        renameSync(tmp, externalRestartReqPath);
+      } catch (renameErr) {
+        // rename 失败 (Tauri 正在读?), 回退直接写 (Tauri 那侧 JSON.parse 失败会 skip, 安全)
+        writeFileSync(externalRestartReqPath, payload, 'utf-8');
+      }
+      console.error(`[sidecar] P3-G: external_tools_restart_request written (ts=${Date.now()})`);
+    } catch (e) {
+      console.error('[sidecar] P3-G: write restart request failed:', e instanceof Error ? e.message : String(e));
+    }
+  });
+  // 保存 close 句柄 (sidecar 退出时调, 防止 fd 泄漏 — 跟 mcpState.watcherClose 同样的防御)
+  mcpState.externalWatcherClose = handle.close;
+  console.error(`[sidecar] P3-G: external tools watcher installed (active=${handle.status.active}, dirs=[${handle.status.dirs.join(', ')}])`);
 }
 
 // ====== ADR-0023 P3-E: file queue watcher — 处理 Tauri → sidecar 的 tool_call_direct ======

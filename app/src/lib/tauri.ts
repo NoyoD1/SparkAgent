@@ -780,6 +780,25 @@ class PiTauriClient {
     })) as boolean;
   }
 
+  // 2026-08-24 P3-G: 写 external tool manifest.json (ToolsTab Edit 按钮用)
+  //   改完 FE 端调 triggerRestart, sidecar 走 externalToolsWatcher 触发 reload.
+  //   注意: 只改 manifest.json, 不动 entry 文件 (Python 脚本), 那个 user 自己编辑.
+  async writeExternalToolManifest(args: {
+    scope: 'workspace' | 'global';
+    name: string;
+    manifest: string;
+    workspacePath: string | null;
+    agentDir: string | null;
+  }): Promise<string> {
+    return (await invoke('write_external_tool_manifest', {
+      scope: args.scope,
+      name: args.name,
+      manifest: args.manifest,
+      workspacePath: args.workspacePath,
+      agentDir: args.agentDir,
+    })) as string;
+  }
+
   // ====== ADR-0023 P3-E (2026-08-24): user-driven / 真的调 external tool ======
   //   跟 send_prompt 同 pattern: FE 传完整 config (provider/model/apiKey 等走 keychain),
   //   Tauri 端负责 spawn sidecar (如果还没起) + 走 file queue 转发到 sidecar + 等 response.

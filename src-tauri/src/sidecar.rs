@@ -163,6 +163,8 @@ pub fn run_prompt(
     debug_log(&format!("run_prompt: session={session_id}"));
     // ADR-0022: 启动 sidecar 浏览器请求轮询 (处理 web_navigate / web_get_text tool)
     crate::sidecar::ensure_browser_watcher(app.clone());
+    // ADR-0023 P3-G: external tool config 改 → silent restart (跟 UI save 同一路径)
+    crate::sidecar::ensure_external_tools_watcher(app.clone());
     tauri::async_runtime::spawn(async move {
         // v0.5.0: config 走 argv[1] (跟 Pi SDK main.ts pattern 一致)
         let config_arg = match serde_json::to_string(&serde_json::json!({
@@ -338,6 +340,7 @@ pub fn run_compact(
 ) {
     debug_log(&format!("run_compact: session={session_id}"));
     crate::sidecar::ensure_browser_watcher(app.clone());
+    crate::sidecar::ensure_external_tools_watcher(app.clone());
     tauri::async_runtime::spawn(async move {
         let config_arg = match serde_json::to_string(&serde_json::json!({
             "type": "config",
@@ -770,4 +773,104 @@ fn debug_log(msg: &str) {
         let ts = chrono::Utc::now().format("%H:%M:%S%.3f");
         let _ = writeln!(f, "[{ts}] [sidecar] {msg}");
     }
+}
+
+// ====== 2026-08-24 ADR-0023 P3-G: external tool config 热重载 watcher ======
+// 背景: sidecar 端 externalToolsWatcher 监听 <agentDir>/tools/external/*/manifest.json +
+//   <workspace>/.pi/tools/external/*/manifest.json, debounce 300ms 后调 callback, callback
+//   写 <agentDir>/external_tools_restart_request.json (跟 browser_request 一样的 file queue 风格).
+//   原因: Pi SDK 0.84.2 tool 注册只在 createAgentSession 时一次, 不能 mid-session 替换.
+//   跟 mcpWatcher 不一样: mcpWatcher 触发后走 reloadMcpSubsystem 替换 mcpState.customTools
+//   (LLM 下一轮 turn 看到, 因为 mcp watcher reload 跟 createAgentSession 同源); external tool
+//   必须 kill 老 sidecar + spawn 新 sidecar 才能让 LLM 看到新 tool list.
+//
+// 单例 + 100ms 轮询 + atomic 处理 (跟 ensure_browser_watcher 同 pattern).
+static EXTERNAL_TOOLS_WATCHER_INIT: OnceLock<()> = OnceLock::new();
+
+pub fn ensure_external_tools_watcher(app: AppHandle) {
+    if EXTERNAL_TOOLS_WATCHER_INIT.get().is_some() {
+        return;
+    }
+    if EXTERNAL_TOOLS_WATCHER_INIT.set(()).is_err() {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let home = match app.path().home_dir() {
+            Ok(h) => h,
+            Err(e) => {
+                log::error!("[external_tools] watcher: home_dir failed: {e}");
+                return;
+            }
+        };
+        let agent_dir = home.join(".pi").join("agent");
+        let req_path = agent_dir.join("external_tools_restart_request.json");
+        if let Err(e) = std::fs::create_dir_all(&agent_dir) {
+            log::error!("[external_tools] watcher: create_dir_all failed: {e}");
+            return;
+        }
+        log::info!("[external_tools] watcher started, req={}", req_path.display());
+
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // 1. 读 request 文件 — 不存在就下一轮
+            let content = match std::fs::read_to_string(&req_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            // 2. 解析 + 立刻删文件, 防下一轮重复处理
+            let req: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("[external_tools] watcher: bad request json: {e}");
+                    let _ = std::fs::remove_file(&req_path);
+                    continue;
+                }
+            };
+            let reason = req
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("external_tool_changed")
+                .to_string();
+            if let Err(e) = std::fs::remove_file(&req_path) {
+                log::warn!("[external_tools] watcher: remove_file failed: {e}");
+            }
+            log::info!("[external_tools] watcher: restart requested (reason={reason})");
+
+            // 3. 调 restart_all_sidecars — 跟 FE 调 silent restart 走同一路径
+            //    拿 active map 的 Arc clone, 不需要 Tauri State
+            let active = app
+                .state::<std::sync::Arc<ActiveSidecars>>()
+                .inner()
+                .clone();
+            let mut map = active.0.lock().await;
+            let session_ids: Vec<String> = map.keys().cloned().collect();
+            let count = session_ids.len() as u32;
+            log::info!(
+                "[external_tools] watcher: killing {count} sidecar(s) (reason={reason})"
+            );
+            for session_id in &session_ids {
+                if let Some(mut child) = map.remove(session_id) {
+                    log::warn!(
+                        "[external_tools] watcher: killing session={session_id} (reason={reason})"
+                    );
+                    let _ = child.kill();
+                }
+            }
+            // emit sidecar:event 跟 FE 走同样 toast 链路 (App.vue 监听 type==sidecar_restarted 弹 toast)
+            // reason 前面拼前缀, 让 user 看出 "改了 external tool 触发的" 而不是普通改 MCP
+            let event = serde_json::json!({
+                "type": "sidecar_restarted",
+                "reason": format!("external_tool_manifest_changed:{reason}"),
+                "killed": count,
+                "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            });
+            if let Err(e) = app.emit("sidecar:event", &event) {
+                log::error!("[external_tools] watcher: emit failed: {e}");
+            }
+        }
+    });
 }
