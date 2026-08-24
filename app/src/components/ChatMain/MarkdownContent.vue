@@ -202,50 +202,56 @@ const rootRef = ref<HTMLElement | null>(null);
 onMounted(() => nextTick(() => injectCopyButtons(rootRef.value)));
 onUpdated(() => nextTick(() => injectCopyButtons(rootRef.value)));
 
-// ====== v3.60.1: streaming 节流 + 整段 fade in ======
-//   user 反馈 v3.60 mask-image 看不到效果 — 因为 v-html 每次 content 变化 unmount/remount 整段,
-//   视觉上"突然出现, 整段已经显示完", 中间没"渐入"过程.
-//   修法: 拆 displayedContent (节流到 ~80ms) + 整段 wrapper 用 CSS animation fade in (translateY + opacity).
-//   streaming 期间每 80ms 出现一段新内容, 像"树叶有序落在纸面上".
-//   message-end 后整段最后 fade in 一次, 留最后完整状态.
+// ====== v3.60.2: streaming 节奏控制 — "打字机 + 呼吸感" ======
+//   user 反馈: 当前流式太快, 几秒出来一片, 视觉不友好.
+//   需求: 像打字机一样逐字显示, 但有节奏呼吸感, 不急不慢, 像流光一样一条一条.
+//   修法: 节流 displayedContent 增长, 配合"随机停顿" 模拟人打字呼吸.
+//   - 80% 概率: 40-70ms 间隔 (正常打字节奏, 流光一条一条)
+//   - 16% 概率: 90-140ms 间隔 (中度停顿, 模拟思考下一句)
+//   - 4% 概率:  220-300ms 间隔 (深度停顿, 模拟深呼吸 / 换段)
+//   - 不切 char (避免 v-html 整段 remount 性能问题), 直接整段节流到 target 当前值.
+//   - 非 streaming (message_end): 立即 flush 全部, 不能延迟 (让 message 看起来"卡顿" 会很奇怪).
 
-const STREAMING_DEBOUNCE_MS = 80;
 const displayedContent = ref('');
-let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+let queueTimer: ReturnType<typeof setTimeout> | null = null;
 
-function flushDisplay() {
-  if (debounceTimer) {
-    clearTimeout(debounceTimer);
-    debounceTimer = null;
+function pickNextInterval(): number {
+  const r = Math.random();
+  if (r < 0.04) return 220 + Math.random() * 80;  // 4% 深度停顿 220-300ms
+  if (r < 0.20) return 90 + Math.random() * 50;   // 16% 中度停顿 90-140ms
+  return 40 + Math.random() * 30;                  // 80% 正常 40-70ms
+}
+
+function tick() {
+  queueTimer = null;
+  const target = props.content || '';
+  // 整段推到 target 当前值 (不切 char)
+  if (displayedContent.value !== target) {
+    displayedContent.value = target;
   }
-  displayedContent.value = props.content || '';
+  // 如果还有未显示的 (LLM 还在 stream, target 还在涨), 继续 schedule
+  const next = props.content || '';
+  if (displayedContent.value.length < next.length) {
+    queueTimer = setTimeout(tick, pickNextInterval());
+  }
 }
 
 watch(
-  () => props.content,
-  () => {
-    if (!props.isStreaming) {
-      // 非 streaming (message-end 后切回完整 content): 立即渲染
-      flushDisplay();
+  () => [props.content, props.isStreaming] as const,
+  ([content, streaming]) => {
+    if (!streaming) {
+      // 切到非 streaming (message_end): 立即 flush 全部, 取消节流
+      if (queueTimer) { clearTimeout(queueTimer); queueTimer = null; }
+      displayedContent.value = content || '';
       return;
     }
-    // streaming: 节流到 ~80ms
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(flushDisplay, STREAMING_DEBOUNCE_MS);
+    // streaming: 启动节奏 (如果还没启)
+    if (!queueTimer) {
+      queueTimer = setTimeout(tick, pickNextInterval());
+    }
   },
-  { immediate: true },
+  { immediate: true, deep: true },
 );
-
-// streaming 切到非 streaming (message_end) 时, 立即刷掉最后一段, 不要等 80ms
-watch(
-  () => props.isStreaming,
-  (now) => {
-    if (!now) flushDisplay();
-  },
-);
-
-// key 变化触发 <Transition appear> 重 mount, 配合 CSS animation 触发整段 fade in
-const renderKey = computed(() => `${displayedContent.value.length}|${props.isStreaming ? 's' : 'd'}`);
 
 /** 点击文件路径链接: 复制路径到剪贴板 (未来可拓展为在 editor 打开) */
 function onContentClick(e: MouseEvent) {
@@ -259,16 +265,13 @@ function onContentClick(e: MouseEvent) {
 </script>
 
 <template>
-  <Transition name="pad-md-stream" appear>
-    <div
-      :key="renderKey"
-      ref="rootRef"
-      class="pad-md"
-      :class="{ 'is-streaming': props.isStreaming }"
-      v-html="html"
-      @click="onContentClick"
-    />
-  </Transition>
+  <div
+    ref="rootRef"
+    class="pad-md"
+    :class="{ 'is-streaming': props.isStreaming }"
+    v-html="html"
+    @click="onContentClick"
+  />
 </template>
 
 <style>
@@ -280,37 +283,19 @@ function onContentClick(e: MouseEvent) {
   word-wrap: break-word;
   overflow-wrap: break-word;
 }
-/* v3.60.1: streaming 时, 整段内容用 CSS animation "fade-in-up" 渐入.
-   配合 <Transition appear> + :key 变化 (renderKey), 每次节流刷新 (80ms) 整段重新 mount + 动画.
-   视觉: 整段从下方 8px + opacity 0.4 → 原位 + opacity 1, 200ms ease-out.
-   像"树叶从下方有序落在纸面上" 一样一段段出现.
-   mask-image 渐隐保留作为最后视觉缓冲, 避免新内容在屏幕边缘"硬截断". */
+/* v3.60.2: streaming 节奏控制 — 走的是"打字机 + 呼吸感" (displayedContent
+   自适应节流), 不靠 CSS animation. 这里只留 mask-image 作为最后视觉缓冲,
+   避免新内容在屏幕边缘硬截断 (滚动到底时最后一行自然淡出). */
 .pad-md.is-streaming {
-  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 64px), transparent 100%);
-  mask-image: linear-gradient(to bottom, black calc(100% - 64px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 48px), transparent 100%);
+  mask-image: linear-gradient(to bottom, black calc(100% - 48px), transparent 100%);
   -webkit-mask-mode: luminance;
   mask-mode: luminance;
   padding-bottom: 4px;
 }
 
-/* v3.60.1: <Transition name="pad-md-stream" appear> enter hook.
-   :key 变化触发 div remount → appear 触发 → animation 跑.
-   streaming 期间每 80ms key 变, 整段整段 fade in. */
-.pad-md-stream-enter-active {
-  animation: pad-md-stream-fade 220ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-@keyframes pad-md-stream-fade {
-  from {
-    opacity: 0.35;
-    transform: translateY(6px);
-    filter: blur(0.4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-    filter: blur(0);
-  }
-}
+/* v3.60.2: 不再使用 Transition + animation, 节奏靠 displayedContent 自适应节流.
+   保留 mask-image 作为最后视觉缓冲. */
 .pad-md > *:first-child { margin-top: 0; }
 .pad-md > *:last-child { margin-bottom: 0; }
 .pad-md p { margin: 0 0 8px; }
