@@ -17,7 +17,7 @@
  * - post-processor: 文件路径 → <a class="pad-md-path">
  * - post-processor: v18+ **bold** 边界补丁 (跟 memory 教训一致, 防升级踩坑)
  */
-import { computed, ref, onMounted, onUpdated, nextTick } from 'vue';
+import { computed, ref, onMounted, onUpdated, nextTick, watch } from 'vue';
 import { Marked } from 'marked';
 import hljs from 'highlight.js';
 import katex from 'katex';
@@ -46,7 +46,7 @@ m.use({
 });
 
 const html = computed(() => {
-  let input = props.content || '';
+  let input = displayedContent.value || '';
   // v0.3.8.11: 把 LLM 输出里的 literal `\n` `\t` 转成真换行/制表符
   // (LLM 偶尔会输出 "\\n" 字符串而不是真换行, 之前 marked + breaks:true 不处理这两个字符)
   input = input.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
@@ -202,6 +202,51 @@ const rootRef = ref<HTMLElement | null>(null);
 onMounted(() => nextTick(() => injectCopyButtons(rootRef.value)));
 onUpdated(() => nextTick(() => injectCopyButtons(rootRef.value)));
 
+// ====== v3.60.1: streaming 节流 + 整段 fade in ======
+//   user 反馈 v3.60 mask-image 看不到效果 — 因为 v-html 每次 content 变化 unmount/remount 整段,
+//   视觉上"突然出现, 整段已经显示完", 中间没"渐入"过程.
+//   修法: 拆 displayedContent (节流到 ~80ms) + 整段 wrapper 用 CSS animation fade in (translateY + opacity).
+//   streaming 期间每 80ms 出现一段新内容, 像"树叶有序落在纸面上".
+//   message-end 后整段最后 fade in 一次, 留最后完整状态.
+
+const STREAMING_DEBOUNCE_MS = 80;
+const displayedContent = ref('');
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushDisplay() {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  displayedContent.value = props.content || '';
+}
+
+watch(
+  () => props.content,
+  () => {
+    if (!props.isStreaming) {
+      // 非 streaming (message-end 后切回完整 content): 立即渲染
+      flushDisplay();
+      return;
+    }
+    // streaming: 节流到 ~80ms
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(flushDisplay, STREAMING_DEBOUNCE_MS);
+  },
+  { immediate: true },
+);
+
+// streaming 切到非 streaming (message_end) 时, 立即刷掉最后一段, 不要等 80ms
+watch(
+  () => props.isStreaming,
+  (now) => {
+    if (!now) flushDisplay();
+  },
+);
+
+// key 变化触发 <Transition appear> 重 mount, 配合 CSS animation 触发整段 fade in
+const renderKey = computed(() => `${displayedContent.value.length}|${props.isStreaming ? 's' : 'd'}`);
+
 /** 点击文件路径链接: 复制路径到剪贴板 (未来可拓展为在 editor 打开) */
 function onContentClick(e: MouseEvent) {
   const target = e.target as HTMLElement;
@@ -214,13 +259,16 @@ function onContentClick(e: MouseEvent) {
 </script>
 
 <template>
-  <div
-    ref="rootRef"
-    class="pad-md"
-    :class="{ 'is-streaming': props.isStreaming }"
-    v-html="html"
-    @click="onContentClick"
-  />
+  <Transition name="pad-md-stream" appear>
+    <div
+      :key="renderKey"
+      ref="rootRef"
+      class="pad-md"
+      :class="{ 'is-streaming': props.isStreaming }"
+      v-html="html"
+      @click="onContentClick"
+    />
+  </Transition>
 </template>
 
 <style>
@@ -232,16 +280,36 @@ function onContentClick(e: MouseEvent) {
   word-wrap: break-word;
   overflow-wrap: break-word;
 }
-/* v3.60: streaming 时, 内容底部 96px mask-image 渐隐.
-   新 text 从 viewport 底部进入时, 像是被光照亮 (而不是逐字 pop-in).
-   user 反馈"消隐方式, 一段一段像阳光铺满墙面". */
+/* v3.60.1: streaming 时, 整段内容用 CSS animation "fade-in-up" 渐入.
+   配合 <Transition appear> + :key 变化 (renderKey), 每次节流刷新 (80ms) 整段重新 mount + 动画.
+   视觉: 整段从下方 8px + opacity 0.4 → 原位 + opacity 1, 200ms ease-out.
+   像"树叶从下方有序落在纸面上" 一样一段段出现.
+   mask-image 渐隐保留作为最后视觉缓冲, 避免新内容在屏幕边缘"硬截断". */
 .pad-md.is-streaming {
-  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 96px), transparent 100%);
-  mask-image: linear-gradient(to bottom, black calc(100% - 96px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 64px), transparent 100%);
+  mask-image: linear-gradient(to bottom, black calc(100% - 64px), transparent 100%);
   -webkit-mask-mode: luminance;
   mask-mode: luminance;
-  /* 渐隐本身作为最后一段"未完全显示"的视觉缓冲, 避免字面"截断"在屏幕边缘. */
   padding-bottom: 4px;
+}
+
+/* v3.60.1: <Transition name="pad-md-stream" appear> enter hook.
+   :key 变化触发 div remount → appear 触发 → animation 跑.
+   streaming 期间每 80ms key 变, 整段整段 fade in. */
+.pad-md-stream-enter-active {
+  animation: pad-md-stream-fade 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes pad-md-stream-fade {
+  from {
+    opacity: 0.35;
+    transform: translateY(6px);
+    filter: blur(0.4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
 }
 .pad-md > *:first-child { margin-top: 0; }
 .pad-md > *:last-child { margin-bottom: 0; }
