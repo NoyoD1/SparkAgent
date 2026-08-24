@@ -253,10 +253,11 @@ async function deleteExternalToolDialog(name: string) {
 
 // ====== 2026-08-24 P3-G: external tool Edit ======
 //   之前 ToolsTab 只能派生 builtin / 导入 ZIP / 删除, 没法直接改已装的 tool.
-//   Edit dialog 改 manifest.json (description / parameters / env 引用 / runtime 等),
+//   v3.43 (2026-08-24): 改 inline 展开 (跟 Skill / MCP / 派生 builtin 一致).
+//   Edit panel 改 manifest.json (description / parameters / env 引用 / runtime 等),
 //   改完调 write_external_tool_manifest + silent restart.
-//   试跑 (Run) 走 slash command '/tools:name' → modal 真调, UI 这里不再单独做
-//   (避免 invoke_external_tool 要全 config 的复杂度, Pi SDK 走 modal 路径更顺).
+//   试跑 (Run) 走 slash command '/tools:name' → sidecar 真调, UI 这里不再单独做
+//   (避免 invoke_external_tool 要全 config 的复杂度, Pi SDK 走 slash 路径更顺).
 
 // Edit state
 const editingExtName = ref<string | null>(null);
@@ -504,56 +505,107 @@ async function saveEditExternal() {
         <div
           v-for="t in allExtensionTools"
           :key="t.name"
-          class="pad-toolstab__ext-card"
-          :class="{
-            'is-disabled': !extensionToolsStore.isEnabled(t.name),
-            'is-external': t.source === 'external',
-          }"
+          class="pad-toolstab__ext-item"
         >
-          <Globe v-if="t.source === 'browser'" :size="18" :stroke-width="1.5" class="pad-toolstab__builtin-icon" />
-          <Package v-else :size="18" :stroke-width="1.5" class="pad-toolstab__builtin-icon" />
-          <div class="pad-toolstab__builtin-body">
-            <div class="pad-toolstab__builtin-name">
-              <code>{{ t.name }}</code>
-              <span :class="['pad-toolstab__scope-tag', `is-${t.source}`]">{{ t.source }}</span>
+          <div
+            class="pad-toolstab__ext-card"
+            :class="{
+              'is-disabled': !extensionToolsStore.isEnabled(t.name),
+              'is-external': t.source === 'external',
+            }"
+          >
+            <Globe v-if="t.source === 'browser'" :size="18" :stroke-width="1.5" class="pad-toolstab__builtin-icon" />
+            <Package v-else :size="18" :stroke-width="1.5" class="pad-toolstab__builtin-icon" />
+            <div class="pad-toolstab__builtin-body">
+              <div class="pad-toolstab__builtin-name">
+                <code>{{ t.name }}</code>
+                <span :class="['pad-toolstab__scope-tag', `is-${t.source}`]">{{ t.source }}</span>
+              </div>
+              <div class="pad-toolstab__builtin-label">{{ t.label }} — {{ t.description }}</div>
             </div>
-            <div class="pad-toolstab__builtin-label">{{ t.label }} — {{ t.description }}</div>
+            <!-- v3-D Phase 2: external tool 卡片有 export 按钮 (ZIP 导出) -->
+            <button
+              v-if="t.source === 'external'"
+              class="pad-toolstab__btn pad-toolstab__btn--ghost pad-toolstab__btn--sm"
+              :title="`编辑 ${t.name} 的 manifest.json (env 引用 / parameters / description 等)`"
+              @click="startEditExternal(t)"
+            >
+              <Edit3 :size="12" :stroke-width="1.75" />
+            </button>
+            <button
+              v-if="t.source === 'external'"
+              class="pad-toolstab__btn pad-toolstab__btn--ghost pad-toolstab__btn--sm"
+              :title="`导出 ${t.name} 到 ZIP`"
+              @click="exportExternalToolDialog(t.name)"
+            >
+              <Save :size="12" :stroke-width="1.75" />
+            </button>
+            <!-- v3.19: external tool 删除按钮 -->
+            <button
+              v-if="t.source === 'external'"
+              class="pad-toolstab__btn pad-toolstab__btn--danger pad-toolstab__btn--sm"
+              :title="`删除 ${t.name}`"
+              @click="deleteExternalToolDialog(t.name)"
+            >
+              <Trash2 :size="12" :stroke-width="1.75" />
+            </button>
+            <button
+              class="pad-toolstab__toggle"
+              :class="{ 'is-on': extensionToolsStore.isEnabled(t.name) }"
+              :title="extensionToolsStore.isEnabled(t.name) ? '点击停用' : '点击启用'"
+              @click="extensionToolsStore.toggle(t.name)"
+            >
+              <Power :size="12" :stroke-width="2" />
+              <span>{{ extensionToolsStore.isEnabled(t.name) ? '已启用' : '已停用' }}</span>
+            </button>
           </div>
-          <!-- v3-D Phase 2: external tool 卡片有 export 按钮 (ZIP 导出) -->
-          <button
-            v-if="t.source === 'external'"
-            class="pad-toolstab__btn pad-toolstab__btn--ghost pad-toolstab__btn--sm"
-            :title="`编辑 ${t.name} 的 manifest.json (env 引用 / parameters / description 等)`"
-            @click="startEditExternal(t)"
-          >
-            <Edit3 :size="12" :stroke-width="1.75" />
-          </button>
-          <button
-            v-if="t.source === 'external'"
-            class="pad-toolstab__btn pad-toolstab__btn--ghost pad-toolstab__btn--sm"
-            :title="`导出 ${t.name} 到 ZIP`"
-            @click="exportExternalToolDialog(t.name)"
-          >
-            <Save :size="12" :stroke-width="1.75" />
-          </button>
-          <!-- v3.19: external tool 删除按钮 -->
-          <button
-            v-if="t.source === 'external'"
-            class="pad-toolstab__btn pad-toolstab__btn--danger pad-toolstab__btn--sm"
-            :title="`删除 ${t.name}`"
-            @click="deleteExternalToolDialog(t.name)"
-          >
-            <Trash2 :size="12" :stroke-width="1.75" />
-          </button>
-          <button
-            class="pad-toolstab__toggle"
-            :class="{ 'is-on': extensionToolsStore.isEnabled(t.name) }"
-            :title="extensionToolsStore.isEnabled(t.name) ? '点击停用' : '点击启用'"
-            @click="extensionToolsStore.toggle(t.name)"
-          >
-            <Power :size="12" :stroke-width="2" />
-            <span>{{ extensionToolsStore.isEnabled(t.name) ? '已启用' : '已停用' }}</span>
-          </button>
+          <!-- v3.44 (2026-08-24): inline edit panel 紧跟被点的 card (跟 GitHub 折叠展开一样),
+               之前 v3.43 放在 ext-grid 后面整个跑到底部, 不直观. 现在 wrap 在每个 ext-item 里,
+               v-if "editingExtName === t.name" 决定哪个 item 下面展开. 复用 .pad-toolstab__dialog
+               样式 (跟派生 builtin dialog 一致). -->
+          <div v-if="editingExtName === t.name" class="pad-toolstab__dialog">
+            <div class="pad-toolstab__dialog-head">
+              <Edit3 :size="14" :stroke-width="1.75" />
+              <span>编辑 manifest.json: <code>{{ t.name }}</code></span>
+              <button class="pad-toolstab__toast-close" @click="cancelEditExternal" title="取消编辑">
+                <X :size="14" :stroke-width="1.75" />
+              </button>
+            </div>
+            <div class="pad-toolstab__form">
+              <div class="pad-toolstab__form-row pad-toolstab__form-row--body">
+                <label class="pad-toolstab__label">manifest.json (JSON)
+                  <span class="pad-toolstab__hint-inline">
+                    改 description / parameters / env (v3.37 改: 明文 secret, 不再用 <code>keychain:</code> 引用) / runtime / entry 等.
+                    保存后触发静默重启, 下次对话生效. entry 文件 (Python 脚本) 不会动, 那个用编辑器改.
+                  </span>
+                </label>
+                <textarea
+                  v-model="editingExtJson"
+                  class="pad-toolstab__textarea"
+                  rows="20"
+                  spellcheck="false"
+                />
+              </div>
+              <div class="pad-toolstab__form-actions">
+                <button
+                  class="pad-toolstab__btn"
+                  :disabled="isSavingExt"
+                  @click="cancelEditExternal"
+                >
+                  <X :size="14" :stroke-width="1.75" />
+                  <span>取消</span>
+                </button>
+                <button
+                  class="pad-toolstab__btn pad-toolstab__btn--primary"
+                  :disabled="isSavingExt"
+                  @click="saveEditExternal"
+                >
+                  <Save :size="14" :stroke-width="1.75" />
+                  <span>{{ isSavingExt ? '保存中…' : '保存并重启 sidecar' }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -605,40 +657,10 @@ async function saveEditExternal() {
       </span>
     </div>
 
-    <!-- 2026-08-24 P3-G: Edit external tool manifest.json dialog -->
-    <!--   v3.24 fix: Teleport to body 避免父级 stacking context (transform / position) 干扰
-         z-index, 否则 modal 背景遮罩盖不住兄弟 stacking context 里的内容 -->
-    <Teleport to="body">
-      <div v-if="editingExtName" class="pad-toolstab__modal-backdrop" @click.self="cancelEditExternal">
-        <div class="pad-toolstab__modal">
-          <h3 class="pad-toolstab__modal-title">
-            <Edit3 :size="14" :stroke-width="1.75" />
-            <span>编辑 manifest.json: <code>{{ editingExtName }}</code></span>
-          </h3>
-          <p class="pad-toolstab__modal-desc">
-            改 description / parameters / env (v3.37 改: 明文 secret, 不再用 <code>keychain:</code> 引用) / runtime / entry 等.
-            保存后触发静默重启, 下次对话生效. entry 文件 (Python 脚本) 不会动, 那个用编辑器改.
-          </p>
-          <textarea
-            v-model="editingExtJson"
-            class="pad-toolstab__modal-textarea"
-            spellcheck="false"
-            :rows="20"
-          />
-          <div class="pad-toolstab__modal-actions">
-            <button class="pad-toolstab__btn pad-toolstab__btn--ghost" @click="cancelEditExternal">取消</button>
-            <button
-              class="pad-toolstab__btn pad-toolstab__btn--primary"
-              :disabled="isSavingExt"
-              @click="saveEditExternal"
-            >
-              <Save :size="12" :stroke-width="1.75" />
-              <span>{{ isSavingExt ? '保存中…' : '保存并重启 sidecar' }}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    <!-- v3.44 (2026-08-24): Edit external tool inline edit panel 移到 ext-item 内部
+         (v3.43 放在 ext-grid 后面整个跑到底部, user 反馈 "位置不对, 怎么在最下面").
+         完整 inline edit panel markup 跟 .pad-toolstab__dialog CSS 复用都在 ext-item 里
+         跟被点的 card 紧贴. 这个独立 block 删掉. -->
   </div>
 </template>
 
@@ -728,6 +750,14 @@ async function saveEditExternal() {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+/* v3.44 (2026-08-24): wrap card + inline edit panel 紧贴 (card 跟 edit panel 中间无 gap,
+   item 跟 item 之间靠 .pad-toolstab__ext-grid 的 gap 6px 隔开). inline edit panel 是
+   同一个 .pad-toolstab__ext-item 的 sibling, v-if 决定哪个 item 展开. */
+.pad-toolstab__ext-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
 }
 .pad-toolstab__ext-card {
   display: flex;
@@ -1042,93 +1072,15 @@ async function saveEditExternal() {
   line-height: 1.5;
 }
 
-/* 2026-08-24 P3-G: Edit / Run dialog (跟现有 derive dialog 风格一致) */
-.pad-toolstab__modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  /* z-index 提到 9999 防止任何 stacking context 干扰, 配合 Teleport to body 双保险 */
-  z-index: 9999;
-  padding: 20px;
-}
-.pad-toolstab__modal {
-  background: var(--pad-bg-card);
-  border: 1px solid var(--pad-border);
-  border-radius: var(--pad-radius-md);
-  padding: 20px;
-  max-width: 720px;
-  width: 100%;
-  /* v3.42 (2026-08-24): 改 90vh → 90dvh 解决 Tauri 2 WebView2 拖拽窗口 resize 期间 modal 错位.
-   *   跟 v3.41 main container 改 100% → 100dvh 同根因:
-   *     - Tauri 2 WebView2 resize 时 vh 不立即更新, 锁在初始 viewport 算的高度
-   *     - 90vh 让 modal 高度锁在初始 viewport * 0.9, resize 后 modal 高度可能比新 viewport
-   *       还高 → 内容溢出截断 / textarea 跟 modal 容器错位 / 按钮被推出 modal
-   *     - 90dvh (dynamic viewport height) 跟 v3.41 main container 100dvh 同步, resize 立即响应
-   *   老浏览器 (Safari < 15.4) 走 fallback 90vh. */
-  max-height: 90vh;  /* fallback for browsers without 90dvh */
-  max-height: 90dvh;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-  /* v3.24: 禁止内容溢出, 内部 overflow auto */
-  overflow: hidden;
-}
-.pad-toolstab__modal-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  font-size: var(--pad-fs-15, 15px);
-  font-weight: var(--pad-fw-medium);
-  color: var(--pad-fg-primary);
-  flex-shrink: 0;
-}
-.pad-toolstab__modal-title code {
-  font-family: var(--pad-font-mono);
-  font-size: var(--pad-fs-13, 13px);
-  color: var(--pad-accent);
-}
-.pad-toolstab__modal-desc {
-  margin: 0;
-  font-size: var(--pad-fs-12, 12px);
-  color: var(--pad-fg-secondary);
-  line-height: 1.5;
-  flex-shrink: 0;
-}
-.pad-toolstab__modal-desc code {
-  font-family: var(--pad-font-mono);
-  font-size: var(--pad-fs-12, 12px);
-  background: var(--pad-bg-input);
-  padding: 1px 4px;
-  border-radius: 3px;
-}
-/* v3.24: textarea 弹性占满剩余空间, min-height 0 关键 (flexbox 默认 min-height auto) */
-.pad-toolstab__modal-textarea {
-  width: 100%;
-  flex: 1 1 auto;
-  min-height: 0;
-  padding: 10px 12px;
-  font-family: var(--pad-font-mono);
-  font-size: var(--pad-fs-12, 12px);
-  line-height: 1.5;
-  background: var(--pad-bg-input);
-  border: 1px solid var(--pad-border);
-  border-radius: var(--pad-radius-sm);
-  color: var(--pad-fg-primary);
-  resize: none;  /* v3.24: 用 flex 控制高度, 不让 user 拖, 避免跟 modal 冲突 */
-}
-.pad-toolstab__modal-textarea:focus {
-  outline: none;
-  border-color: var(--pad-accent);
-}
-.pad-toolstab__modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-shrink: 0;
-}
+/* v3.43 (2026-08-24): 删 Edit external tool modal 整套 CSS
+ *   v3.42 改 max-height 90vh → 90dvh 试图修 modal 错位, 但 user 反馈 "思路不对,
+ *   一直做不对". 二级弹窗在 Tauri 2 WebView2 跟 Settings dialog 父级 stacking
+ *   context 干扰问题难根治 (position: fixed / z-index / Teleport 各种组合都试过).
+ *   v3.43 改跟 Skill / MCP 编辑一样内联展开, 复用 .pad-toolstab__dialog / __form /
+ *   __textarea 样式 (派生 dialog 用的), 不再需要 modal 这一整套.
+ *   历史 commit:
+ *     - v3.24 (2026-08-24): 加 Edit external tool modal (Teleport to body, z-index 9999)
+ *     - v3.42 (2026-08-24): 90vh → 90dvh 试图修 resize 错位
+ *     - v3.43 (2026-08-24): 删整个 modal, 改内联展开
+ */
 </style>
