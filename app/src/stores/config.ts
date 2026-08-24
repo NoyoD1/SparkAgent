@@ -24,6 +24,9 @@ export type ProviderType =
   | 'groq'
   | 'minimax'
   | 'openai-compatible';
+// 注意: 2026-08-24 v3.28 user 删内置 provider 后, 8 个 type literal 仍保留 (兼容老 config.json
+//   里 user 已配的 builtin provider, e.g. type='minimax' 仍能 select 复用). UI 列表只显示
+//   'openai-compatible' (PROVIDER_OPTIONS 删了 7 个), 新建路径只能选 openai-compatible.
 
 export interface ThinkingLevel {
   value: 'off' | 'low' | 'medium' | 'high';
@@ -69,13 +72,11 @@ export interface ProviderOption {
 }
 
 export const PROVIDER_OPTIONS: ProviderOption[] = [
-  { id: 'anthropic',          label: 'Anthropic (Claude)',  builtin: true },
-  { id: 'openai',             label: 'OpenAI',              builtin: true },
-  { id: 'deepseek',           label: 'DeepSeek',            builtin: true },
-  { id: 'moonshotai',         label: 'Moonshot (Kimi)',     builtin: true },
-  { id: 'google',             label: 'Google Gemini',       builtin: true },
-  { id: 'groq',               label: 'Groq',                builtin: true },
-  { id: 'minimax',            label: 'MiniMax',            builtin: true },
+  // 2026-08-24 v3.28: 删 7 个内置 provider (anthropic/openai/deepseek/moonshotai/google/groq/minimax).
+  //   user 反馈: '删除内置provider统一后面我都自己配置'. 现在 Settings → Providers
+  //   点 '+' 加 provider 时, type select 只剩 'openai-compatible' (走 baseUrl + fetch /models
+  //   自动拿 model 列表, best-effort parse metadata). 老 config 里已配的 builtin 仍能 select 复用
+  //   (ProviderType 保留 8 个 literal).
   { id: 'openai-compatible',  label: 'OpenAI 兼容 (自定义 baseUrl)', needsBaseUrl: true },
 ];
 
@@ -142,16 +143,12 @@ export const PERMISSION_MODE_OPTIONS: Array<{ value: PermissionMode; label: stri
  * v0.3.8+ 内置 provider 的常见 model 列表.
  * 简化版 — 实际生产可走 provider 的 /v1/models 端点拉, 但 sidecar 现在只支持 openai-compatible.
  * 用法: 内置 provider 配置 key 后, 用户从此列表选 active model, 也可手输自定义 id.
+ *
+ * 2026-08-24 v3.28: 全部删了 (跟 PROVIDER_OPTIONS 7 个 builtin 一起删). user 反馈 '删除内置provider统一
+ *   后面我都自己配置'. 现在 model 列表全靠 openai-compatible 走 fetchProviderModels 拉 (/v1/models),
+ *   或者 user 手输 model id.
  */
-export const BUILTIN_MODELS: Record<Exclude<ProviderType, 'openai-compatible'>, string[]> = {
-  anthropic:  ['claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest', 'claude-3-opus-latest'],
-  openai:     ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
-  deepseek:   ['deepseek-chat', 'deepseek-reasoner', 'deepseek-coder'],
-  moonshotai: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
-  google:     ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash-exp'],
-  groq:       ['llama-3.1-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
-  minimax:    ['MiniMax-M2', 'MiniMax-M1', 'abab6.5s-chat'],
-};
+// export const BUILTIN_MODELS: ...   // v3.28: 删, 全 0 builtin model
 
 // R2: provider id 改用 crypto.randomUUID() (128 bit 熵), 不再可猜
 // 老 id (timestamp 形式) 仍合法, 不会被破坏; 新 id 用 UUID v4

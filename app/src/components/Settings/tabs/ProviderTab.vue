@@ -19,7 +19,7 @@ import {
   Plus, Trash2, RefreshCw, KeyRound, Server, Save, Settings,
 } from 'lucide-vue-next';
 import {
-  useConfigStore, PROVIDER_OPTIONS, BUILTIN_MODELS, THINKING_LEVELS,
+  useConfigStore, PROVIDER_OPTIONS, THINKING_LEVELS,
   type ProviderConfig, type ProviderType, type ModelInfo,
 } from '@/stores/config';
 import { fetchProviderModels } from '@/lib/providers-api';
@@ -313,18 +313,8 @@ async function configureBuiltin() {
     builtinKeyMsg.value = '';
     // 5. 切到详情面板
     selection.value = { kind: 'provider', id: provider.id };
-    // 6. 自动选第一个 model (内置 provider 用硬编码 catalog) + 应用静态 metadata catalog
-    const builtinModels = BUILTIN_MODELS[t as Exclude<ProviderType, 'openai-compatible'>];
-    if (builtinModels?.length) {
-      config.setProviderModels(provider.id, builtinModels.map((id) => ({ id, enabled: true })));
-      // v0.5.0-D D213: 拉静态 catalog 自动填 metadata (contextWindow/maxOutput/vision/reasoning 等)
-      const { applied } = await config.applyCatalog(provider.id, t);
-      if (applied > 0) {
-        builtinKeyMsg.value = `已自动填充 ${applied} 个 model 的 metadata (来源: 静态 catalog)`;
-        setTimeout(() => { builtinKeyMsg.value = ''; }, 3000);
-      }
-      config.setActiveModel(provider.id, builtinModels[0]);
-    }
+    // 6. 2026-08-24 v3.28: 内置 provider 删了, 不再 BUILTIN_MODELS 预填. 让 user 自己在详情
+    //   面板选 model (或者之前已经存了 model 的 user config 不动).
   } catch (e) {
     builtinKeyState.value = 'fail';
     builtinKeyMsg.value = e instanceof Error ? e.message : String(e);
@@ -723,7 +713,7 @@ function onProviderAdded(id: string) {
               {{ builtinKeyMsg }}
             </p>
             <p class="pad-provider-detail__hint">
-              保存后会自动设为当前 active provider, 并从内置 model 列表预填 {{ BUILTIN_MODELS[currentBuiltinType! as Exclude<ProviderType, 'openai-compatible'>]?.[0] ?? '默认 model' }} 作 active.
+              保存后会自动设为当前 active provider. v3.28: 内置 model 列表删了, 请在详情面板手动加 model id (或 baseUrl 是 openai-compatible 时点 '拉取模型' 自动填).
             </p>
           </div>
         </div>
