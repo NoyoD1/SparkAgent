@@ -40,59 +40,6 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex;
 
-/// v3.34 (2026-08-24): stdin chunked write helper — 通用机制, 治 sidecar 启动 race
-///
-/// 根因 (跟 v3.32/v3.33 sync/async write 对比):
-///   - v3.32 sync child.write() 阻塞 Tauri async task 期间, sidecar JS 0.4s 启动 + P0-1 bash +
-///     skills hot-reload + system prompt + attachJsonlLineReader 全部完成, **stdin pipe 是空的** (Tauri
-///     还没写). 1 分后 Tauri 写完 130KB, sidecar 早已 ready, 130KB 一次性 emit → Pi SDK 处理 → vision 通.
-///   - v3.33 thread spawn child.write() 不阻塞, 0.4s 写完 130KB, **stdin pipe 已满 130KB**. sidecar JS
-///     0.4s 启动到 attachJsonlLineReader 时, stdin 130KB 一次性 emit 130KB line, 但 Pi SDK 0.84.2
-///     AgentSession 此时还没 ready (system prompt 还在构建 / MCP server 还在 60s keychain timeout),
-///     处理 130KB RpcCommand race → sidecar 进程 exit 1 (45s 后被 watchdog 收 terminated).
-///
-/// 修法 (结构层面, 不打补丁): Tauri 写 stdin 改 chunked, **边写边让 sidecar 启动链有时间读**.
-///   - 4KB 一段 (typical pipe buffer 是 64KB, 4KB 远小于, OS write 不会 partial)
-///   - 段间 await 20ms (让 sidecar reader attach + Pi SDK init chain 有时间跑, 不会累积到 race 临界)
-///   - run_prompt (initial RpcCommand, 130KB) 跟 send_rpc_command (后续 RpcCommand, 几 KB) 同一 helper
-///
-/// 时间预算:
-///   - 130KB / 4KB = 33 chunks × 20ms = 660ms 写完 (大 image vision 场景)
-///   - 几 KB / 4KB = 1-2 chunks × 20ms = 20-40ms 写完 (普通 RpcCommand 场景, 几乎无感)
-///   - 期间 Tauri task 让出 (await sleep), 其他 Tauri command (ghost send_prompt / abort) 能并行处理
-///     — 比 v3.32 sync 阻塞 1 分好得多
-///
-/// 注意: helper 是 owned CommandChild 的纯函数, 不持有 stdio handle, 写完 ownership 返 caller.
-async fn write_chunked(
-    child: CommandChild,
-    data: Vec<u8>,
-) -> Result<CommandChild, tauri_plugin_shell::Error> {
-    const CHUNK_SIZE: usize = 4 * 1024; // 4KB
-    const CHUNK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let mut result: Result<(), tauri_plugin_shell::Error> = Ok(());
-        let mut c = child;
-        for chunk in data.chunks(CHUNK_SIZE) {
-            if let Err(e) = c.write(chunk) {
-                result = Err(e);
-                break;
-            }
-            // 段间让 sidecar 启动链有时间读, 避免 pipe buffer 累积触发 race
-            // 同步 sleep 在 std::thread 里, 不阻塞 tokio runtime
-            std::thread::sleep(CHUNK_INTERVAL);
-        }
-        let _ = tx.send((result, c));
-    });
-    match rx.await {
-        Ok((res, c)) => res.map(|_| c),
-        Err(_) => Err(tauri_plugin_shell::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "write_chunked thread join failed",
-        ))),
-    }
-}
-
 /// v0.5.8 active sidecar 进程 CommandChild 全局表 (per-session).
 /// 让 FE 端 invoke (send_rpc_command) 能写到指定 session 的 stdin.
 /// task 结束 (agent_end) 时移除 entry, 避免悬空 handle.
@@ -274,27 +221,23 @@ pub fn run_prompt(
             }
         };
 
-        // v3.34 (2026-08-24): write 改 chunked helper (4KB + 20ms yield).
-        //   修 vision send_prompt 含 100KB+ base64 时 sidecar 启动 race (130KB 一次性 emit
-        //   时 Pi SDK 0.84.2 AgentSession 还没 ready → sidecar exit 1). 详细原因见 write_chunked 注释.
-        //   v3.33 thread spawn 一次性写 130KB 太激进, 跟 sidecar 0.4s 启动链 race.
-        //   chunked 让 sidecar 边启动边读, 写完时 sidecar 早就 ready, 处理 OK.
-        let line_bytes = format!("{initial_command_json}\n").into_bytes();
+        // v3.35 (2026-08-24): 回滚到 v3.32 sync child.write() 阻塞.
+        //   v3.33 (thread spawn) 跟 v3.34 (chunked helper) 都没解 vision 死锁:
+        //     - v3.33: 0.4s 写完 130KB, sidecar 0.4s 启动期间 stdin pipe 130KB 已满 → sidecar 启动 hang → exit 1
+        //     - v3.34: 0.32s 写 48KB 期间 sidecar 0.4s 启动 hang (同样 race)
+        //   真正稳的行为: Tauri sync 阻塞 1 分写完 130KB, 期间 sidecar 0.4s 启动 OK (stdin pipe 一直是空的),
+        //     1 分后 Tauri 写完, sidecar 早就 ready → vision 通.
+        //   关键: vision LLM API 本身 1 分, user 感知不到 Tauri 多阻塞 1 分.
+        //   v3.33/v3.34 我之前以为"修了 1 分阻塞", 实际暴露了 race, 现在承认局限回滚.
+        let line = format!("{initial_command_json}\n");
         debug_log(&format!(
-            "run_prompt: writing initial RpcCommand via chunked helper, line_len={}",
-            line_bytes.len()
+            "run_prompt: writing initial RpcCommand sync, line_len={}",
+            line.len()
         ));
-        let child = match write_chunked(child, line_bytes).await {
-            Ok(c) => c,
-            Err(e) => {
-                emit_error(
-                    &app,
-                    &session_id,
-                    &format!("write initial command (chunked): {e}"),
-                );
-                return;
-            }
-        };
+        if let Err(e) = child.write(line.as_bytes()) {
+            emit_error(&app, &session_id, &format!("write initial command: {e}"));
+            return;
+        }
         debug_log(&format!(
             "run_prompt: initial RpcCommand written, registering child to map"
         ));
@@ -665,21 +608,17 @@ pub async fn send_rpc_command(
         session_id,
         command_json.chars().take(120).collect::<String>()
     ));
-    // v3.34 (2026-08-24): 跟 run_prompt 同步改 — 走 chunked write helper (4KB + 20ms yield).
-    //   跟 run_prompt 同样的 sidecar 启动 race 解, 后续 RpcCommand 虽小 (1-10KB) 但保持一致性.
-    let child = {
-        let mut map = active.0.lock().await;
-        map.remove(&session_id)
-            .ok_or_else(|| format!("no active sidecar for session={}", session_id))?
-    };
-    let line_bytes = format!("{}\n", command_json).into_bytes();
-    let child = write_chunked(child, line_bytes)
-        .await
-        .map_err(|e| format!("write rpc_command (chunked): {e}"))?;
-    {
-        let mut map = active.0.lock().await;
-        map.insert(session_id.clone(), child);
-    }
+    // v3.35 (2026-08-24): 跟 run_prompt 同步回滚到 v3.32 sync write.
+    //   跟 run_prompt 同样理由: 写 stdin 跟 sidecar 启动没同步, sync 阻塞 1 分期间 sidecar 启动 OK.
+    //   后续 RpcCommand 一般小 (1-10KB), sync write 几 ms 完, 实际不阻塞. 一致性也保留.
+    let mut map = active.0.lock().await;
+    let child = map
+        .get_mut(&session_id)
+        .ok_or_else(|| format!("no active sidecar for session={}", session_id))?;
+    let line = format!("{}\n", command_json);
+    child
+        .write(line.as_bytes())
+        .map_err(|e| format!("write rpc_command: {e}"))?;
     Ok(())
 }
 
