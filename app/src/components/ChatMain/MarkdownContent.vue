@@ -202,37 +202,56 @@ const rootRef = ref<HTMLElement | null>(null);
 onMounted(() => nextTick(() => injectCopyButtons(rootRef.value)));
 onUpdated(() => nextTick(() => injectCopyButtons(rootRef.value)));
 
-// ====== v3.60.2: streaming 节奏控制 — "打字机 + 呼吸感" ======
-//   user 反馈: 当前流式太快, 几秒出来一片, 视觉不友好.
-//   需求: 像打字机一样逐字显示, 但有节奏呼吸感, 不急不慢, 像流光一样一条一条.
-//   修法: 节流 displayedContent 增长, 配合"随机停顿" 模拟人打字呼吸.
-//   - 80% 概率: 40-70ms 间隔 (正常打字节奏, 流光一条一条)
-//   - 16% 概率: 90-140ms 间隔 (中度停顿, 模拟思考下一句)
-//   - 4% 概率:  220-300ms 间隔 (深度停顿, 模拟深呼吸 / 换段)
-//   - 不切 char (避免 v-html 整段 remount 性能问题), 直接整段节流到 target 当前值.
-//   - 非 streaming (message_end): 立即 flush 全部, 不能延迟 (让 message 看起来"卡顿" 会很奇怪).
+// ====== v3.60.3: 真正逐字累加 + 呼吸节奏 ======
+//   v3.60.2 bug: tick 内部 `displayedContent.value = target` 立即同步全部, 节流没起作用.
+//   视觉上跟"没节流"一样, user 看不到过程.
+//   修法: tick 内部**真正累加**: 每次推进 1-2 chars, 配随机停顿.
+//   跟 v3.55 raw text 模式一样逐字符 (50Hz 整段 remount), 但**间隔 40-200ms** 而非 LLM 实际 20-50ms.
+//   视觉: 像"流光字"逐字出现, 不急不慢, 有呼吸.
+//   配合 mask-image 渐隐 (最后 48px) + ChatMain rAF scroll-to-bottom.
 
 const displayedContent = ref('');
 let queueTimer: ReturnType<typeof setTimeout> | null = null;
+let lastChar = '';  // 上一个吐的字符, 决定下一步幅
+let charsSincePause = 0;
 
-function pickNextInterval(): number {
+function pickInterval(): number {
   const r = Math.random();
-  if (r < 0.04) return 220 + Math.random() * 80;  // 4% 深度停顿 220-300ms
-  if (r < 0.20) return 90 + Math.random() * 50;   // 16% 中度停顿 90-140ms
-  return 40 + Math.random() * 30;                  // 80% 正常 40-70ms
+  // 标点符号后 80% 概率长停 (句子/段落节奏)
+  if ('。.!?！？\n'.includes(lastChar) && Math.random() < 0.6) {
+    return 180 + Math.random() * 120;  // 180-300ms 句子停顿
+  }
+  // 4% 深度停顿
+  if (r < 0.04) return 220 + Math.random() * 80;
+  // 16% 中度停顿
+  if (r < 0.20) return 100 + Math.random() * 50;
+  // 基础 40-70ms
+  return 40 + Math.random() * 30;
+}
+
+function pickStep(): number {
+  // 大部分 1 char, 偶尔 2 chars (中英文混排时偶尔)
+  return Math.random() < 0.7 ? 1 : 2;
 }
 
 function tick() {
   queueTimer = null;
   const target = props.content || '';
-  // 整段推到 target 当前值 (不切 char)
-  if (displayedContent.value !== target) {
-    displayedContent.value = target;
+  if (displayedContent.value.length >= target.length) {
+    return;
   }
-  // 如果还有未显示的 (LLM 还在 stream, target 还在涨), 继续 schedule
-  const next = props.content || '';
-  if (displayedContent.value.length < next.length) {
-    queueTimer = setTimeout(tick, pickNextInterval());
+  // 真正累加: 推进 1-2 chars
+  const step = pickStep();
+  const prevLen = displayedContent.value.length;
+  const nextLen = Math.min(prevLen + step, target.length);
+  const slice = target.slice(0, nextLen);
+  displayedContent.value = slice;
+  lastChar = slice.charAt(slice.length - 1);
+  charsSincePause += step;
+  // 如果还有, 继续 schedule
+  const remaining = target.length - nextLen;
+  if (remaining > 0) {
+    queueTimer = setTimeout(tick, pickInterval());
   }
 }
 
@@ -240,14 +259,15 @@ watch(
   () => [props.content, props.isStreaming] as const,
   ([content, streaming]) => {
     if (!streaming) {
-      // 切到非 streaming (message_end): 立即 flush 全部, 取消节流
+      // message_end: 立即 flush 全部, 取消节流 (不能让 message 卡顿)
       if (queueTimer) { clearTimeout(queueTimer); queueTimer = null; }
       displayedContent.value = content || '';
+      lastChar = displayedContent.value.charAt(displayedContent.value.length - 1);
       return;
     }
     // streaming: 启动节奏 (如果还没启)
     if (!queueTimer) {
-      queueTimer = setTimeout(tick, pickNextInterval());
+      queueTimer = setTimeout(tick, pickInterval());
     }
   },
   { immediate: true, deep: true },
