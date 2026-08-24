@@ -606,35 +606,39 @@ async function saveEditExternal() {
     </div>
 
     <!-- 2026-08-24 P3-G: Edit external tool manifest.json dialog -->
-    <div v-if="editingExtName" class="pad-toolstab__modal-backdrop" @click.self="cancelEditExternal">
-      <div class="pad-toolstab__modal">
-        <h3 class="pad-toolstab__modal-title">
-          <Edit3 :size="14" :stroke-width="1.75" />
-          <span>编辑 manifest.json: <code>{{ editingExtName }}</code></span>
-        </h3>
-        <p class="pad-toolstab__modal-desc">
-          改 description / parameters / env (含 <code>keychain:</code> 引用) / runtime / entry 等.
-          保存后触发静默重启, 下次对话生效. entry 文件 (Python 脚本) 不会动, 那个用编辑器改.
-        </p>
-        <textarea
-          v-model="editingExtJson"
-          class="pad-toolstab__modal-textarea"
-          spellcheck="false"
-          :rows="20"
-        />
-        <div class="pad-toolstab__modal-actions">
-          <button class="pad-toolstab__btn pad-toolstab__btn--ghost" @click="cancelEditExternal">取消</button>
-          <button
-            class="pad-toolstab__btn pad-toolstab__btn--primary"
-            :disabled="isSavingExt"
-            @click="saveEditExternal"
-          >
-            <Save :size="12" :stroke-width="1.75" />
-            <span>{{ isSavingExt ? '保存中…' : '保存并重启 sidecar' }}</span>
-          </button>
+    <!--   v3.24 fix: Teleport to body 避免父级 stacking context (transform / position) 干扰
+         z-index, 否则 modal 背景遮罩盖不住兄弟 stacking context 里的内容 -->
+    <Teleport to="body">
+      <div v-if="editingExtName" class="pad-toolstab__modal-backdrop" @click.self="cancelEditExternal">
+        <div class="pad-toolstab__modal">
+          <h3 class="pad-toolstab__modal-title">
+            <Edit3 :size="14" :stroke-width="1.75" />
+            <span>编辑 manifest.json: <code>{{ editingExtName }}</code></span>
+          </h3>
+          <p class="pad-toolstab__modal-desc">
+            改 description / parameters / env (含 <code>keychain:</code> 引用) / runtime / entry 等.
+            保存后触发静默重启, 下次对话生效. entry 文件 (Python 脚本) 不会动, 那个用编辑器改.
+          </p>
+          <textarea
+            v-model="editingExtJson"
+            class="pad-toolstab__modal-textarea"
+            spellcheck="false"
+            :rows="20"
+          />
+          <div class="pad-toolstab__modal-actions">
+            <button class="pad-toolstab__btn pad-toolstab__btn--ghost" @click="cancelEditExternal">取消</button>
+            <button
+              class="pad-toolstab__btn pad-toolstab__btn--primary"
+              :disabled="isSavingExt"
+              @click="saveEditExternal"
+            >
+              <Save :size="12" :stroke-width="1.75" />
+              <span>{{ isSavingExt ? '保存中…' : '保存并重启 sidecar' }}</span>
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 
@@ -1046,7 +1050,8 @@ async function saveEditExternal() {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  /* z-index 提到 9999 防止任何 stacking context 干扰, 配合 Teleport to body 双保险 */
+  z-index: 9999;
   padding: 20px;
 }
 .pad-toolstab__modal {
@@ -1056,11 +1061,14 @@ async function saveEditExternal() {
   padding: 20px;
   max-width: 720px;
   width: 100%;
+  /* v3.24: 用 90vh + flex column, 让 textarea flex 1 1 auto 弹性占满, 不会让 dialog 自身被内容撑出 */
   max-height: 90vh;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  /* v3.24: 禁止内容溢出, 内部 overflow auto */
+  overflow: hidden;
 }
 .pad-toolstab__modal-title {
   display: flex;
@@ -1070,6 +1078,7 @@ async function saveEditExternal() {
   font-size: var(--pad-fs-15, 15px);
   font-weight: var(--pad-fw-medium);
   color: var(--pad-fg-primary);
+  flex-shrink: 0;
 }
 .pad-toolstab__modal-title code {
   font-family: var(--pad-font-mono);
@@ -1081,6 +1090,7 @@ async function saveEditExternal() {
   font-size: var(--pad-fs-12, 12px);
   color: var(--pad-fg-secondary);
   line-height: 1.5;
+  flex-shrink: 0;
 }
 .pad-toolstab__modal-desc code {
   font-family: var(--pad-font-mono);
@@ -1089,10 +1099,11 @@ async function saveEditExternal() {
   padding: 1px 4px;
   border-radius: 3px;
 }
+/* v3.24: textarea 弹性占满剩余空间, min-height 0 关键 (flexbox 默认 min-height auto) */
 .pad-toolstab__modal-textarea {
   width: 100%;
-  flex: 1;
-  min-height: 200px;
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 10px 12px;
   font-family: var(--pad-font-mono);
   font-size: var(--pad-fs-12, 12px);
@@ -1101,7 +1112,7 @@ async function saveEditExternal() {
   border: 1px solid var(--pad-border);
   border-radius: var(--pad-radius-sm);
   color: var(--pad-fg-primary);
-  resize: vertical;
+  resize: none;  /* v3.24: 用 flex 控制高度, 不让 user 拖, 避免跟 modal 冲突 */
 }
 .pad-toolstab__modal-textarea:focus {
   outline: none;
@@ -1111,32 +1122,6 @@ async function saveEditExternal() {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-}
-.pad-toolstab__modal-result {
-  margin-top: 4px;
-  padding: 10px 12px;
-  background: var(--pad-bg-input);
-  border: 1px solid var(--pad-border);
-  border-radius: var(--pad-radius-sm);
-  max-height: 200px;
-  overflow: auto;
-}
-.pad-toolstab__modal-result.is-fail {
-  border-color: #c44;
-  background: rgba(196, 68, 68, 0.05);
-}
-.pad-toolstab__modal-result h4 {
-  margin: 0 0 6px 0;
-  font-size: var(--pad-fs-13, 13px);
-  font-weight: var(--pad-fw-medium);
-}
-.pad-toolstab__modal-result pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--pad-font-mono);
-  font-size: var(--pad-fs-12, 12px);
-  color: var(--pad-fg-secondary);
-  line-height: 1.5;
+  flex-shrink: 0;
 }
 </style>

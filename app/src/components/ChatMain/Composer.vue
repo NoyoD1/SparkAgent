@@ -18,6 +18,7 @@ import { useSkillsStore } from '@/stores/skills';
 import { useUserToolsStore } from '@/stores/userTools';
 import { useMcpServersStore } from '@/stores/mcpServers';
 import { useExtensionToolsStore } from '@/stores/extensionTools';
+import { useSlashStore } from '@/stores/slash';
 import { useComposerAttachmentsStore, type PendingImage, type PendingFile } from '@/stores/composerAttachments';
 import { piTauri } from '@/lib/tauri';
 import ContextIndicator from './ContextIndicator.vue';
@@ -30,12 +31,14 @@ const skillsStore = useSkillsStore();
 const userToolsStore = useUserToolsStore();
 const mcpServersStore = useMcpServersStore();
 const extensionToolsStore = useExtensionToolsStore();
+const slashStore = useSlashStore();
 const attachmentsStore = useComposerAttachmentsStore();
 const { activeSession } = storeToRefs(sessionStore);
 const { skills } = storeToRefs(skillsStore);
 const { tools: userTools } = storeToRefs(userToolsStore);
 const { servers: mcpServers } = storeToRefs(mcpServersStore);
 const { allExtensionTools } = storeToRefs(extensionToolsStore);
+const { commands: slashCommands } = storeToRefs(slashStore);
 
 const inputText = ref('');
 const showModelMenu = ref(false);
@@ -44,24 +47,25 @@ const showModelMenu = ref(false);
 //  user 16:24 拍板: agent 是边界定义/思维指导, 不需要切换, single agent 链路拉动
 // D214: slash 触发字符: 同时支持 "/" (传统) 和 "@" (新), @ 是"引用语法"
 //   主流编辑器 (Notion / Slack) 都用 @ 触发资源引用, 跟 "/" 命令区分开
+// 2026-08-24 P3-G+: 加 'Commands' group (user-defined slash templates 存 .pi/commands/*.md)
 const showSlashPopover = ref(false);
 const slashPopoverQuery = ref('');
 const slashPopoverTrigger = ref<'/' | '@' | null>(null);
 const slashPopoverCursor = ref(0);  // 当前选中项
-type RefKind = 'skill' | 'tool' | 'mcp' | 'extension';
+type RefKind = 'skill' | 'tool' | 'mcp' | 'extension' | 'command';
 // 2026-08-24 v3.22: 区分 source — kind='extension' 可能是 browser (内置 web_*) 或 external (Tavily)
 //   pickSlashItem 据此决定走 modal (external 真调) 还是关 popover (browser LLM 直接调)
-type ToolSource = 'browser' | 'external' | 'mcp' | 'user-tool' | 'skill';
+type ToolSource = 'browser' | 'external' | 'mcp' | 'user-tool' | 'skill' | 'command';
 
 interface SlashItem {
-  group: 'Skills' | 'Tools' | 'MCP';
+  group: 'Skills' | 'Tools' | 'MCP' | 'Commands';
   slug: string;       // 显示用, e.g. /skill:code-review 或 @skill:code-review
   label: string;
   description: string;
   isPlaceholder?: boolean;
   kind?: RefKind;     // 资源类型, force-read 时区分
   name?: string;      // 资源名
-  source?: ToolSource;  // 跟 kind 配合, 区分 browser/external/mcp/user-tool
+  source?: ToolSource;  // 跟 kind 配合, 区分 browser/external/mcp/user-tool/command
 }
 const slashItems = computed<SlashItem[]>(() => {
   const out: SlashItem[] = [];
@@ -126,6 +130,30 @@ const slashItems = computed<SlashItem[]>(() => {
       });
     }
   }
+  // 4. User 自定义 slash command (P3-G+: 之前 v0.4.5.2 注释说"暂不显示", 这次接入)
+  //   模板存 <workspace>/.pi/commands/<name>.md (frontmatter name/description + body)
+  //   选后插 marker [[ref:command:<name>]], reference body 走 command.body (markdown)
+  if (slashCommands.value.length === 0) {
+    out.push({
+      group: 'Commands',
+      slug: '@cmd:',
+      label: '(暂无可用)',
+      description: '没自定义 command, 去 Settings → Slash 添加',
+      isPlaceholder: true,
+    });
+  } else {
+    for (const c of slashCommands.value) {
+      out.push({
+        group: 'Commands',
+        slug: `@cmd:${c.name}`,
+        label: c.name,
+        description: c.description || '(无描述)',
+        kind: 'command',
+        name: c.name,
+        source: 'command',
+      });
+    }
+  }
   return out;
 });
 const filteredSlashItems = computed<SlashItem[]>(() => {
@@ -150,7 +178,8 @@ const isComposing = ref(false);  // IME 中文输入中
 
 // Marker regex — 文本里出现的 [[ref:kind:name]] 渲染成 chip
 // 注意: kind 跟 name 不含空白 / ]]
-const REF_RE = /\[\[ref:(skill|tool|mcp):([^\s\]]+)\]\]/g;
+// 2026-08-24 P3-G: 加 extension (external tool, 走 listExternalTools 拿 raw manifest) + command (slash 模板)
+const REF_RE = /\[\[ref:(skill|tool|mcp|extension|command):([^\s\]]+)\]\]/g;
 
 function escapeHtml(s: string): string {
   return s
@@ -937,6 +966,7 @@ watch(inputText, () => {
 // D214: 主动 load 3 个 store, 确保 popover 里有数据
 //   之前完全靠 sidecar snapshot event, 启动时序问题 / 没访问 Tools/MCP tab
 //   都会导致 store 是空的. 现在 on popover open 时主动 refresh
+// 2026-08-24 P3-G+: 加 slash refresh (之前 store 是空的, popover 看不到自定义 command)
 let _ensureLoadedPromise: Promise<void> | null = null;
 async function ensureResourcesLoaded() {
   if (_ensureLoadedPromise) return _ensureLoadedPromise;
@@ -946,6 +976,8 @@ async function ensureResourcesLoaded() {
     // User tools + MCP: 走 store 自带的 refresh
     try { await userToolsStore.refresh(); } catch (e) { console.warn('[Composer] userTools refresh failed:', e); }
     try { await mcpServersStore.refresh(); } catch (e) { console.warn('[Composer] mcpServers refresh failed:', e); }
+    // 2026-08-24 P3-G+: slash command 走 Tauri list_commands
+    try { await slashStore.refreshFromTauri(); } catch (e) { console.warn('[Composer] slash commands refresh failed:', e); }
   })();
   return _ensureLoadedPromise;
 }
@@ -1323,6 +1355,16 @@ async function send() {
           }, null, 2);
         }
         refs.push({ kind: 'extension', name: ref.name, body });
+      } else if (ref.kind === 'command') {
+        // 2026-08-24 P3-G+: user-defined slash command 模板 (存 <workspace>/.pi/commands/<name>.md)
+        //   body 是 markdown, 走 slash store 已经加载的 commands, 直接拿 body.
+        //   跟 skill 一样的 pattern (存文件 + body 直接当 prompt 注入, 不需要解析 schema).
+        const cached = slashStore.commands.find((c) => c.name === ref.name);
+        if (!cached) {
+          console.warn(`[Composer] command not found: ${ref.name}`);
+          continue;
+        }
+        refs.push({ kind: 'command', name: ref.name, body: cached.body });
       }
     } catch (e) {
       console.warn(`[Composer] read ${ref.kind} ${ref.name} failed:`, e);
@@ -1340,7 +1382,13 @@ async function send() {
     const refSection = refs
       .map((r) => `<reference type="${r.kind}" name="${r.name}">\n${r.body}\n</reference>`)
       .join('\n\n');
-    llmText = `${refSection}\n\n---\n\n${text}`;
+    // 2026-08-24 P3-G+: 加 "请使用此" instruction, 防止 LLM 看到 reference body 但忽略 (把 marker 当普通文本)
+    //   user 痛点: "现在我明确引用了'/'的指令, LLM 容易理解偏"
+    //   让 LLM 明确知道 user 主动引用了这些 resource, 优先用这些回答
+    const instruction = refs
+      .map((r) => `- 请使用此 ${r.kind}: ${r.name}`)
+      .join('\n');
+    llmText = `${refSection}\n\n---\n\n## Instructions (user explicit referenced)\n${instruction}\n\n---\n\n${text}`;
     console.log(`[Composer] embedded ${refs.length} reference(s) into LLM prompt: ${refs.map((r) => `${r.kind}:${r.name}`).join(', ')}`);
   }
   // D214 v7: last-mentioned tracking (隐式 ref 续接)
@@ -1393,9 +1441,13 @@ async function send() {
       }
       if (recentBodies.length > 0) {
         // recent_refs 走单独的 wrapper, 跟显式 <reference> 区分 (前者是 LLM 隐式 context)
+        // 2026-08-24 P3-G+: 隐式 ref 也给 instruction, 让 LLM 知道这是上一句的续接 context
+        const recentInstruction = recentBodies
+          .map((x) => `- (上一句引用过) ${x.ref.kind}: ${x.ref.name}`)
+          .join('\n');
         const recentSection = `<recent_refs>\n<!-- 最近提到的 ref, 不在当前 message 显式 mention. 用途: 处理 "再分析一下" 这类隐式续接, LLM 仍能看到完整 context -->\n${recentBodies
           .map((x) => `<reference type="${x.ref.kind}" name="${x.ref.name}">\n${x.body}\n</reference>`)
-          .join('\n\n')}\n</recent_refs>`;
+          .join('\n\n')}\n\n## Instructions (recent mentioned)\n${recentInstruction}\n</recent_refs>`;
         llmText = `${llmText}\n\n${recentSection}`;
         console.log(`[Composer] embedded ${recentBodies.length} recent ref(s) into LLM prompt: ${recentBodies.map((x) => `${x.ref.kind}:${x.ref.name}`).join(', ')}`);
       }
@@ -1651,13 +1703,15 @@ onMounted(() => {
     </div>
 
     <!-- v0.4.7a: Composer / popover 3 类 (skill / agent / mcp, 不含 builtin 22) -->
+    <!--   P3-G+: 加 'Commands' 组 (user-defined slash templates) -->
     <div v-if="showSlashPopover" ref="slashPopoverRef" class="pad-composer__slash-popover">
       <div v-if="filteredSlashItems.length === 0" class="pad-composer__slash-empty">
         <span>没有匹配的项</span>
       </div>
       <div v-else class="pad-composer__slash-list">
-        <!-- D214: 改用 'Skills' | 'Tools' | 'MCP' 三组, 旧 '扩展' group 已删 -->
-        <template v-for="group in ['Skills', 'Tools', 'MCP']" :key="group">
+        <!-- D214: 'Skills' | 'Tools' | 'MCP' 三组, 旧 '扩展' group 已删 -->
+        <!--   P3-G+: 加 'Commands' (user-defined slash templates) -->
+        <template v-for="group in ['Skills', 'Tools', 'MCP', 'Commands']" :key="group">
           <div v-if="filteredSlashItems.some((it) => it.group === group)" class="pad-composer__slash-group-label">
             {{ group }}
           </div>
