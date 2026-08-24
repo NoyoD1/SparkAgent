@@ -167,7 +167,11 @@ function onClickOutside(e: MouseEvent) {
   showLocalMenu.value = false;
 }
 onMounted(() => document.addEventListener('click', onClickOutside));
-onUnmounted(() => document.removeEventListener('click', onClickOutside));
+onUnmounted(() => {
+  document.removeEventListener('click', onClickOutside);
+  // v3.60: 清理 rAF 循环
+  stopStreamingScroll();
+});
 
 const defaultHint = computed(() => '~/PiAgent');
 
@@ -201,6 +205,49 @@ function onJumpToBottom() {
   showScrollToBottom.value = false;
 }
 
+// ====== 2026-08-25 v3.60: streaming 期间 rAF 强制 scroll-to-bottom ======
+//   user 反馈: "目前只有正文回复时自动滚动, 我希望只要有回复都自动滚动"
+//   修法: 监听 isStreaming 状态, streaming 期间 rAF 主动 scroll to bottom (if isNearBottom).
+//   这样不管 user 在 chat store 哪一层 patch content, 都跟随.
+//   user 主动上滑时 isNearBottom=false, 暂停跟随, 顶部出现"回到底部"按钮.
+let streamingRafId: number | null = null;
+function startStreamingScroll() {
+  if (streamingRafId !== null) return;
+  const tick = () => {
+    if (!isNearBottom.value) {
+      streamingRafId = null;
+      return;
+    }
+    scrollToBottom(false);  // 'auto' 行为, 不动画, 不卡顿
+    streamingRafId = requestAnimationFrame(tick);
+  };
+  streamingRafId = requestAnimationFrame(tick);
+}
+function stopStreamingScroll() {
+  if (streamingRafId !== null) {
+    cancelAnimationFrame(streamingRafId);
+    streamingRafId = null;
+  }
+}
+
+// streaming 状态变化时启停 rAF
+watch(
+  () => isSessionStreaming.value,  // 用 line 53 那个 computed (基于 isStreamingSession)
+  (now) => {
+    if (now) {
+      // 重新进入 streaming: 重置 isNearBottom (新消息自动跟随)
+      isNearBottom.value = true;
+      showScrollToBottom.value = false;
+      startStreamingScroll();
+    } else {
+      stopStreamingScroll();
+      // streaming 结束, 滚一次到最终位置
+      nextTick(() => scrollToBottom(false));
+    }
+  },
+  { immediate: true },
+);
+
 watch(
   () => messages.value.length,
   () => {
@@ -209,14 +256,27 @@ watch(
   },
 );
 
+// v3.60: watch last 消息的 content + steps[].stepText 总长度, 任何 streaming 文本累积都触发.
+//   之前只 watch content.length, 漏了 stepText (per-step model output).
 watch(
   () => {
     const last = messages.value[messages.value.length - 1];
-    return last?.id ? last.content.length : 0;
+    if (!last?.id) return 0;
+    let total = (last.content || '').length;
+    if (last.steps) {
+      for (const s of last.steps) {
+        total += (s.stepText || '').length;
+        if (s.thinking) {
+          for (const t of s.thinking) total += (t.content || '').length;
+        }
+      }
+    }
+    return total;
   },
   () => {
     if (!isNearBottom.value) return;
-    nextTick(() => scrollToBottom(true));
+    // 不强制 smooth, 避免 rAF 期间 smooth 动画叠在一起卡
+    nextTick(() => scrollToBottom(false));
   },
 );
 

@@ -26,6 +26,9 @@ import 'katex/dist/katex.min.css';
 
 interface Props {
   content: string;
+  /** v3.60: streaming 时, 内容底部 mask-image 渐隐 (新 text 像"阳光铺满墙面"一样进入)
+   *          比逐字 pop-in 更有节奏感.  父组件 ChatMessage 传 isStreaming 进来. */
+  isStreaming?: boolean;
 }
 const props = defineProps<Props>();
 
@@ -211,7 +214,13 @@ function onContentClick(e: MouseEvent) {
 </script>
 
 <template>
-  <div ref="rootRef" class="pad-md" v-html="html" @click="onContentClick" />
+  <div
+    ref="rootRef"
+    class="pad-md"
+    :class="{ 'is-streaming': props.isStreaming }"
+    v-html="html"
+    @click="onContentClick"
+  />
 </template>
 
 <style>
@@ -222,6 +231,17 @@ function onContentClick(e: MouseEvent) {
   color: var(--pad-fg-primary);
   word-wrap: break-word;
   overflow-wrap: break-word;
+}
+/* v3.60: streaming 时, 内容底部 96px mask-image 渐隐.
+   新 text 从 viewport 底部进入时, 像是被光照亮 (而不是逐字 pop-in).
+   user 反馈"消隐方式, 一段一段像阳光铺满墙面". */
+.pad-md.is-streaming {
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 96px), transparent 100%);
+  mask-image: linear-gradient(to bottom, black calc(100% - 96px), transparent 100%);
+  -webkit-mask-mode: luminance;
+  mask-mode: luminance;
+  /* 渐隐本身作为最后一段"未完全显示"的视觉缓冲, 避免字面"截断"在屏幕边缘. */
+  padding-bottom: 4px;
 }
 .pad-md > *:first-child { margin-top: 0; }
 .pad-md > *:last-child { margin-bottom: 0; }
