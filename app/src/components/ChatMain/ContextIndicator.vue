@@ -32,29 +32,14 @@ import { storeToRefs } from 'pinia';
 import { BarChart3, ChevronDown, Archive, Loader2 } from 'lucide-vue-next';
 import { useChatStore } from '@/stores/chat';
 import { useSessionStore } from '@/stores/session';
-import { useConfigStore } from '@/stores/config';
 
 const chatStore = useChatStore();
 const sessionStore = useSessionStore();
-const configStore = useConfigStore();
-const { activeSessionId } = storeToRefs(sessionStore);
-// v0.6 (Bug1 fix): popover 显示当前 session 用的 model, 不是 configStore.activeModel
-//   原因: Composer 切 model 改的是 session.modelId (per-session), configStore.activeModel 是全局默认值
-//   user 反馈: 切到 MiniMax-M3 后, popover 顶部还显示 deepseek-v4-flash (上次的 model)
-//   修法: getSessionModelId 优先取 session.modelId, fallback 到全局 activeModelId
-const { allEnabledModels } = storeToRefs(configStore);
-const currentModelLabel = computed<string>(() => {
-  const sid = activeSessionId.value;
-  if (!sid) return '—';
-  const modelId = sessionStore.getSessionModelId(sid);
-  if (!modelId) return '—';
-  // 在 allEnabledModels 里找 (跨 provider 找)
-  const found = allEnabledModels.value.find((x) => x.model.id === modelId);
-  if (found) return found.model.label || found.model.id;
-  // 找不到 (e.g. model id 不在 enabled 列表里, 可能用户删了), 直接显示 id
-  return modelId;
-});
 const { activeSession } = storeToRefs(sessionStore);
+// v3.30: configStore / activeSessionId 不再被 popover 引用 (v3.29 用了, v3.30 删了 model
+//   名的 derived 之后也没 caller). import 也保留 (后续如果要在 popover 读 model 走 import).
+//   实际其他 store 调用: sessionStore.isStreaming / sessionStore.activeSession / sessionStore
+//   还用, 留着. configStore.unused — 删 import + const.
 
 const showPopover = ref(false);
 const popoverRef = ref<HTMLElement | null>(null);
