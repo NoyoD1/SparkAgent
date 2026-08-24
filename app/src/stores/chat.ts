@@ -1767,9 +1767,9 @@ export const useChatStore = defineStore('chat', () => {
       const active = config.activeProvider;
       const model = config.activeModel;
       console.log('[chat] sendPrompt: active=', active?.label, 'model=', model?.id);
-      if (!active || !model) {
-        throw new Error('请先在 Settings → Providers 添加并选一个 active provider + model');
-      }
+      // 2026-08-24 v3.27: 之前这里 throw '请先在 Settings → Providers...' 把 user 痛点触发了.
+      //   移到下面 effective fallback 之后, 走三段 fallback + provider.models[0] 兜底 + toast 提示.
+      //   (line 1810 那段才是真正的 final check, 这里只 log)
       // v0.3.8.11: 注入当前 active workspace 的 path 作为 system message
       // (从 sessionStore 取 activeWorkspace.path, 让 LLM 知道在哪个目录下操作)
       const activeWs = sessionStore.activeWorkspace;
@@ -1805,10 +1805,33 @@ export const useChatStore = defineStore('chat', () => {
         ? effectiveProvider.models.find((m) => m.id === sessionModelId) ?? null
         : null;
       if (!effectiveModel) effectiveModel = effectiveProvider.models.find((m) => m.id === effectiveProvider.activeModelId) ?? null;
-      if (!effectiveModel) effectiveModel = model;  // 最后兜底: 全局 active
+      if (!effectiveModel) effectiveModel = model;  // 全局 active
+      // 2026-08-24 v3.27: 兜底 — provider.models[0] (之前是 throw, 但 user 痛点说 '用户在会话时自己选模型',
+      //   不应阻塞发消息). 实际场景: user 选了 provider 但没设 activeModelId, 或 model 字段没保存.
+      //   兜底用 provider 第一个 model, 弹 toast 提示, 让 user 在 model picker 显式选.
+      let autoFallbackUsed = false;
+      if (!effectiveModel && effectiveProvider?.models.length) {
+        effectiveModel = effectiveProvider.models[0];
+        autoFallbackUsed = true;
+      }
       console.log('[chat] sendPrompt: session=', sessionId, 'effectiveProvider=', effectiveProvider?.label, 'model=', effectiveModel?.id, 'permissionMode=', sessionPermissionMode);
       if (!effectiveProvider || !effectiveModel) {
-        throw new Error('请先在 Settings → Providers 添加并选一个 active provider + model');
+        // 真没 model (provider.models 也是空) — 弹 toast + return, 不 throw
+        //   user 痛点: '应该不阻塞发消息', 但完全没 model 还是没法 send. 给明确提示.
+        useUiStore().showToast(
+          `未配置 model: ${effectiveProvider?.label ?? '无 provider'}. 去 Settings → Providers 选 model`,
+          'error',
+          5000,
+        );
+        return;
+      }
+      if (autoFallbackUsed) {
+        // 一次性提示, 引导 user 在 model picker 显式选
+        useUiStore().showToast(
+          `未选 model, 用 provider 默认: ${effectiveModel.id}. (model picker 可改)`,
+          'info',
+          3500,
+        );
       }
       const cfgFn = () => ({
         providerId: effectiveProvider.id,
@@ -1925,6 +1948,10 @@ export const useChatStore = defineStore('chat', () => {
       : null;
     if (!effectiveModel) effectiveModel = effectiveProvider.models.find((m) => m.id === effectiveProvider.activeModelId) ?? null;
     if (!effectiveModel) effectiveModel = model;
+    // 2026-08-24 v3.27: 兜底 provider.models[0] (跟 sendPrompt 同 pattern)
+    if (!effectiveModel && effectiveProvider?.models.length) {
+      effectiveModel = effectiveProvider.models[0];
+    }
     if (!effectiveProvider || !effectiveModel) {
       useUiStore().showToast('未配置 provider + model, 无法压缩', 'error');
       return;
