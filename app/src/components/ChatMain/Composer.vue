@@ -650,6 +650,13 @@ const providerTypeLabel = computed(() => {
 
 const hasConfig = computed(() => !!activeProvider.value && !!activeModel.value);
 
+// v3.32: model picker chip 用, 跟 chat.ts fmtCtx 同款 (1M / 1K / raw)
+const formatCw = (n: number): string => {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(0)}K`;
+  return String(n);
+};
+
 const isStreaming = computed(() =>
   activeSession.value ? chatStore.isStreamingSession(activeSession.value.id) : false,
 );
@@ -1955,6 +1962,16 @@ onMounted(() => {
                 >
                   <span class="pad-composer__model-menu-item-body">
                     <span class="pad-composer__model-menu-item-id">{{ m.id }}</span>
+                    <!-- v3.32: 加 capability chip (vision / reasoning / ctx), 跟 Settings 详情一致
+                         user 反馈: '加上标识, 跟我设置面板那边一致'. 这样切 model 时一眼能看到
+                         vision / reasoning / context window 跟 Settings 详情同步. -->
+                    <span v-if="m.vision || m.reasoning || m.contextWindow" class="pad-composer__model-menu-item-chips">
+                      <span v-if="m.vision" class="pad-composer__model-menu-item-chip" title="支持图片输入 (多模态)">vision</span>
+                      <span v-if="m.reasoning" class="pad-composer__model-menu-item-chip" title="思考模型 (extended thinking)">reasoning</span>
+                      <span v-if="m.contextWindow" class="pad-composer__model-menu-item-chip" :title="`上下文窗口 ${m.contextWindow.toLocaleString()} tokens`">
+                        {{ formatCw(m.contextWindow) }}
+                      </span>
+                    </span>
                     <span v-if="m.label" class="pad-composer__model-menu-item-label">{{ m.label }}</span>
                   </span>
                   <Check
@@ -3009,6 +3026,40 @@ onMounted(() => {
   flex-shrink: 0;
   width: 16px;
   height: 16px;
+}
+
+/* v3.32: model picker capability chip (跟 Settings 详情一致)
+   user 反馈: '加上标识, 跟我设置面板那边一致'.
+   - vision (绿) 支持图片
+   - reasoning (紫) 思考模型
+   - 1M / 100K 上下文窗口 */
+.pad-composer__model-menu-item-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  flex-wrap: wrap;
+}
+.pad-composer__model-menu-item-chip {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: var(--pad-fw-medium, 500);
+  padding: 1px 5px;
+  border-radius: var(--pad-radius-pill, 999px);
+  background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.05));
+  color: var(--pad-fg-secondary, #52525b);
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.pad-composer__model-menu-item-chip[title*="支持图片"] {
+  background: rgba(22, 163, 74, 0.12);  /* 绿: vision */
+  color: #16a34a;
+}
+.pad-composer__model-menu-item-chip[title*="思考"] {
+  background: rgba(124, 58, 237, 0.12);  /* 紫: reasoning */
+  color: #7c3aed;
 }
 .pad-composer__model-menu-empty {
   padding: 6px 14px 8px;

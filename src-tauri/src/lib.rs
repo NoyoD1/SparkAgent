@@ -459,11 +459,11 @@ async fn ensure_browser_window(app: &tauri::AppHandle) -> Result<tauri::WebviewW
 async fn ensure_ephemeral_browser(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
     // label 唯一 (uuid v4). 旧 ephemeral 残留 (上次没 destroy 干净) 顺手清掉.
     let label = format!("pi-browser-ephemeral-{}", uuid::Uuid::new_v4());
-    for w in app.webview_windows() {
-        let l = w.label().to_string();
-        if l.starts_with("pi-browser-ephemeral-") && l != label {
-            log::info!("[browser] cleanup leftover ephemeral: {l}");
-            let _ = w.destroy();
+    // 清理之前残留的 ephemeral (webview_windows() 返 HashMap, iter 出来是 (label, window) tuple)
+    for (existing_label, win) in app.webview_windows() {
+        if existing_label.starts_with("pi-browser-ephemeral-") && existing_label != label {
+            log::info!("[browser] cleanup leftover ephemeral: {existing_label}");
+            let _ = win.destroy();
         }
     }
     let window = WebviewWindowBuilder::new(
@@ -3448,6 +3448,21 @@ async fn send_prompt(
         config.provider,
         config.model,
     ));
+    // 2026-08-24 v3.32: 调试 vision 传图 — 打印 images 序列化后 payload (mimeType + data 长度 + 前 50 字符 base64)
+    //   user 反馈 '设了多模态但发不出带图片的消息'. 实际可能: Pi SDK 0.84.2 openai-completions adapter
+    //   不识别我们的 ImageContent, 或者缺 data URL 前缀, 或者 mm.vision 没传过去.
+    //   debug log 让 user 跑一次发图, 我能直接看 payload 格式.
+    if let Some(imgs) = images.as_ref() {
+        if !imgs.is_empty() {
+            for (i, img) in imgs.iter().enumerate() {
+                let data_preview = img.data.chars().take(50).collect::<String>();
+                debug_log(&format!(
+                    "send_prompt: image[{}] mimeType={} data_len={} preview={}...",
+                    i, img.mime_type, img.data.len(), data_preview
+                ));
+            }
+        }
+    }
     if content.trim().is_empty() && images.as_ref().map(|v| v.is_empty()).unwrap_or(true) {
         return Err("content and images are both empty".to_string());
     }
