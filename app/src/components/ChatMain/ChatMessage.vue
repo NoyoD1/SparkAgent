@@ -841,7 +841,7 @@ const statusText = computed(() => {
         class="pad-msg__body"
         :class="{ 'pad-msg__body--current': idx === (steps || []).length - 1 && isStreaming }"
       >
-        <MarkdownContent :content="step.stepText" :is-streaming="isStreaming" />
+        <MarkdownContent :content="step.stepText" />
       </div>
     </template>
 

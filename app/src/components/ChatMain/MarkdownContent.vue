@@ -17,8 +17,7 @@
  * - post-processor: 文件路径 → <a class="pad-md-path">
  * - post-processor: v18+ **bold** 边界补丁 (跟 memory 教训一致, 防升级踩坑)
  */
-import { computed, ref, onMounted, onUpdated, nextTick, watch } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
+import { computed, ref, onMounted, onUpdated, nextTick } from 'vue';
 import { Marked } from 'marked';
 import hljs from 'highlight.js';
 import katex from 'katex';
@@ -27,9 +26,6 @@ import 'katex/dist/katex.min.css';
 
 interface Props {
   content: string;
-  /** v3.60: streaming 时, 内容底部 mask-image 渐隐 (新 text 像"阳光铺满墙面"一样进入)
-   *          比逐字 pop-in 更有节奏感.  父组件 ChatMessage 传 isStreaming 进来. */
-  isStreaming?: boolean;
 }
 const props = defineProps<Props>();
 
@@ -47,7 +43,7 @@ m.use({
 });
 
 const html = computed(() => {
-  let input = displayedContent.value || '';
+  let input = props.content || '';
   // v0.3.8.11: 把 LLM 输出里的 literal `\n` `\t` 转成真换行/制表符
   // (LLM 偶尔会输出 "\\n" 字符串而不是真换行, 之前 marked + breaks:true 不处理这两个字符)
   input = input.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
@@ -203,98 +199,6 @@ const rootRef = ref<HTMLElement | null>(null);
 onMounted(() => nextTick(() => injectCopyButtons(rootRef.value)));
 onUpdated(() => nextTick(() => injectCopyButtons(rootRef.value)));
 
-// ====== v3.60.3: 真正逐字累加 + 呼吸节奏 ======
-//   v3.60.2 bug: tick 内部 `displayedContent.value = target` 立即同步全部, 节流没起作用.
-//   视觉上跟"没节流"一样, user 看不到过程.
-//   修法: tick 内部**真正累加**: 每次推进 1-2 chars, 配随机停顿.
-//   跟 v3.55 raw text 模式一样逐字符 (50Hz 整段 remount), 但**间隔 40-200ms** 而非 LLM 实际 20-50ms.
-//   视觉: 像"流光字"逐字出现, 不急不慢, 有呼吸.
-//   配合 mask-image 渐隐 (最后 48px) + ChatMain rAF scroll-to-bottom.
-
-const displayedContent = ref('');
-let queueTimer: ReturnType<typeof setTimeout> | null = null;
-let lastChar = '';  // 上一个吐的字符, 决定下一步幅
-let charsSincePause = 0;
-
-function pickInterval(): number {
-  const r = Math.random();
-  // 标点符号后 80% 概率长停 (句子/段落节奏)
-  if ('。.!?！？\n'.includes(lastChar) && Math.random() < 0.6) {
-    return 180 + Math.random() * 120;  // 180-300ms 句子停顿
-  }
-  // 4% 深度停顿
-  if (r < 0.04) return 220 + Math.random() * 80;
-  // 16% 中度停顿
-  if (r < 0.20) return 100 + Math.random() * 50;
-  // 基础 40-70ms
-  return 40 + Math.random() * 30;
-}
-
-function pickStep(): number {
-  // 大部分 1 char, 偶尔 2 chars (中英文混排时偶尔)
-  return Math.random() < 0.7 ? 1 : 2;
-}
-
-function diag(msg: string) {
-  // 写 .tauri-debug.log (跟之前 D213 一样), WebView2 DevTools 之外能看
-  invoke('diag_log', { msg: `[MarkdownContent] ${msg}` }).catch(() => {});
-}
-
-function tick() {
-  queueTimer = null;
-  const target = props.content || '';
-  if (displayedContent.value.length >= target.length) {
-    diag(`tick: displayed already at target length=${displayedContent.value.length}`);
-    return;
-  }
-  const step = pickStep();
-  const prevLen = displayedContent.value.length;
-  const nextLen = Math.min(prevLen + step, target.length);
-  const slice = target.slice(0, nextLen);
-  displayedContent.value = slice;
-  lastChar = slice.charAt(slice.length - 1);
-  charsSincePause += step;
-  diag(`tick: prev=${prevLen} → next=${nextLen}, lastChar=${JSON.stringify(lastChar)}`);
-  const remaining = target.length - nextLen;
-  if (remaining > 0) {
-    queueTimer = setTimeout(tick, pickInterval());
-  }
-}
-
-// 拆成 2 个 watch, 不用 array + deep (v3.60.4 排查可能 array watch 不可靠)
-watch(
-  () => props.content,
-  (content) => {
-    diag(`content watch: len=${content.length}`);
-    if (!props.isStreaming) return;  // 非 streaming 走 isStreaming watch
-    if (!queueTimer) {
-      diag(`content watch: start tick (queueTimer was null)`);
-      queueTimer = setTimeout(tick, pickInterval());
-    }
-  },
-);
-
-watch(
-  () => props.isStreaming,
-  (streaming) => {
-    diag(`isStreaming watch: ${streaming}`);
-    if (!streaming) {
-      // message_end: 立即 flush
-      if (queueTimer) { clearTimeout(queueTimer); queueTimer = null; }
-      displayedContent.value = props.content || '';
-      lastChar = displayedContent.value.charAt(displayedContent.value.length - 1);
-      diag(`message_end: flush all, len=${displayedContent.value.length}`);
-      return;
-    }
-    // streaming 启动, 调度 tick
-    if (!queueTimer) {
-      diag(`isStreaming watch: start tick`);
-      queueTimer = setTimeout(tick, pickInterval());
-    }
-  },
-  { immediate: true },
-);
-
 /** 点击文件路径链接: 复制路径到剪贴板 (未来可拓展为在 editor 打开) */
 function onContentClick(e: MouseEvent) {
   const target = e.target as HTMLElement;
@@ -307,13 +211,7 @@ function onContentClick(e: MouseEvent) {
 </script>
 
 <template>
-  <div
-    ref="rootRef"
-    class="pad-md"
-    :class="{ 'is-streaming': props.isStreaming }"
-    v-html="html"
-    @click="onContentClick"
-  />
+  <div ref="rootRef" class="pad-md" v-html="html" @click="onContentClick" />
 </template>
 
 <style>
@@ -325,19 +223,6 @@ function onContentClick(e: MouseEvent) {
   word-wrap: break-word;
   overflow-wrap: break-word;
 }
-/* v3.60.2: streaming 节奏控制 — 走的是"打字机 + 呼吸感" (displayedContent
-   自适应节流), 不靠 CSS animation. 这里只留 mask-image 作为最后视觉缓冲,
-   避免新内容在屏幕边缘硬截断 (滚动到底时最后一行自然淡出). */
-.pad-md.is-streaming {
-  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 48px), transparent 100%);
-  mask-image: linear-gradient(to bottom, black calc(100% - 48px), transparent 100%);
-  -webkit-mask-mode: luminance;
-  mask-mode: luminance;
-  padding-bottom: 4px;
-}
-
-/* v3.60.2: 不再使用 Transition + animation, 节奏靠 displayedContent 自适应节流.
-   保留 mask-image 作为最后视觉缓冲. */
 .pad-md > *:first-child { margin-top: 0; }
 .pad-md > *:last-child { margin-bottom: 0; }
 .pad-md p { margin: 0 0 8px; }
