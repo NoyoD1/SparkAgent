@@ -261,23 +261,38 @@ function tick() {
   }
 }
 
+// 拆成 2 个 watch, 不用 array + deep (v3.60.4 排查可能 array watch 不可靠)
 watch(
-  () => [props.content, props.isStreaming] as const,
-  ([content, streaming]) => {
-    diag(`watch trigger: streaming=${streaming}, contentLen=${content.length}`);
+  () => props.content,
+  (content) => {
+    diag(`content watch: len=${content.length}`);
+    if (!props.isStreaming) return;  // 非 streaming 走 isStreaming watch
+    if (!queueTimer) {
+      diag(`content watch: start tick (queueTimer was null)`);
+      queueTimer = setTimeout(tick, pickInterval());
+    }
+  },
+);
+
+watch(
+  () => props.isStreaming,
+  (streaming) => {
+    diag(`isStreaming watch: ${streaming}`);
     if (!streaming) {
+      // message_end: 立即 flush
       if (queueTimer) { clearTimeout(queueTimer); queueTimer = null; }
-      displayedContent.value = content || '';
+      displayedContent.value = props.content || '';
       lastChar = displayedContent.value.charAt(displayedContent.value.length - 1);
       diag(`message_end: flush all, len=${displayedContent.value.length}`);
       return;
     }
+    // streaming 启动, 调度 tick
     if (!queueTimer) {
-      diag(`streaming start: schedule first tick`);
+      diag(`isStreaming watch: start tick`);
       queueTimer = setTimeout(tick, pickInterval());
     }
   },
-  { immediate: true, deep: true },
+  { immediate: true },
 );
 
 /** 点击文件路径链接: 复制路径到剪贴板 (未来可拓展为在 editor 打开) */
