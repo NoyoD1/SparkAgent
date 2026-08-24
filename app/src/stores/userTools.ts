@@ -52,7 +52,7 @@ export const useUserToolsStore = defineStore('userTools', () => {
   async function refresh() {
     const sessionStore = useSessionStore();
     const ws = sessionStore.activeWorkspace;
-    // agentDir 跟 Skills/Commands 一样, 从 keychain? 不, agentDir 是固定的 OS 路径
+    // agentDir 跟 Skills/Commands 一样, 从 settings.json? 不, agentDir 是固定的 OS 路径
     //   (Pi SDK 0.84.2 getAgentDir() = <userHome>/.pi/agent 或 <APPDATA>/pi-agent)
     //   FE 端没有直接 invoke getAgentDir, 但 Rust 端 list_user_tools / read / write / delete
     //   接受 agentDir=null 时 fallback. 这里我们直接传 null, 让 Rust 端 fallback.

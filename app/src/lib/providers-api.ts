@@ -2,7 +2,8 @@
  * Provider model fetch — Phase 3 Tauri 版
  *
  * 走 Tauri command 'fetch_provider_models' (Rust 用 ureq 调 {baseUrl}/models).
- * apiKey 从 OS keychain 读 (Rust 拿, 不进前端).
+ * apiKey 从 settings.json 读 (Rust 拿, 不进前端协议).
+ *   v3.37 (2026-08-24): 之前走 OS keychain, v3.37 完全移除 keychain 依赖, apiKey 改存 settings.json.
  *
  * v0.5.0-D D213: 返回 model 自带 metadata (catalog 自动填 / openai-compatible 启发式 parse)
  *
@@ -27,7 +28,7 @@ export interface ModelInfo {
 export interface FetchModelsRequest {
   type: string;
   baseUrl?: string;
-  /** Phase 3: Tauri 用 providerId 查 keychain (前端不再需要 apiKey) */
+  /** v3.37: Tauri 用 providerId 查 settings.json (前端不再需要 apiKey) */
   providerId: string;
 }
 

@@ -616,7 +616,7 @@ async function saveEditExternal() {
             <span>编辑 manifest.json: <code>{{ editingExtName }}</code></span>
           </h3>
           <p class="pad-toolstab__modal-desc">
-            改 description / parameters / env (含 <code>keychain:</code> 引用) / runtime / entry 等.
+            改 description / parameters / env (v3.37 改: 明文 secret, 不再用 <code>keychain:</code> 引用) / runtime / entry 等.
             保存后触发静默重启, 下次对话生效. entry 文件 (Python 脚本) 不会动, 那个用编辑器改.
           </p>
           <textarea
@@ -1061,8 +1061,15 @@ async function saveEditExternal() {
   padding: 20px;
   max-width: 720px;
   width: 100%;
-  /* v3.24: 用 90vh + flex column, 让 textarea flex 1 1 auto 弹性占满, 不会让 dialog 自身被内容撑出 */
-  max-height: 90vh;
+  /* v3.42 (2026-08-24): 改 90vh → 90dvh 解决 Tauri 2 WebView2 拖拽窗口 resize 期间 modal 错位.
+   *   跟 v3.41 main container 改 100% → 100dvh 同根因:
+   *     - Tauri 2 WebView2 resize 时 vh 不立即更新, 锁在初始 viewport 算的高度
+   *     - 90vh 让 modal 高度锁在初始 viewport * 0.9, resize 后 modal 高度可能比新 viewport
+   *       还高 → 内容溢出截断 / textarea 跟 modal 容器错位 / 按钮被推出 modal
+   *     - 90dvh (dynamic viewport height) 跟 v3.41 main container 100dvh 同步, resize 立即响应
+   *   老浏览器 (Safari < 15.4) 走 fallback 90vh. */
+  max-height: 90vh;  /* fallback for browsers without 90dvh */
+  max-height: 90dvh;
   display: flex;
   flex-direction: column;
   gap: 12px;

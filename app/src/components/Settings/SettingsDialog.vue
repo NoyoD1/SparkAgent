@@ -37,7 +37,7 @@ import SkillsTab from './tabs/SkillsTab.vue';
 import SlashTab from './tabs/SlashTab.vue';  // v0.4.5.2 恢复 (D184 v9 ❷)
 import CustomInstructionsTab from './tabs/CustomInstructionsTab.vue';  // v0.5.0-v0.1: 回归单 AGENTS.md 编辑 (取代 v0.4.6.1 Agents tab)
 import ToolsTab from './tabs/ToolsTab.vue';  // 2026-08-20 P1-5: user tool 派生
-import SecretsTab from './tabs/SecretsTab.vue';  // ADR-0023 P3-C (2026-08-24): MCP / external tool 用的 keychain secret
+// v3.37 (2026-08-24): 删 SecretsTab 整个 tab (keychain 完全移除, secret 改 user 改配置文件直填明文)
 import AboutTab from './tabs/AboutTab.vue';
 
 interface TabDef {
@@ -59,7 +59,7 @@ const TABS: TabDef[] = [
   { id: 'slash',      label: 'Slash',   icon: markRaw(Terminal),   component: markRaw(SlashTab),      group: 'Agent 能力', implemented: true  },  // v0.4.5.2 恢复 (D184 v9 ❷)
   { id: 'instructions', label: 'Agent 守则', icon: markRaw(FileText), component: markRaw(CustomInstructionsTab), group: 'Agent 能力', implemented: true  },  // v0.6.3-rc1: 改 "Custom Instructions" → "Agent 守则" (用户可见业务名; id/文件名/component 不变)
   { id: 'tools',      label: 'Tools',   icon: markRaw(Wrench),     component: markRaw(ToolsTab),       group: 'Agent 能力', implemented: true  },  // 2026-08-20 P1-5: user tool 派生 (从 builtin tool 派生的 args 预设模板)
-  { id: 'secrets',    label: 'Secrets', icon: markRaw(KeyRound),    component: markRaw(SecretsTab),     group: 'Agent 能力', implemented: true  },  // ADR-0023 P3-C: MCP / external tool env 走 keychain (不存明文)
+  // v3.37 (2026-08-24): 删 secrets tab 整个 (keychain 完全移除, secret 改 user 改配置文件直填明文)
   { id: 'about',      label: '关于',     icon: markRaw(Info),       component: markRaw(AboutTab),      group: '数据与统计', implemented: true  },
 ];
 

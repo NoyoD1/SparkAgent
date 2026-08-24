@@ -461,7 +461,8 @@ export const useChatStore = defineStore('chat', () => {
    */
   function friendlyErrorMessage(raw: string): { friendly: string; raw: string; category: string } {
     const lower = raw.toLowerCase();
-    // 401 / unauthorized / invalid api key → keychain 失效
+    // 401 / unauthorized / invalid api key → v3.37 改: settings.json 里 ProviderConfigDto.apiKey 字段失效/填错
+    //   (之前是 keychain 失效, v3.37 整个 keychain 移除, apiKey 走 settings.json)
     if (lower.includes('401') ||
         lower.includes('unauthorized') ||
         lower.includes('invalid api') ||
@@ -470,7 +471,7 @@ export const useChatStore = defineStore('chat', () => {
       return {
         friendly: 'API Key 无效 (401 Unauthorized). 可能原因: \n' +
                   '  • Settings → Providers 里的 apiKey 失效 / 填错\n' +
-                  '  • keychain 里保存的 key 跟当前 provider 不匹配\n' +
+                  '  • settings.json 里保存的 apiKey 跟当前 provider 不匹配\n' +
                   '  • provider 账号被封 / key 已过期\n' +
                   '下一步: 去 Settings → Providers 重新填 apiKey, 或检查 provider 官网控制台。',
         raw,
@@ -1273,7 +1274,8 @@ export const useChatStore = defineStore('chat', () => {
           //   哪里失败 + 原因, 不用回忆 toast
           //   pushErrorDivider 内部有防重复 (如果 message_end 已经推过 error divider,
           //   这里 skip 不会重复 push)
-          //   Rust 端 error 通常对应 LLM 没真正开始 / spawn 失败 / keychain 错误等
+          //   Rust 端 error 通常对应 LLM 没真正开始 / spawn 失败 / settings.json 里
+          //   apiKey 错误等 (v3.37 改: 之前是 keychain 错误, 现在 settings.json apiKey 字段)
           //   hasPartialContent=false (没 assistant content / thinking / tools)
           pushErrorDivider(
             sessionId,

@@ -8,12 +8,13 @@
  *   - invoke('send_rpc_command', { sessionId, commandJson })  通用 RpcCommand 透传
  *     (permission dialog 响应 → extension_ui_response / abort / set_model / compact)
  *   - listen('chat:event', (e) => ...)  收 RpcEvent stream (Pi SDK 原生 event)
- *   - invoke('save_api_key' | 'delete_api_key' | 'list_api_keys' | 'has_api_key' |
- *     'migrate_from_env' | ...)  走 keychain
+ *   - invoke('save_app_config' | 'load_app_config') 走 settings.json
  *
  * 跟 ws.ts 的区别:
- *   - apiKey 永不在前端 (走 OS keychain, Rust 直接读)
- *   - 协议没 apiKey 字段, 只有 providerId (keychain key)
+ *   - v3.37 (2026-08-24): 删 keychain 全部 wrapper (saveApiKey / deleteApiKey / hasApiKey /
+ *     listApiKeys / saveSecret / deleteSecret / listSecrets / resolve_secrets)
+ *   - apiKey 存 settings.json ProviderConfigDto.api_key 字段 (跟 baseUrl 一起, 明文)
+ *   - 协议没 apiKey 字段 (FE 不传), Tauri 端 send_prompt 内部从 settings.json 找
  *   - 多并发 prompt 通过 sessionId 区分
  */
 
@@ -290,7 +291,7 @@ class PiTauriClient {
   }
 
   /**
-   * 发 prompt. 走 invoke('send_prompt') → Rust 读 keychain + 启 sidecar.
+   * 发 prompt. 走 invoke('send_prompt') → Rust 从 settings.json 找 provider.api_key + 启 sidecar.
    * apiKey 不在 client, 不进协议.
    */
   async sendPrompt(
@@ -622,50 +623,10 @@ class PiTauriClient {
     }
   }
 
-  // ====== Keychain API ======
-  async saveApiKey(providerId: string, apiKey: string): Promise<void> {
-    await invoke('save_api_key', { providerId, apiKey });
-  }
-
-  async deleteApiKey(providerId: string): Promise<void> {
-    await invoke('delete_api_key', { providerId });
-  }
-
-  async hasApiKey(providerId: string): Promise<boolean> {
-    return (await invoke('has_api_key', { providerId })) as boolean;
-  }
-
-  async listApiKeys(): Promise<
-    Array<{ providerId: string; configured: boolean; preview: string | null }>
-  > {
-    return (await invoke('list_api_keys')) as Array<{
-      providerId: string;
-      configured: boolean;
-      preview: string | null;
-    }>;
-  }
-
-  // ====== ADR-0023 P3-C (2026-08-24): 通用 secret 管理 (MCP / external tool 用) ======
-  //   跟 saveApiKey 走同一个 keychain service="pi-agent", 区别只是 key 名字是 secret
-  //   (mcp-<server>-<field> / external-<tool>-<field>).
-  //   触发 P3-A 静默重启: 改了 secret → 走 triggerRestart 复用模式
-  async saveSecret(name: string, value: string): Promise<void> {
-    await invoke('save_secret', { name, value });
-  }
-
-  async deleteSecret(name: string): Promise<void> {
-    await invoke('delete_secret', { name });
-  }
-
-  async listSecrets(): Promise<
-    Array<{ providerId: string; configured: boolean; preview: string | null }>
-  > {
-    return (await invoke('list_secrets')) as Array<{
-      providerId: string;
-      configured: boolean;
-      preview: string | null;
-    }>;
-  }
+  // v3.37 (2026-08-24): 删 Keychain API 全部 (saveApiKey / deleteApiKey / hasApiKey / listApiKeys /
+  //   saveSecret / deleteSecret / listSecrets). keychain 完全移除, apiKey 改存 settings.json
+  //   明文 (跟 baseUrl 等其他 provider config 一样, 通过 Tauri 端 save_app_config 写).
+  //   secret 改 user 自己在 MCP / external tool 配置文件里直填明文.
 
   // ====== ADR-0023 P3-D (2026-08-24): 列出 external tool 文件夹 ======
   //   跟 sidecar/src/externalTools.mjs 同扫描规则, 给 FE Tools tab "External Tools" section 展示
@@ -800,7 +761,7 @@ class PiTauriClient {
   }
 
   // ====== ADR-0023 P3-E (2026-08-24): user-driven / 真的调 external tool ======
-  //   跟 send_prompt 同 pattern: FE 传完整 config (provider/model/apiKey 等走 keychain),
+  //   跟 send_prompt 同 pattern: FE 传完整 config (provider/model), apiKey 走 settings.json lookup,
   //   Tauri 端负责 spawn sidecar (如果还没起) + 走 file queue 转发到 sidecar + 等 response.
   //
   //   返回: { id, ok: true, content: [...] } | { id, ok: false, error: "..." }
@@ -1545,7 +1506,8 @@ export interface TauriMcpServerInfo {
 void piTauri.waitForListener();
 
 // 调试用: 把 piTauri 暴露到 window, 方便 F12 console 直接调
-// R1: dev-only 守卫 — 生产构建不带这个, 防止注入脚本/扩展调 listApiKeys 等命令
+// R1: dev-only 守卫 — 生产构建不带这个, 防止注入脚本/扩展调 saveApiKey/listSecrets 等命令
+//   v3.37: keychain wrapper 全部删了, saveApiKey / listSecrets 等不存在, 守卫仍保留防御
 if (typeof window !== 'undefined' && import.meta.env.DEV) {
   (window as any).__piTauri = piTauri;
   console.log('[pi-tauri] window.__piTauri exposed for dev console debugging');

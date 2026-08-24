@@ -1541,8 +1541,6 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
 .pad-wstree__sub-label-chevron.is-expanded {
   transform: rotate(90deg);
 }
-  font-weight: var(--pad-fw-regular);
-}
 
 /* Phase 3: 归档 section label 带 icon */
 .pad-wstree__sub-label-icon {

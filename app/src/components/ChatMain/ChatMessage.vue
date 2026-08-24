@@ -1297,7 +1297,8 @@ const statusText = computed(() => {
 }
 
 /* 2026-08-20 P1-3: error category 切色 (跟 is-failure 错开, 让 user 视觉一眼分清错误类型)
-   - auth_401 (keychain 失效)   → 红色 (--pad-danger)
+   - auth_401 (apiKey 失效/填错) → 红色 (--pad-danger) — v3.37 改: 之前是 keychain 失效,
+     现在是 settings.json 里 ProviderConfigDto.apiKey 字段失效/填错
    - forbidden_403 (model 拒绝) → 深红 (--pad-danger-strong)
    - rate_limit_429 (限流)      → 琥珀 (--pad-fg-warning, 跟 is-failure 同色)
    - server_5xx (服务异常)      → 灰色 (--pad-fg-tertiary)

@@ -39,7 +39,7 @@ export interface McpRuntimeTool {
 export interface McpRuntimeServerStatus {
   name: string;
   status: 'started' | 'failed';  // 'skipped' 在 sidecar 里也归 failed (env 解析失败)
-  reason: string | null;        // 失败原因 (keychain 找不到 / subprocess 启失败 / 等)
+  reason: string | null;        // 失败原因 (MCP config env 解析失败 / subprocess 启失败 / 等)
   toolCount: number;            // 实际启好后的 tool 数
   tools: McpRuntimeTool[];      // tool 短名 + description
   durationMs: number;           // 启这个 server 花的毫秒
@@ -53,7 +53,7 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
 
   // 2026-08-24 P3-F: MCP runtime 状态 (sidecar emit 的 mcp_status snapshot, McpTab 显示用)
   //   - status: 'started' = 启好, LLM 可见 mcp_<name>_<tool>; 'failed' = 启失败, 不进 LLM tools list
-  //   - reason: 失败原因 (keychain 找不到 / subprocess 启失败 / timeout 等)
+  //   - reason: 失败原因 (subprocess 启失败 / env 解析失败 (含 "keychain:" literal 失败的旧 config) / timeout 等)
   //   - tools: 该 server 暴露的 tool 列表 (name + description, LLM 看到的就是这些)
   //   - toolCount: tool 数量 (跟 tools.length 一致, 冗余方便 McpTab 显示)
   //   - durationMs: sidecar 启这个 server 花的毫秒

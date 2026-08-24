@@ -465,7 +465,7 @@ const isImporting_apply = ref(false);       // 跟 isImporting 区分: 前者是
 const toast = ref<{ type: 'ok' | 'fail'; message: string } | null>(null);
 
 // 2026-08-24 P3-F: 强制重测 — triggerRestart 让 sidecar 重启并重跑 MCP 初始化
-//   用于改了 keychain secret / 修了 MCP config 后, 不用 restart app
+//   用于改了 MCP config (含明文 env secret, v3.37 改) / 修了 MCP config 后, 不用 restart app
 const isForceRetesting = ref(false);
 async function forceRetestMcp() {
   if (isForceRetesting.value) return;
