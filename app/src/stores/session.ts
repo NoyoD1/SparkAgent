@@ -13,6 +13,9 @@ import { computed, ref, watch } from 'vue';
 // 2026-08-20 P0-1 补充 B: addSession 从全局 configStore 当前值复制 mode/model 作为新 session 初值.
 //   config.ts 不反向 import session, 单向依赖安全.
 import { useConfigStore } from './config';
+// 2026-08-24 v3.26: 永久删除联动 Pi SDK jsonl (Tauri delete_session_files).
+//   import piTauri 而不是 pinia store, 避免循环 (session store 是基础).
+import { piTauri } from '@/lib/tauri';
 
 export interface Workspace {
   id: string;
@@ -600,12 +603,37 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   /**
-   * 永久删除 session (从 store 移除, chat store 联动)
-   * ⚠️ 仅允许对 archived session 调, UI 必须在 archive 列表才显示此入口 (Phase 3 流程约束)
-   * 实际不删 Pi SDK jsonl file, 跟现有 removeSession 行为一致
+   * 2026-08-24 v3.26: 永久删除 session (从 store 移除 + 删本地 jsonl)
+   *   ⚠️ 仅允许对 archived session 调, UI 必须在 archive 列表才显示此入口 (Phase 3 流程约束)
+   *   改: 之前 v0.6+ 注释说"实际不删 Pi SDK jsonl", 现在通过 Tauri delete_session_files 真删
+   *   (算 workspace hash 找 session dir, unlink <ts>_<piSessionId>.jsonl + .lock + .bak).
+   *   await Tauri 完成后再 filter store (失败 throw, 提示用户重试).
    */
-  function deleteSessionPermanently(id: string) {
-    sessions.value = sessions.value.filter((s) => s.id !== id);
+  async function deleteSessionPermanently(id: string) {
+    const s = sessions.value.find((x) => x.id === id);
+    if (!s) return;
+    // 1. 删本地 jsonl (走 Tauri, fire-and-forget 失败 throw)
+    if (s.piSessionId) {
+      try {
+        // 找 session 关联的 workspace 路径 (拿 Session.workspaceId 找 workspace)
+        const ws = workspaces.value.find((w) => w.id === s.workspaceId);
+        const result = await piTauri.deleteSessionFiles({
+          piSessionId: s.piSessionId,
+          workspacePath: ws?.path ?? null,
+          agentDir: null,  // Rust fallback 算 ~/.pi/agent
+        });
+        console.log(
+          `[session] deleteSessionPermanently: ${s.piSessionId} → ${result.deleted} file(s) deleted`,
+          result.paths,
+        );
+      } catch (e) {
+        // 删本地失败 → 抛错, 不 filter store (user 决定怎么处理)
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`删本地 jsonl 失败 (${msg}); 取消前端删除, 请检查文件权限后重试`);
+      }
+    }
+    // 2. 本地删成功 → 走 store filter (跟旧行为一致)
+    sessions.value = sessions.value.filter((x) => x.id !== id);
     if (activeSessionId.value === id) {
       activeSessionId.value = null;
     }

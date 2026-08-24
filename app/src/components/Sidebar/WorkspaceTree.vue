@@ -70,6 +70,7 @@ import {
 } from 'lucide-vue-next';
 import { useSessionStore } from '@/stores/session';
 import { useChatStore } from '@/stores/chat';
+import { useUiStore } from '@/stores/ui';
 import { pickFolder } from '@/lib/dialog';
 import { piTauri } from '@/lib/tauri';
 import SessionContextMenu from './SessionContextMenu.vue';
@@ -80,6 +81,21 @@ import WorkspaceTemplateMenu from './WorkspaceTemplateMenu.vue';
 const sessionStore = useSessionStore();
 const chatStore = useChatStore();
 const { workspaces, expandedWorkspaceIds, activeSessionId } = storeToRefs(sessionStore);
+
+// v3.26: 归档 section 折叠状态 (默认展开, localStorage 持久化, 跨 session 保留)
+//   key 用命名空间 "pad-wstree-archive-expanded" 防跟其他 store key 冲突
+const ARCHIVE_SECTION_EXPANDED_KEY = 'pad-wstree-archive-expanded';
+const archiveSectionExpanded = ref(
+  localStorage.getItem(ARCHIVE_SECTION_EXPANDED_KEY) !== 'false',  // 默认 true
+);
+function toggleArchiveSection() {
+  archiveSectionExpanded.value = !archiveSectionExpanded.value;
+  try {
+    localStorage.setItem(ARCHIVE_SECTION_EXPANDED_KEY, String(archiveSectionExpanded.value));
+  } catch {
+    // localStorage 写失败 (隐私模式 / quota), 静默忽略 — 折叠状态只影响当前 session
+  }
+}
 
 const pickingFolder = ref(false);
 
@@ -489,11 +505,18 @@ function requestDeletePermanently(sessionId: string) {
   if (!s) return;
   showConfirm({
     title: '永久删除这个 session?',
-    message: `「${s.autoTitle || s.title || '新任务'}」\n\n此操作不可撤销.\n\nPi SDK 的对话历史仍保留在本地 jsonl 文件中, 但前端不再可见.`,
+    message: `「${s.autoTitle || s.title || '新任务'}」\n\n此操作不可撤销.\n\n会一并删除本地 jsonl 历史文件 (恢复不了), 仅保留 Pi SDK 在内存中已加载的部分 (下次 spawn 时新文件创建).`,
     confirmLabel: '永久删除',
     danger: true,
-    onConfirm: () => {
-      sessionStore.deleteSessionPermanently(sessionId);
+    onConfirm: async () => {
+      try {
+        await sessionStore.deleteSessionPermanently(sessionId);
+      } catch (e) {
+        // 删本地 jsonl 失败 (e.g. 权限 / 锁), 弹 toast 提示. 不动 store (user 可重试).
+        const msg = e instanceof Error ? e.message : String(e);
+        const ui = useUiStore();
+        ui.showToast(`永久删除失败: ${msg}`, 'error', 5000);
+      }
     },
   });
 }
@@ -862,16 +885,30 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
       </div>
 
       <!-- ====== Phase 3: 顶层 归档 section (workspace 列表外, sidebar 同一滚动区底部) ====== -->
+      <!--   v3.26: 加折叠按钮 (v-if 控制 archivedSessions 列表), 默认展开;
+           状态 localStorage 持久化, 跟 workspace expand 习惯一致. -->
       <template v-if="sessionStore.archivedSessions.length > 0">
         <div class="pad-wstree__divider" />
-        <div class="pad-wstree__sub-label">
+        <div
+          class="pad-wstree__sub-label pad-wstree__sub-label--collapsible"
+          role="button"
+          :title="archiveSectionExpanded ? '点击折叠' : '点击展开'"
+          @click="toggleArchiveSection"
+        >
           <span class="pad-wstree__sub-label-icon">
             <Archive :size="11" :stroke-width="1.75" />
             归档
           </span>
           <span class="pad-wstree__count">{{ sessionStore.archivedSessions.length }}</span>
+          <ChevronRight
+            :size="11"
+            :stroke-width="2"
+            class="pad-wstree__sub-label-chevron"
+            :class="{ 'is-expanded': archiveSectionExpanded }"
+          />
         </div>
         <div
+          v-if="archiveSectionExpanded"
           v-for="s in sessionStore.archivedSessions"
           :key="'archived-' + s.id"
           class="pad-wstree__session pad-wstree__session--archived"
@@ -1480,6 +1517,30 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
 .pad-wstree__sub-label .pad-wstree__count {
   font-size: var(--pad-fs-10);
   opacity: 0.7;
+}
+
+/* v3.26: 折叠 sub-label (cursor: pointer + hover 背景) */
+.pad-wstree__sub-label--collapsible {
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--pad-radius-sm, 4px);
+  padding: 2px 4px;
+  margin: 0 -4px;
+  transition: background var(--pad-dur-fast, 120ms) ease;
+}
+.pad-wstree__sub-label--collapsible:hover {
+  background: var(--pad-bg-hover, rgba(0, 0, 0, 0.04));
+}
+/* v3.26: chevron 旋转 0° → 90° (跟其他 panel 折叠视觉一致) */
+.pad-wstree__sub-label-chevron {
+  margin-left: auto;
+  opacity: 0.55;
+  transition: transform var(--pad-dur-fast, 120ms) ease;
+  flex-shrink: 0;
+}
+.pad-wstree__sub-label-chevron.is-expanded {
+  transform: rotate(90deg);
+}
   font-weight: var(--pad-fw-regular);
 }
 

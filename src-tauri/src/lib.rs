@@ -449,6 +449,45 @@ async fn ensure_browser_window(app: &tauri::AppHandle) -> Result<tauri::WebviewW
     Ok(window)
 }
 
+/// 2026-08-24 v3.26: ephemeral webview (LLM web_navigate 专用)
+//   user 痛点: LLM 调 web_navigate 跟 user 手动打开 Browser Panel 共享同一 webview state.
+//   LLM navigate 后, user 打开 panel 看到 LLM 之前访问的页面 (脏状态).
+//   修法: LLM 调 web_navigate 时, 创建独立 ephemeral webview (label 唯一, hidden, 不 dock),
+//   navigate + get text + 立即 destroy. 跟 user panel 彻底隔离.
+///   限制: 不注入 target=_blank 拦截 JS (LLM 只读 text 不 click, 简化), 不走 owner() dock
+///   (一次性不需要), 完即销毁 (不持久化, 每次 navigate 重新创建).
+async fn ensure_ephemeral_browser(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    // label 唯一 (uuid v4). 旧 ephemeral 残留 (上次没 destroy 干净) 顺手清掉.
+    let label = format!("pi-browser-ephemeral-{}", uuid::Uuid::new_v4());
+    for w in app.webview_windows() {
+        let l = w.label().to_string();
+        if l.starts_with("pi-browser-ephemeral-") && l != label {
+            log::info!("[browser] cleanup leftover ephemeral: {l}");
+            let _ = w.destroy();
+        }
+    }
+    let window = WebviewWindowBuilder::new(
+        app,
+        &label,
+        WebviewUrl::External(
+            "about:blank"
+                .parse()
+                .map_err(|e| format!("parse about:blank: {e}"))?,
+        ),
+    )
+    .title("Ephemeral Browser (LLM web_navigate)")
+    // 小尺寸 — LLM 不看, 完即关, 屏幕占用无所谓
+    .inner_size(800.0, 450.0)
+    .visible(false) // 隐藏 — user 看不到, LLM 也不需要
+    .decorations(false) // 无标题栏 / 无边框, 一次性 webview
+    .skip_taskbar(true)
+    .resizable(false)
+    .build()
+    .map_err(|e| format!("create ephemeral browser: {e}"))?;
+    log::info!("[browser] ephemeral webview created: {label}");
+    Ok(window)
+}
+
 /// 把 webview 窗口 dock 到主窗口右侧 (紧密贴合):
 ///   x = main.right - 1 (1px 重叠消除边框缝隙, 视觉无间隙)
 ///   y = main.top
@@ -692,7 +731,9 @@ async fn browser_navigate(app: tauri::AppHandle, url: String) -> Result<String, 
         return Err(format!("only http/https, got: {}", parsed.scheme()));
     }
     log::info!("[browser] browser_navigate: {url}");
-    let window = ensure_browser_window(&app).await?;
+    // 2026-08-24 v3.26: 用 ephemeral webview (跟 user 视觉的 pi-browser-panel 隔离).
+    //   完即 destroy, 状态不残留. LLM 调用走这个, user 走 browser_navigate_url (走 user panel).
+    let window = ensure_ephemeral_browser(&app).await?;
     // setup oneshot 等 page load
     let (tx, rx) = oneshot::channel::<()>();
     *page_load_signal_cell().lock().unwrap() = Some(tx);
@@ -745,6 +786,12 @@ async fn browser_navigate(app: tauri::AppHandle, url: String) -> Result<String, 
         "[browser] navigate ok: {url} → {} bytes",
         truncated.len()
     );
+    // 2026-08-24 v3.26: ephemeral webview 用完即销毁 (不持久化 state, 避免污染 user panel)
+    if let Err(e) = window.destroy() {
+        log::warn!("[browser] ephemeral destroy failed (非致命): {e}");
+    } else {
+        log::info!("[browser] ephemeral webview closed after navigate");
+    }
     Ok(truncated)
 }
 
@@ -1067,6 +1114,123 @@ async fn write_skill_file(args: WriteSkillFileArgs) -> Result<String, String> {
     // 5. 返回绝对路径
     let abs = std::fs::canonicalize(&target_path).unwrap_or(target_path);
     Ok(abs.to_string_lossy().to_string())
+}
+
+// ====== 2026-08-24 v3.26: 永久删除 session 本地 jsonl 文件 (FE 永久删除联动) ======
+//   user 痛点: 之前 `deleteSessionPermanently` 只 filter store, jsonl 还在本地 — 删前端不彻底.
+//   修法: 算 `<agentDir>/sessions/<hash>/<ts>_<piSessionId>.jsonl` 路径, 扫目录找匹配
+//   (ts 是创建时生成, 不知道具体值, 用 glob), unlink + 顺手 unlink `.lock` / `.jsonl.bak` 等.
+//   返回: { deleted: u32, paths: Vec<String> } — paths 给 FE 显示"已删 N 个文件" 调试用.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteSessionFilesArgs {
+    /// Pi SDK session id (uuid v4, FE Session.piSessionId 字段).
+    /// 用于匹配文件 `<ts>_<piSessionId>.jsonl`.
+    pi_session_id: String,
+    /// 关联 workspace 路径 (per-workspace 隔离: workspace hash 决定 sessions 子目录).
+    /// 跟 sidecar 端 index.mjs:91-95 一致.
+    workspace_path: Option<String>,
+    /// global agentDir, 不传 Rust fallback 算 (跟 save_secret / pi_settings_path 同 pattern).
+    #[serde(default)]
+    agent_dir: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DeleteSessionFilesResult {
+    deleted: u32,
+    paths: Vec<String>,
+}
+
+#[tauri::command]
+async fn delete_session_files(args: DeleteSessionFilesArgs) -> Result<DeleteSessionFilesResult, String> {
+    // 1. 解析 agentDir (跟 get_agent_dir 同 pattern)
+    let home = app_path_home().map_err(|e| format!("home_dir: {e}"))?;
+    let agent_dir = match args.agent_dir.as_ref().filter(|s| !s.is_empty()) {
+        Some(d) => std::path::PathBuf::from(d),
+        None => home.join(".pi").join("agent"),
+    };
+    // 2. 算 sessions 子目录 (workspace hash 路径)
+    //   跟 sidecar/index.mjs:91-95 严格一致: hash = sha256(workspacePath).slice(0, 16)
+    let session_dir = match args.workspace_path.as_ref().filter(|s| !s.is_empty()) {
+        Some(ws) => {
+            use sha2::{Digest, Sha256};
+            let hash = Sha256::digest(ws.as_bytes());
+            let hash_hex = format!("{:x}", hash);
+            let hash16 = &hash_hex[..16];
+            agent_dir.join("sessions").join(hash16)
+        }
+        None => agent_dir.join("sessions"),
+    };
+    if !session_dir.exists() {
+        log::info!(
+            "[delete_session_files] session_dir 不存在: {}, 直接返 0",
+            session_dir.display()
+        );
+        return Ok(DeleteSessionFilesResult { deleted: 0, paths: vec![] });
+    }
+    // 3. 扫目录, 找匹配 `_piSessionId.jsonl` / `.lock` / `.jsonl.bak` 的所有文件
+    let entries = std::fs::read_dir(&session_dir)
+        .map_err(|e| format!("read_dir({}): {}", session_dir.display(), e))?;
+    let mut deleted = 0u32;
+    let mut paths = Vec::new();
+    let suffix = format!("_{}.jsonl", args.pi_session_id);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // 匹配: <ts>_<piSessionId>.jsonl  (主文件)
+        //       <ts>_<piSessionId>.jsonl.lock (Pi SDK 写锁, 偶尔残留)
+        //       <ts>_<piSessionId>.jsonl.bak (备份)
+        if !name_str.contains(&args.pi_session_id) {
+            continue;
+        }
+        if !(name_str.ends_with(&suffix)
+            || name_str.ends_with(&format!("{}.lock", suffix))
+            || name_str.ends_with(&format!("{}.bak", suffix)))
+        {
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                deleted += 1;
+                paths.push(path.to_string_lossy().to_string());
+                log::info!("[delete_session_files] unlink: {}", path.display());
+            }
+            Err(e) => log::warn!(
+                "[delete_session_files] unlink failed: {}: {}",
+                path.display(),
+                e
+            ),
+        }
+    }
+    // 4. 如果 session_dir 是空的, 顺手 unlink session_dir + 上一级 hash 目录 (清理)
+    //   但保留: 父目录 sessions/ (其它 session 还在用), 顶层 agent_dir/ (不是会话范围)
+    if let Ok(mut entries) = std::fs::read_dir(&session_dir) {
+        if entries.next().is_none() {
+            let _ = std::fs::remove_dir(&session_dir);
+            log::info!("[delete_session_files] empty session_dir removed: {}", session_dir.display());
+        }
+    }
+    log::info!(
+        "[delete_session_files] piSessionId={} workspace={:?} deleted={} files",
+        args.pi_session_id,
+        args.workspace_path,
+        deleted
+    );
+    Ok(DeleteSessionFilesResult { deleted, paths })
+}
+
+// 抽 home_dir 解析 (跟 get_agent_dir 同逻辑, 多个 Tauri command 复用)
+fn app_path_home() -> Result<std::path::PathBuf, String> {
+    // Tauri 2: 用 HOME envvar 直接拿 (避免 tauri::AppHandle 在 command 内部依赖)
+    //   sidecar 是独立进程, 没有 Tauri handle, 改用 envvar 兜底.
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        return Ok(std::path::PathBuf::from(home));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Ok(std::path::PathBuf::from(home));
+    }
+    Err("home_dir not found (USERPROFILE / HOME both unset)".to_string())
 }
 
 // ====== P0-1: 删除 skill 文件 (按精确路径) ======
@@ -4911,6 +5075,8 @@ pub fn run() {
             // v0.4.4 Skills: 写自定义 SKILL.md 到 workspace 或 global agentDir
             write_skill_file,
             delete_skill_file,
+            // 2026-08-24 v3.26: 永久删除 session 本地 jsonl 文件 (FE 永久删除联动)
+            delete_session_files,
             reload_skills,
             // v0.4.4.3 Skill 导入: 读本地 .md 文件 + 解析 frontmatter
             read_skill_file,

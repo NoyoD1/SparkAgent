@@ -1295,6 +1295,25 @@ class PiTauriClient {
     await invoke('delete_skill_file', { filePath });
   }
 
+  // ====== 2026-08-24 v3.26: 永久删除 session 本地 jsonl 文件 (FE 永久删除联动) ======
+  //   user 痛点: 之前 `deleteSessionPermanently` 只 filter store, jsonl 还在本地 —
+  //   删前端不彻底. 修法: 算 `<agentDir>/sessions/<hash>/<ts>_<piSessionId>.jsonl`
+  //   路径, 扫目录找匹配 unlink, 包括 .lock / .bak 残留.
+  //   返回 { deleted, paths } — paths 给 FE 显示"已删 N 个文件" 调试用.
+  async deleteSessionFiles(args: {
+    piSessionId: string;
+    workspacePath?: string | null;
+    agentDir?: string | null;
+  }): Promise<{ deleted: number; paths: string[] }> {
+    return (await invoke('delete_session_files', {
+      args: {
+        piSessionId: args.piSessionId,
+        workspacePath: args.workspacePath ?? null,
+        agentDir: args.agentDir ?? null,
+      },
+    })) as { deleted: number; paths: string[] };
+  }
+
   // ====== 2026-08-21: Skill 热重载 (Pi SDK reload 命令) ======
   // 走 Pi SDK 内置 reload, 重建 runtime 并重新 loadSkills.
   // session history 存在 JSONL 文件里, reload 后自动恢复. 下一条消息用新 skills.

@@ -43,6 +43,11 @@ url = "2"
 ureq = { version = "2", features = ["json"] }
 # v0.4.4.4 Skill 导入: 解析 zip 压缩包 (Tauri 2 标准 zip crate, 支持 .md + 多文件 skill pack)
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# 2026-08-24 v3.26: 永久删除 session jsonl — 算 workspace hash 找 session dir
+#   (跟 sidecar index.mjs:94 严格一致: sha256(workspacePath).slice(0, 16)).
+sha2 = "0.10"
+# 2026-08-24 v3.26: 内置浏览器分离 (LLM web_navigate 用 ephemeral webview, 不污染 user 的)
+uuid = { version = "1", features = ["v4"] }
 
 # ADR-0020 P-Sec1 (2026-08-23): 沙箱加固 — Windows Job Object 资源限制
 #   - Win32_System_JobObjects: CreateJobObjectW / SetInformationJobObject / AssignProcessToJobObject
