@@ -3,11 +3,10 @@
  *
  * 架构:
  *   [Vue frontend] --invoke/listen--> [Tauri commands + events] --stdin/stdout--> [Node sidecar]
- *   keychain (keyring crate) 存 apiKey, 不进 localStorage / 不进 WS / 不进 .env
+ *   apiKey 存 settings.json 明文 (跟 baseUrl/label 一起, 跟 MCP / external tool 配置文件同 pattern)
+ *   user 自主管理, 跟 keychain 解耦 — keychain 之前会让 send_prompt 链路多 60s 解析 timeout.
  */
 mod config_store;
-mod index_file;
-mod keyring;
 mod model_catalog;  // v0.5.0-D D213: 静态 model metadata catalog
 mod sandbox;         // ADR-0020 P-Sec1: 沙箱加固 (Job Object + 审计) + ADR-0022 WebView2 浏览器
 mod screenshot;      // ADR-0022 v3.2: webview 截图 (agent 识图工具)
@@ -149,147 +148,21 @@ pub struct ImageContent {
     pub mime_type: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeychainInfoDto {
-    pub provider_id: String,
-    pub configured: bool,
-    /// Masked preview, 例如 "sk-FLzj***oMY", configured=false 时为 null
-    pub preview: Option<String>,
-}
-
-// ====== Keychain commands ======
-
-#[tauri::command]
-async fn save_api_key(
-    app: AppHandle,
-    provider_id: String,
-    api_key: String,
-) -> Result<(), String> {
-    if provider_id.is_empty() {
-        return Err("provider_id is empty".to_string());
-    }
-    if api_key.is_empty() {
-        return Err("api_key is empty".to_string());
-    }
-    keyring::save(&provider_id, &api_key)?;
-    index_file::add(&app, &provider_id, index_file::Scope::Llm)?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn delete_api_key(
-    app: AppHandle,
-    provider_id: String,
-) -> Result<(), String> {
-    keyring::delete(&provider_id)?;
-    index_file::remove(&app, &provider_id, index_file::Scope::Llm)?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn list_api_keys(app: AppHandle) -> Result<Vec<KeychainInfoDto>, String> {
-    let idx = index_file::load(&app, index_file::Scope::Llm);
-    let mut out = Vec::with_capacity(idx.provider_ids.len());
-    for id in idx.provider_ids {
-        let (configured, preview) = match keyring::get(&id) {
-            Ok(Some(k)) => (true, Some(crate::keyring::mask(&k))),
-            Ok(None) => (false, None),
-            Err(_) => (false, None),
-        };
-        out.push(KeychainInfoDto {
-            provider_id: id,
-            configured,
-            preview,
-        });
-    }
-    Ok(out)
-}
-
-#[tauri::command]
-async fn has_api_key(provider_id: String) -> Result<bool, String> {
-    Ok(keyring::get(&provider_id)?.is_some())
-}
-
-// ====== ADR-0023 P3-C (2026-08-24): 通用 secret 管理 ======
-//   给 MCP server env / external tool env 用的 keychain entry.
-//   走独立 keyring service="pi-agent-secret" (跟 LLM apiKey 的 "pi-agent" 完全隔离,
-//   list 互不干扰) + 独立 index file "keychain_secret_index.json".
-//   命名建议: mcp-<server>-<field> / external-<tool>-<field> (跟 keychain 命名空间一致).
-#[tauri::command]
-async fn save_secret(app: AppHandle, name: String, value: String) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("name is empty".to_string());
-    }
-    if value.is_empty() {
-        return Err("value is empty".to_string());
-    }
-    // 命名校验: 跟 LLM provider_id 一样, 1-128 char, [A-Za-z0-9._@-]
-    if name.len() > 128 {
-        return Err(format!("secret name too long: {} > 128", name.len()));
-    }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@')) {
-        return Err(format!("secret name '{name}' 含非法字符, 只能 [A-Za-z0-9._@-]"));
-    }
-    keyring::save_secret(&name, &value)?;
-    index_file::add(&app, &name, index_file::Scope::Secret)?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn delete_secret(app: AppHandle, name: String) -> Result<(), String> {
-    keyring::delete_secret(&name)?;
-    index_file::remove(&app, &name, index_file::Scope::Secret)?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn list_secrets(app: AppHandle) -> Result<Vec<KeychainInfoDto>, String> {
-    // ADR-0023 P3-C: 独立 index file (keychain_secret_index.json) + 独立 service
-    //   (pi-agent-secret), 跟 list_api_keys 完全隔离, 不会返回 LLM apiKey 条目
-    // BUG FIX v3.14: 之前用 keyring::get (走 LLM service), 跟 save_secret 跨服务,
-    //   导致 list 显示 "(keychain) 找不到" 但实际 secret 已存. 改用 get_secret.
-    let idx = index_file::load(&app, index_file::Scope::Secret);
-    let mut out = Vec::with_capacity(idx.provider_ids.len());
-    for id in idx.provider_ids {
-        let (configured, preview) = match keyring::get_secret(&id) {
-            Ok(Some(k)) => (true, Some(crate::keyring::mask(&k))),
-            Ok(None) => (false, None),
-            Err(_) => (false, None),
-        };
-        out.push(KeychainInfoDto {
-            provider_id: id,
-            configured,
-            preview,
-        });
-    }
-    Ok(out)
-}
-
-#[tauri::command]
-async fn resolve_secrets(values: Vec<String>) -> Result<Vec<String>, String> {
-    // v3.36 (2026-08-24): 回滚 P3-C keychain 解析, 改 identity pass-through.
-    //   背景: P3-C 引入 keychain 引用 ("keychain:pi-agent:MCP_XXX") 让 MCP / external tool
-    //     env 里的 secret 走 OS keychain 解析. 副作用: sidecar 启动 MCP / external tool 时
-    //     调 resolve_secrets 走 callTauriCommand, keychain 解析失败 / 找不到 secret 走
-    //     60s timeout 兜底 — 整条 send_prompt 链路要等 60s.
-    //   user 反馈: "key 都在本地个人电脑, 直填到 mcp / tool 配置就行, 为什么要走 keychain?"
-    //     user 角度完全合理 — 1 分延迟大头是 keychain 60s timeout, 不是 LLM API.
-    //   修法 (回滚 v3.22 之前行为): Tauri 端 resolve_secrets 改 identity, env values 原样返.
-    //     - sidecar 端 resolveSecretEnv 立即拿到原值, 不 60s timeout
-    //     - MCP / external tool 拿到 env 原值 (含 "keychain:..." literal), 实际 fail
-    //       但启动快 (0s wait, 不影响 main vision 流程)
-    //     - user 后续自己改 MCP / external tool config, 把 "keychain:..." 引用换成明文 key
-    //   backward compat: sidecar binary 没改, 仍调 callTauriCommand("resolve_secrets"),
-    //     Tauri 端 identity 返, sidecar 立即收到.
-    //
-    // 之前 v3.22 行为 (keyring 解析, 60s timeout) 注释保留在下面 reference, 方便对比:
-    //
-    //   P3-C: 用 keyring::get_secret 走 SERVICE_SECRET 独立 keychain
-    //   P3-F+: lookup fallback (试整个 name + last-segment short name)
-    //   PREFIX = "keychain:", 不在 keychain 引用 (没 "keychain:" 前缀) 直接 pass-through
-    Ok(values)
-}
+// ====== v3.37 (2026-08-24): 移除 keychain 全部代码 ======
+//   之前 P3-C 引入 keychain 管理 LLM apiKey + MCP/external tool secret, 副作用:
+//     - send_prompt 链路 keychain 解析失败走 60s timeout 兜底 (实测 1 分 6 秒延迟)
+//     - user 角度: "key 都在本地个人电脑, 直填到 mcp / tool 配置就行, 为什么要走 keychain?"
+//   v3.37 修法 (完全移除):
+//     - LLM apiKey 存 settings.json 明文 (跟 baseUrl/label 一起, ProviderConfigDto.api_key)
+//     - MCP / external tool secret 改 user 自己在配置文件里直填明文
+//     - Settings → Secrets tab 整个删
+//     - Tauri 端 send_prompt / compact_session / 等内部从 settings.json 找 provider.api_key
+//     - 8 个 Tauri commands (save_api_key/delete_api_key/list_api_keys/has_api_key/
+//       save_secret/delete_secret/list_secrets/resolve_secrets) 整个删
+//     - keyring crate 依赖删 (Cargo.toml)
+//     - keyring.rs / index_file.rs 整个文件删
+//   现有 OS keychain 里的 key (LLM apiKey) 不 migrate, user 重输一次.
+//   跟其他 provider config 同步, user 在 Settings → Providers 加 provider 时直填 apiKey.
 // ====== ADR-0022 (2026-08-23): WebView2 内嵌浏览器 — Tauri command ======
 //   走 Tauri 2 的 WebviewWindow (底层 WebView2, 跑在 Tauri 进程里, 真内嵌)
 //   - 0 外部进程: 不像 chromiumoxide 启 Edge.exe
@@ -2932,16 +2805,15 @@ async fn invoke_external_tool(
     // 1. Spawn sidecar 如果还没起. 跟 send_prompt 共用 spawn path, 但 initial command 是 noop
     //   `get_state` (不调 LLM, 走 Pi SDK query 状态). 后续可优化: 改 run_prompt 加 flag.
     if !TOOL_CALL_SIDECAR_SPAWNED.load(Ordering::SeqCst) {
-        // 从 keychain 拿 apiKey (跟 send_prompt 一致, 防止 provider 配了但 key 没存就 spawn 失败)
-        let api_key = match keyring::get(&config.provider_id) {
-            Ok(Some(k)) => k,
-            Ok(None) => {
+        // v3.37 (2026-08-24): 从 settings.json 读 apiKey (跟 send_prompt 一致)
+        let api_key = match crate::config_store::lookup_api_key(&app, &config.provider_id) {
+            Some(k) => k,
+            None => {
                 return Err(format!(
-                    "No API key for provider \"{}\" in OS keychain. Add it in Settings → Providers.",
+                    "No API key for provider \"{}\" in settings.json. Add it in Settings → Providers (apiKey 字段).",
                     config.provider_id
                 ));
             }
-            Err(e) => return Err(format!("Keychain read error: {e}")),
         };
         let base_url = if config.provider == "openai-compatible" {
             config.base_url.clone().ok_or_else(|| "openai-compatible needs baseUrl".to_string())?
@@ -3439,19 +3311,20 @@ async fn send_prompt(
     if content.trim().is_empty() && images.as_ref().map(|v| v.is_empty()).unwrap_or(true) {
         return Err("content and images are both empty".to_string());
     }
-    // 从 keychain 取 key (永不出现在前端, 不进日志)
-    let api_key = match keyring::get(&config.provider_id) {
-        Ok(Some(k)) => k,
-        Ok(None) => {
-            debug_log(&format!("send_prompt: no apiKey in keychain for {}", config.provider_id));
-            return Err(format!(
-                "No API key for provider \"{}\" in OS keychain. Add it in Settings → Providers.",
+    // v3.37 (2026-08-24): 从 settings.json 读 apiKey (明文, 跟 baseUrl 一样)
+    //   之前走 keyring::get, 但 keychain 解析 60s timeout 拖慢整条 send_prompt 链路.
+    //   apiKey 现在存 settings.json 的 ProviderConfigDto.api_key, user 直填.
+    let api_key = match crate::config_store::lookup_api_key(&app, &config.provider_id) {
+        Some(k) => k,
+        None => {
+            debug_log(&format!(
+                "send_prompt: no apiKey in settings.json for {}",
                 config.provider_id
             ));
-        }
-        Err(e) => {
-            debug_log(&format!("send_prompt: keychain get err: {e}"));
-            return Err(format!("Keychain read error: {e}"));
+            return Err(format!(
+                "No API key for provider \"{}\" in settings.json. Add it in Settings → Providers (apiKey 字段).",
+                config.provider_id
+            ));
         }
     };
 
@@ -3536,16 +3409,15 @@ async fn compact_session(
         session_id, config.provider, config.model, config.workspace_path
     ));
 
-    // 跟 send_prompt 一样: 走 keychain 拿 apiKey (永不在 FE)
-    let api_key = match keyring::get(&config.provider_id) {
-        Ok(Some(k)) => k,
-        Ok(None) => {
+    // v3.37 (2026-08-24): 跟 send_prompt 一样, 从 settings.json 读 apiKey
+    let api_key = match crate::config_store::lookup_api_key(&app, &config.provider_id) {
+        Some(k) => k,
+        None => {
             return Err(format!(
-                "No API key for provider \"{}\" in OS keychain.",
+                "No API key for provider \"{}\" in settings.json.",
                 config.provider_id
             ));
         }
-        Err(e) => return Err(format!("Keychain read error: {e}")),
     };
 
     let base_url = if config.provider == "openai-compatible" {
@@ -3584,25 +3456,6 @@ async fn compact_session(
     Ok(())
 }
 
-// ====== Migration helper ======
-// Phase 3 bootstrap: 从 server/.env 读 SHANGTANG_KEY (或任何 *_KEY), 写到 keychain.
-// 一次性命令, 跑完可以删 server/.
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationEntry {
-    pub env_var: String,
-    pub provider_id: String,
-    pub preview: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrationResult {
-    pub migrated: Vec<MigrationEntry>,
-    pub skipped: Vec<String>,
-    pub error: Option<String>,
-}
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3648,12 +3501,14 @@ pub struct VerifyConnectionResult {
 ///   3. 都没匹配 → 字段全 None, FE 让用户手填
 #[tauri::command]
 async fn fetch_provider_models(
+    app: AppHandle,
     provider_id: String,
     provider_type: String,
     base_url: String,
 ) -> Result<Vec<ModelInfoDto>, String> {
-    let api_key = keyring::get(&provider_id)?
-        .ok_or_else(|| format!("No API key in keychain for \"{provider_id}\""))?;
+    // v3.37 (2026-08-24): 从 settings.json 读 apiKey (跟 send_prompt 一致)
+    let api_key = crate::config_store::lookup_api_key(&app, &provider_id)
+        .ok_or_else(|| format!("No API key in settings.json for \"{provider_id}\" (Settings → Providers 加 apiKey 字段)"))?;
     let clean_base = base_url.trim_end_matches('/');
     let url = format!("{clean_base}/models");
 
@@ -3812,9 +3667,12 @@ async fn get_model_catalog(provider_type: String) -> Result<HashMap<String, mode
 ///   由首次对话验证 (内置 provider 走 Pi SDK 内置端点, Tauri 这层不知道 URL, 不假装测).
 ///
 /// `api_key` 可选: 传了就直接用 (避免 AddProviderForm 测连接时建临时 provider 污染 store);
-/// 不传就从 keychain 拿 providerId 对应的 key.
+/// v3.37 (2026-08-24): 不传就从 settings.json 拿 providerId 对应的 apiKey (走 lookup_api_key)
+///   之前走 keyring, v3.37 完全移除 keychain.
+///   ui_override 走 settings.json 明文, 跟 baseUrl 一样.
 #[tauri::command]
 async fn verify_provider_connection(
+    app: AppHandle,
     provider_id: String,
     provider_type: String,
     base_url: String,
@@ -3822,7 +3680,7 @@ async fn verify_provider_connection(
 ) -> Result<VerifyConnectionResult, String> {
     let api_key = match api_key {
         Some(k) if !k.trim().is_empty() => k,
-        _ => match keyring::get(&provider_id)? {
+        _ => match crate::config_store::lookup_api_key(&app, &provider_id) {
             Some(k) => k,
             None => {
                 return Ok(VerifyConnectionResult {
@@ -3934,68 +3792,6 @@ async fn verify_provider_connection(
             detail: Some("built-in provider: Pi SDK 内置端点, 不在 Tauri 这层做 HTTP 测试".to_string()),
         })
     }
-}
-
-#[tauri::command]
-async fn migrate_from_env(app: AppHandle, env_path: Option<String>) -> Result<MigrationResult, String> {
-    let path = env_path.unwrap_or_else(|| "../server/.env".to_string());
-    let abs_path = std::path::Path::new(&path)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from(&path));
-    let result = match std::fs::read_to_string(&abs_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return Ok(MigrationResult {
-                migrated: vec![],
-                skipped: vec![],
-                error: Some(format!("read {path}: {e}")),
-            });
-        }
-    };
-    let mut migrated = Vec::new();
-    let mut skipped = Vec::new();
-    for line in result.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        // 形如 KEY=value, value 可能带 # 注释
-        let Some((key, value_raw)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        let value = value_raw
-            .split('#')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .trim_matches(|c| c == '"' || c == '\'');
-        if !key.ends_with("_KEY") || value.is_empty() {
-            continue;
-        }
-        // 推导 provider_id: SHANGTANG_KEY → prov-shangtang-N
-        // 简化: 全部映射成 prov-<lowercased-key-suffix>-1
-        let suffix = key.trim_end_matches("_KEY").to_lowercase();
-        let provider_id = format!("prov-{suffix}-1");
-        match keyring::save(&provider_id, value) {
-            Ok(()) => {
-                index_file::add(&app, &provider_id, index_file::Scope::Llm)?;
-                migrated.push(MigrationEntry {
-                    env_var: key.to_string(),
-                    provider_id: provider_id.clone(),
-                    preview: crate::keyring::mask(value),
-                });
-            }
-            Err(e) => {
-                skipped.push(format!("{key}: {e}"));
-            }
-        }
-    }
-    Ok(MigrationResult {
-        migrated,
-        skipped,
-        error: None,
-    })
 }
 
 // ====== Workspace default ======
@@ -4985,10 +4781,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            save_api_key,
-            delete_api_key,
-            list_api_keys,
-            has_api_key,
             send_prompt,
             // ADR-0022 v3.5 (2026-08-23): user 上传 (粘贴图片 / 拖文件) — Tauri 存盘后返绝对路径
             save_uploaded_file,
@@ -5002,12 +4794,9 @@ pub fn run() {
             //   external tool / dangerousWhitelist / bash.path) 后, FE 触发, Tauri
             //   kill 所有 active sidecar, 下次 send_prompt lazy spawn 走新 config.
             restart_all_sidecars,
-            // ADR-0023 P3-C (2026-08-24): 通用 secret 管理 (MCP env / external tool env
-            //   走 keychain, 不再明文存盘)
-            save_secret,
-            delete_secret,
-            list_secrets,
-            resolve_secrets,
+            // v3.37 (2026-08-24): 删 8 个 keychain commands (save_api_key / delete_api_key /
+            //   list_api_keys / has_api_key / save_secret / delete_secret / list_secrets /
+            //   resolve_secrets). apiKey 改存 settings.json 明文, secret 改 user 直填配置.
             // ADR-0023 P3-D: 列出 external tool 文件夹, 给 FE Tools tab 展示 + 导入导出用
             list_external_tools,
             // ADR-0023 P3-D Phase 2: 工具导入导出 (user tool JSON / external tool ZIP)
@@ -5038,7 +4827,6 @@ pub fn run() {
             // ADR-0022 v3.2: webview 截图 (agent 识图工具, vision model 看图)
             browser_screenshot,
             get_model_catalog,  // v0.5.0-D D213: 静态 catalog
-            migrate_from_env,
             ensure_default_workspace,
             get_agent_dir,  // v0.6.3-rc1 P2-1.4: 全局 MCP 目录路径 (FE 显示用)
             // v0.6 (Bug2 修): 读写 Pi SDK settings.json 里的 compaction.enabled

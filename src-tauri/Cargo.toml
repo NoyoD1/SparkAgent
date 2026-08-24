@@ -1,7 +1,7 @@
 [package]
 name = "pi-agent-desktop"
 version = "0.1.0"
-description = "Pi Agent Desktop — Tauri 2 + Vue 3 + Node sidecar with OS keychain for API keys"
+description = "Pi Agent Desktop — Tauri 2 + Vue 3 + Node sidecar (apiKey 存 settings.json 明文)"
 authors = ["Pi Agent"]
 license = ""
 repository = ""
@@ -31,8 +31,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # Async runtime for sidecar process I/O
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "process", "sync"] }
-# OS keychain (Windows Credential Manager / macOS Keychain / Linux Secret Service)
-keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
 # Error handling
 thiserror = "1"
 # Time for log timestamps

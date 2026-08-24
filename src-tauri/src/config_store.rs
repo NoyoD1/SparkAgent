@@ -58,6 +58,12 @@ pub struct ProviderConfigDto {
     pub label: String,
     #[serde(default)]
     pub base_url: Option<String>,
+    // v3.37 (2026-08-24): apiKey 改存 settings.json 明文 (跟 base_url 一起, 跟 MCP / external tool 配置同 pattern)
+    //   之前走 keyring (SERVICE_LLM="pi-agent"), 现在完全移除 keychain 依赖, user 在 Settings → Providers
+    //   加 provider 时直填 apiKey 字段 (Settings UI 同步改). 跟 .env / 配置文件明文 secret 一样.
+    //   明文存, 因为 user 角度: "key 都在本地个人电脑, 不需要 keychain 多一层"
+    #[serde(default)]
+    pub api_key: Option<String>,
     // P2 #1 fix: 删 api_key_env dead code. 旧 v0.2 设计字段, 实际没人用, 保留会误导后续开发.
     //   注: 旧 config.json 里这个字段会被 serde silently drop (unknown field), 数据不会丢但也没意义.
     #[serde(default)]
@@ -163,4 +169,18 @@ pub fn save(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
         path.display()
     ));
     Ok(())
+}
+
+// v3.37 (2026-08-24): 从 AppConfig 找 provider 的 apiKey (明文).
+//   之前走 keyring::get, 副作用是 keychain 解析 60s timeout 拖慢 send_prompt 链路.
+//   现在从 settings.json 明文读, lookup O(N) (providers 一般 < 10 个, 可接受).
+//   - 返回 Some(apiKey) 表示找到, None 表示 provider 不存在 或 apiKey 未填.
+//   - send_prompt 链路用 None 返 error "No API key for provider ..."
+pub fn lookup_api_key(app: &tauri::AppHandle, provider_id: &str) -> Option<String> {
+    let cfg = load(app);
+    cfg.providers
+        .into_iter()
+        .find(|p| p.id == provider_id)
+        .and_then(|p| p.api_key)
+        .filter(|k| !k.is_empty())
 }

@@ -107,30 +107,31 @@ export async function callExternalToolByName(name, args) {
 /**
  * Scan 2 个目录 (global + workspace), 给每个 manifest 启 subprocess, 包成 Pi SDK ToolDefinition.
  *
+ * v3.37 (2026-08-24): 删 resolveSecretEnv 参数 (keychain 完全移除, env 原值透传)
+ *   user 自己在 external tool manifest.env 配明文.
+ *
  * @param workspacePath 当前 active workspace 绝对路径 (可以 null, 表示没 workspace)
  * @param agentDir 全局 agent dir (通常 <user.home>/.pi/agent, 必有)
- * @param resolveSecretEnv ADR-0023 P3-C 注入: 把 manifest.env 里 keychain: 引用解析成明文
- *   (来自 index.mjs, 走 callTauriCommand("resolve_secrets") 通道)
  * @returns ToolDefinition[] (跟 builtin 22 tool 同样的 schema)
  */
-export async function loadExternalTools(workspacePath, agentDir, resolveSecretEnv) {
+export async function loadExternalTools(workspacePath, agentDir) {
   const out = [];
   const seen = new Set();
 
   // 1. global scope: <agentDir>/tools/external/*/manifest.json
   if (agentDir) {
     const globalDir = join(agentDir, 'tools', 'external');
-    await scanAndAppend(globalDir, out, seen, 'global', resolveSecretEnv);
+    await scanAndAppend(globalDir, out, seen, 'global');
   }
   // 2. workspace scope: <workspacePath>/.pi/tools/external/*/manifest.json (同名覆盖 global)
   if (workspacePath) {
     const wsDir = join(workspacePath, '.pi', 'tools', 'external');
-    await scanAndAppend(wsDir, out, seen, 'workspace', resolveSecretEnv);
+    await scanAndAppend(wsDir, out, seen, 'workspace');
   }
   return out;
 }
 
-function scanAndAppend(dir, out, seen, scope, resolveSecretEnv) {
+function scanAndAppend(dir, out, seen, scope) {
   if (!existsSync(dir)) return;
   let entries;
   try {
@@ -139,10 +140,11 @@ function scanAndAppend(dir, out, seen, scope, resolveSecretEnv) {
     console.error(`[externalTools] scan ${dir} failed:`, e);
     return;
   }
-  // 2026-08-24 P3-E bug fix: tryBuildToolFromManifest 是 async (P3-C 加了 await resolveSecretEnv 后),
-  //   scanAndAppend 必须 await 它才能拿到真 ToolDefinition. 之前漏了 await, Promise 直接进 out,
-  //   后续 .name 返 undefined, LLM API 收到 [null, null] 烂工具列表报 "tools.10.function.name is empty".
+  // 2026-08-24 P3-E bug fix: tryBuildToolFromManifest 是 async, scanAndAppend 必须 await 它
+  //   才能拿到真 ToolDefinition. 之前漏了 await, Promise 直接进 out, 后续 .name 返 undefined,
+  //   LLM API 收到 [null, null] 烂工具列表报 "tools.10.function.name is empty".
   //   改用 for...of + await (顺序处理, 跟之前 while 行为一致, 启动 0.x s 多花在 await subprocess spawn).
+  // v3.37 (2026-08-24): 删 resolveSecretEnv 参数 (keychain 完全移除)
   return (async () => {
     for (const entry of entries) {
       const fullDir = join(dir, entry);
@@ -155,7 +157,7 @@ function scanAndAppend(dir, out, seen, scope, resolveSecretEnv) {
       const manifestPath = join(fullDir, 'manifest.json');
       if (!existsSync(manifestPath)) continue;
       // 关键: await, 拿 resolved value (ToolDefinition 或 null)
-      const def = await tryBuildToolFromManifest(manifestPath, scope, resolveSecretEnv);
+      const def = await tryBuildToolFromManifest(manifestPath, scope);
       if (!def) continue;
       if (seen.has(def.name)) {
         // 同名: workspace 覆盖 global (跟 user tool 一致)
@@ -172,7 +174,7 @@ function scanAndAppend(dir, out, seen, scope, resolveSecretEnv) {
  * 读 manifest.json, 校验 schema, 启 subprocess, 包成 ToolDefinition.
  * 任何一步失败: log warn + return null, 不让一个坏 tool 拖垮其他 tool.
  */
-async function tryBuildToolFromManifest(manifestPath, scope, resolveSecretEnv) {
+async function tryBuildToolFromManifest(manifestPath, scope) {
   let manifest;
   try {
     const raw = readFileSync(manifestPath, 'utf-8');
@@ -227,27 +229,15 @@ async function tryBuildToolFromManifest(manifestPath, scope, resolveSecretEnv) {
   }
 
   // 4. 启 subprocess
-  // ADR-0023 P3-C: 解析 manifest.env 里的 keychain: 引用
-  //   跟 MCP 同 pattern — 拿到明文 secret 后再传给 spawn
-  //   注意: externalTools.mjs 不直接 import index.mjs (避免循环), resolveSecretEnv
-  //   通过构造函数注入
-  let resolvedEnv;
-  try {
-    if (manifest.env && typeof manifest.env === 'object' && Object.keys(manifest.env).length > 0) {
-      resolvedEnv = await resolveSecretEnv(manifest.env);
-    }
-  } catch (e) {
-    console.error(`[externalTools] ${name}: env 解析失败, 跳过这个 tool:`, e);
-    return null;
-  }
-
+  // v3.37 (2026-08-24): 删 keychain 解析, manifest.env 原值透传给 subprocess
+  //   user 自己在 manifest.env 配明文. 之前 P3-C 走 resolveSecretEnv 解析 "keychain:..." 引用.
   const subprocess = new ExternalToolProcess({
     name,
     runtime,
     entryPath,
     toolDir,
     timeoutMs: typeof timeout === 'number' && timeout > 0 ? timeout : 30000,
-    extraEnv: resolvedEnv,
+    extraEnv: manifest.env,
   });
 
   // ready 是 async, 但我们不 await (tryBuildToolFromManifest 是 sync, ready 等价于 spawn OK)
@@ -327,8 +317,8 @@ class ExternalToolProcess {
     try {
       this.proc = spawn(interpreter, [entryPath], {
         cwd: toolDir,
-        // ADR-0023 P3-C: extraEnv 是 manifest.env 经过 resolveSecretEnv 解析后的明文 secret dict,
-        //   跟 process.env 合并, manifest 的值优先 (跟 MCP 同 pattern)
+        // v3.37 (2026-08-24): extraEnv 是 manifest.env 原值透传, 跟 process.env 合并,
+        //   manifest 的值优先 (跟 MCP 同 pattern). 之前 P3-C 走 resolveSecretEnv 解析, 现在删.
         env: { ...process.env, ...(extraEnv ?? {}) },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,

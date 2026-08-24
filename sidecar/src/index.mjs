@@ -194,18 +194,11 @@ async function initMcpSubsystem(workspacePath, agentDir) {
   const results = [];
   const clients = [];
   for (const config of configs) {
-    // ADR-0023 P3-C: 解析 env 里的 keychain: 引用, 拿到明文 secret 后再 spawn subprocess
-    //   失败 throw (e.g. 引用了不存在的 secret), 让 caller 决定降级
-    let resolvedEnv;
-    try {
-      resolvedEnv = await resolveSecretEnv(config.env);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[sidecar] P3-C: MCP '${config.name}' env 解析失败, 跳过: ${msg}`);
-      results.push({
-        name: config.name,
-        status: 'failed',
-        reason: `env 解析失败: ${msg}`,
+    // v3.37 (2026-08-24): keychain 完全移除, MCP env 直接用 config.env 原值
+    //   之前 P3-C 走 resolveSecretEnv 解析 "keychain:..." 引用, 现在 user 直填明文.
+    //   副作用: env 里的 "keychain:..." literal 字符串 (e.g. user 忘了改) 实际会让
+    //   MCP server 拿到字面 "keychain:..." 当 API key, 启动时 fail. 启动快 (0s wait).
+    const resolvedEnv = config.env;
         toolCount: 0,
         durationMs: 0,
       });
@@ -730,10 +723,11 @@ The re-read is a single tool call — a small cost for correctness. Skipping it 
   //   成一个 customTools 列表
   const browserTools = loadBrowserTools();
   // ADR-0023 P3-B: 扫 external tool 文件夹, 启 subprocess, 跟其它 tool 同样 merge
-  // P3-C: 传 resolveSecretEnv, 让 external tool manifest.env 也能用 keychain: 引用
+  // v3.37 (2026-08-24): 删 resolveSecretEnv 参数, keychain 完全移除, env 原值透传
+  //   user 自己在 external tool manifest.env 配明文.
   // 2026-08-24 P3-E fix: loadExternalTools 改 async 了 (P3-C bug: scanAndAppend 没 await,
   //   Promise 进 out, LLM 看到 [null,null] 烂工具列表). 必须 await.
-  const externalTools = await loadExternalTools(workspacePath, agentDir, resolveSecretEnv);
+  const externalTools = await loadExternalTools(workspacePath, agentDir);
   const allCustomTools = [...userTools, ...mcpCustomTools, ...browserTools, ...externalTools];
   if (allCustomTools.length > 0) {
     console.error(`[sidecar] total customTools: ${allCustomTools.length} (user=${userTools.length}, mcp=${mcpCustomTools.length}, browser=${browserTools.length}, external=${externalTools.length})`);
@@ -2036,33 +2030,9 @@ function callTauriCommand(command, args) {
   });
 }
 
-/**
- * ADR-0023 P3-C (2026-08-24): 解析 env dict 里的 keychain: 引用
- *   - 输入: { KEY1: "keychain:pi-agent:foo", KEY2: "literal-value" }
- *   - 输出: { KEY1: "<actual secret from keychain>", KEY2: "literal-value" }
- *   - 走 callTauriCommand("resolve_secrets") 通道, Tauri 端从 OS keychain 读
- *   - 失败 (keychain 找不到): throw, 让 caller 决定 fail-fast
- *
- * 不在 keychain 引用 (没 "keychain:" 前缀) 直接 pass-through, 向后兼容明文.
- */
-async function resolveSecretEnv(env) {
-  if (!env || Object.keys(env).length === 0) return env;
-  const keys = Object.keys(env);
-  const values = keys.map((k) => env[k]);
-  let resolvedValues;
-  try {
-    resolvedValues = await callTauriCommand('resolve_secrets', { values });
-  } catch (e) {
-    throw new Error(
-      `解析 keychain secret 失败: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-  const out = {};
-  for (let i = 0; i < keys.length; i++) {
-    out[keys[i]] = resolvedValues[i];
-  }
-  return out;
-}
+// v3.37 (2026-08-24): 删 resolveSecretEnv 函数 (keychain 完全移除)
+//   MCP / external tool env 走 user 直填明文, sidecar 透传给 subprocess.
+//   之前 P3-C 解析 "keychain:..." 引用, v3.36 改 identity pass-through, v3.37 整个删.
 
 function loadBrowserTools() {
   return [

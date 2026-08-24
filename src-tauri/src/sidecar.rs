@@ -745,19 +745,9 @@ pub fn ensure_browser_watcher(app: AppHandle) {
                     Ok(b64) => (Some(serde_json::Value::String(b64)), None),
                     Err(e) => (None, Some(e)),
                 },
-                // ADR-0023 P3-C: sidecar 发来一批 env value, 解析 keychain: 引用返明文
-                //   用法: resolve_secrets({ values: ["keychain:pi-agent:foo", "literal"] })
-                //   返: { result: ["actual_secret", "literal"] } (跟 input 1:1 对应)
-                "resolve_secrets" => {
-                    let values: Vec<String> = match args.get("values").and_then(|v| v.as_array()) {
-                        Some(arr) => arr.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
-                        None => Vec::new(),
-                    };
-                    match crate::resolve_secrets(values).await {
-                        Ok(resolved) => (Some(serde_json::json!(resolved)), None),
-                        Err(e) => (None, Some(e)),
-                    }
-                }
+                // v3.37 (2026-08-24): 删 resolve_secrets branch (keychain 完全移除)
+                //   之前 P3-C 通用 secret 管理用, sidecar 启 MCP / external tool 时调来解析
+                //   "keychain:..." 引用. v3.37 改 user 直填明文, 不再走 keychain.
                 other => (None, Some(format!("unknown command: {other}"))),
             };
 
