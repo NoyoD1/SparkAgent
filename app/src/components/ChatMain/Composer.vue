@@ -656,6 +656,10 @@ const toolCallModal = ref<ToolCallModalState>({
   result: null,
 });
 
+// 2026-08-24 v3.22 P3-F: 当前 pickSlashItem 走 marker 路径, 不调 modal. 保留这个函数
+//   留给后续 chip 点击 / 快捷键 / context menu 触发 (用户说"添加到输入栏", 不需要立即调).
+//   TS 6133 workaround: void 一下让 linter 闭嘴
+void openToolCallModal;
 function openToolCallModal(toolName: string) {
   // 1. 在 externalTools 里查 raw manifest
   const rawTool = extensionToolsStore.externalTools.find((t) => t.name === toolName);
@@ -1044,31 +1048,17 @@ async function pickSlashItem(item: SlashItem) {
     console.warn('[Composer / popover] missing kind/name:', item);
     return;
   }
-  // 2026-08-24 v3.22 P3-F+: 按 source 决定 UX, 别再用 [[ref:xxx]] 一刀切
-  //   - 'external' (外部 tool, e.g. tavily_search): 走 modal 真调, 用户在 dialog 里填 args
-  //     (sidecar 走 callExternalToolByName, 不走 marker 路径). 需要 sidecar running.
-  //   - 'browser' (web_navigate / web_get_text / web_screenshot): LLM 直接调, 关 popover
-  //     即可. 不插 marker (browser tool 已内置在 LLM tool 列表, marker 多余).
-  //     之前 [[ref:browser:web_navigate]] 会让 sidecar 误以为 user 引用, 实际无意义.
-  //   - 'mcp' (MCP server, e.g. MiniMax): 同 browser, 走 marker 路径会拉 server JSON body
-  //     (force-read 时), 但 user 多数情况是直接调, 关 popover 即可.
-  //   - 'skill' / 'tool' / 'user': 插 marker (老逻辑, 触发 LLM 上下文注入)
-  if (item.kind === 'extension' && item.source === 'external') {
-    openToolCallModal(item.name);
-    return;
-  }
-  if (item.kind === 'extension' && item.source === 'browser') {
-    closeSlashPopover();
-    console.log(`[Composer / popover] browser tool '${item.name}' 选中, LLM 直接调, 不插 marker`);
-    return;
-  }
-  if (item.kind === 'mcp') {
-    closeSlashPopover();
-    console.log(`[Composer / popover] MCP '${item.name}' 选中, LLM 通过 mcp_<name>_<tool> 直接调, 不插 marker (除非 user 显式想拉 server JSON body)`);
-    return;
-  }
-  // D214: 统一 marker 格式 [[ref:kind:name]], send 时按 kind 解析
-  //   适用: skill / tool / user (3 个老 reference kind)
+  // 2026-08-24 v3.22 P3-F: 统一插 marker (用户期望 "添加到输入栏")
+  //   之前 v3.21 P3-E 我按 kind 分流: external 走 modal 真调, browser/mcp 关 popover.
+  //   但用户原话是"添加到输入栏" (想要 marker 加进去), 不是"立即调". 改回统一 marker:
+  //   - extension (Tavily): [[ref:extension:tavily_search]] → sidecar 没特殊处理, 但
+  //     tavily_search 已在 LLM tool list, marker 文本作为上下文. 跟 user tool 同 pattern.
+  //   - browser (web_navigate): [[ref:browser:web_navigate]] → LLM tool list 已有, marker
+  //     仅作为 hint. 跟之前能用的行为一致.
+  //   - mcp (MiniMax): [[ref:mcp:MiniMax]] → send_prompt 会拉 server JSON body 给 LLM 上下文.
+  //   - skill / tool / user: 老逻辑, 触发 LLM 上下文注入.
+  //
+  // "Run now" 走 modal 的入口在 input 里 chip 选中后, 不是 popover (UX 更直).
   const marker = `[[ref:${item.kind}:${item.name}]]`;
   await insertMarkerAtCursor(marker);
   console.log(`[Composer / popover] ${item.kind} reference inserted: ${item.name}`);

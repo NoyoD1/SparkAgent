@@ -598,6 +598,14 @@ async function applyImport() {
 
 onMounted(() => {
   refreshAndShowPath();
+  // 2026-08-24 v3.22 P3-F: 进 McpTab 自动 forceRetest (跟 unityMCP 行为对齐)
+  //   之前要发消息触发 sidecar 启, 然后才看到 status. 现在: 进 tab → triggerRestart sidecar
+  //   → sidecar 重启完 emit mcp_status → store 更新 → UI 显示.
+  //   只在有 server 时做 (没 server 没必要 restart).
+  if (mcpStore.servers.length > 0) {
+    // 短暂延后, 让 refreshAndShowPath 跑完 (UI 先显示, 再 trigger restart)
+    setTimeout(() => { void forceRetestMcp(); }, 200);
+  }
 });
 
 // ====== 2026-08-21 v0.6.3-rc1 P2-1.2: 包装 refresh 同步 ws path (UI 显示用) ======
@@ -1163,6 +1171,7 @@ async function refreshAndShowPath() {
             <details
               v-else-if="statusByName.get(s.name)?.status === 'started' && (statusByName.get(s.name)?.tools?.length ?? 0) > 0"
               class="pad-mcptab__item-tools"
+              open
             >
               <summary>{{ statusByName.get(s.name)!.tools.length }} tool(s) — LLM 看到 mcp_<code>{{ s.name }}</code>_<code>...</code></summary>
               <ul>
