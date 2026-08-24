@@ -603,6 +603,35 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   /**
+   * 2026-08-25 v3.57 配套: 批量删除所有 archived sessions.
+   *   user 反馈: 长 prompt OOM 后归档区累积几十条空 session 没法快速清, 单条右键太慢.
+   *   修: 遍历 archived, 调 deleteSessionPermanently (走 Tauri 删 jsonl + store filter).
+   *   失败不 throw, 累积到 failed 数组里, 让 user 看到哪条失败 (有的 jsonl 可能被进程锁住).
+   *   不递归 stop active sidecar — archived session 不会正在 LLM call (active session 不能归档).
+   */
+  async function deleteAllArchivedSessions(): Promise<{
+    deleted: number;
+    failed: Array<{ id: string; title: string; error: string }>;
+  }> {
+    const archived = sessions.value.filter((s) => s.archived);
+    if (archived.length === 0) return { deleted: 0, failed: [] };
+    let deleted = 0;
+    const failed: Array<{ id: string; title: string; error: string }> = [];
+    for (const s of archived) {
+      try {
+        await deleteSessionPermanently(s.id);
+        deleted++;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        failed.push({ id: s.id, title: s.autoTitle || s.title || '新任务', error: msg });
+        console.warn(`[session] deleteAllArchivedSessions: failed ${s.id} (${msg}), continuing with rest`);
+      }
+    }
+    console.log(`[session] deleteAllArchivedSessions: done, deleted=${deleted}, failed=${failed.length}`);
+    return { deleted, failed };
+  }
+
+  /**
    * 2026-08-24 v3.26: 永久删除 session (从 store 移除 + 删本地 jsonl)
    *   ⚠️ 仅允许对 archived session 调, UI 必须在 archive 列表才显示此入口 (Phase 3 流程约束)
    *   改: 之前 v0.6+ 注释说"实际不删 Pi SDK jsonl", 现在通过 Tauri delete_session_files 真删
@@ -804,6 +833,7 @@ export const useSessionStore = defineStore('session', () => {
     archiveSession,
     restoreSession,
     deleteSessionPermanently,
+    deleteAllArchivedSessions,
     setPinned,
     togglePin,
     setAutoTitle,

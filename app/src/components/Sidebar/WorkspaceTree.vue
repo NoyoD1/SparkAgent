@@ -97,6 +97,42 @@ function toggleArchiveSection() {
   }
 }
 
+// ====== 2026-08-25 v3.57 配套: 批量删除所有 archived sessions ======
+//   背景: OOM 后归档区累积几十条空 session, 单条右键删除太慢.
+//   走 sessionStore.deleteAllArchivedSessions (内部 Tauri 删 jsonl + store filter).
+//   confirm 防止误删, 失败累积 failed 数组一次性 toast 报告.
+const isDeletingArchived = ref(false);
+const deleteProgressText = ref('');
+async function onDeleteAllArchived() {
+  const count = sessionStore.archivedSessions.length;
+  if (count === 0) return;
+  // 二次确认: 防误删 (archived session 删了没法恢复)
+  const ok = window.confirm(
+    `确定永久删除全部 ${count} 个归档 session?\n\n会删除本地 jsonl 文件, 此操作不可撤销.`,
+  );
+  if (!ok) return;
+  isDeletingArchived.value = true;
+  deleteProgressText.value = '...';
+  try {
+    const result = await sessionStore.deleteAllArchivedSessions();
+    if (result.failed.length > 0) {
+      const sample = result.failed.slice(0, 3).map((f) => `  - ${f.title}: ${f.error}`).join('\n');
+      window.alert(
+        `已删除 ${result.deleted} 个, 失败 ${result.failed.length} 个:\n${sample}${
+          result.failed.length > 3 ? `\n  ... 还有 ${result.failed.length - 3} 个` : ''
+        }`,
+      );
+    } else {
+      useUiStore().showToast(`已清空 ${result.deleted} 个归档 session`, 'success', 3000);
+    }
+  } catch (e) {
+    window.alert(`批量删除失败: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    isDeletingArchived.value = false;
+    deleteProgressText.value = '';
+  }
+}
+
 const pickingFolder = ref(false);
 
 // v0.6+: 二级页面模式 — 文件树全屏占 sidebar, 隐藏 session 列表.
@@ -900,6 +936,20 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
             归档
           </span>
           <span class="pad-wstree__count">{{ sessionStore.archivedSessions.length }}</span>
+          <!-- 2026-08-25 v3.57: 归档批量删除按钮, 删 jsonl + store filter, 跟右键"永久删除"同效果但批量 -->
+          <button
+            type="button"
+            class="pad-wstree__bulk-delete"
+            title="永久删除所有归档 session (含本地 jsonl)"
+            :disabled="isDeletingArchived"
+            @click.stop="onDeleteAllArchived"
+            @mousedown.stop
+            @contextmenu.stop
+          >
+            <Trash2 :size="11" :stroke-width="1.75" />
+            <span v-if="!isDeletingArchived">清空</span>
+            <span v-else>{{ deleteProgressText }}</span>
+          </button>
           <ChevronRight
             :size="11"
             :stroke-width="2"
@@ -1866,5 +1916,33 @@ function matchHint(match: 'title' | 'autoTitle' | `tag:${string}`): string {
 .pad-preview-leave-to {
   opacity: 0;
   transform: translateY(-50%) translateX(-4px);
+}
+
+/* 2026-08-25 v3.57: 归档 section 批量删除按钮, 跟计数并列, hover 时变红 */
+.pad-wstree__bulk-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  margin-right: 4px;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: var(--pad-radius-sm, 4px);
+  background: transparent;
+  color: var(--pad-fg-tertiary, #888);
+  font-size: var(--pad-fs-10, 10px);
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms;
+  font-family: var(--pad-font-sans);
+  line-height: 1;
+}
+.pad-wstree__bulk-delete:hover:not(:disabled) {
+  background: var(--pad-bg-danger-subtle, rgba(220, 38, 38, 0.08));
+  color: var(--pad-fg-danger, #dc2626);
+  border-color: var(--pad-border-danger-subtle, rgba(220, 38, 38, 0.2));
+}
+.pad-wstree__bulk-delete:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 </style>
