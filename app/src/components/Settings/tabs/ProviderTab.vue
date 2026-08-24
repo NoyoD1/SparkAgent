@@ -11,7 +11,8 @@
  * - 左侧"自定义" (openai-compatible) 单独一节, 底部"+ 添加自定义"按钮.
  *   用户自填 baseUrl + key + label, 走原来 AddProviderForm 流程.
  *
- * - 持久化: provider config 走 Rust (load_app_config / save_app_config), apiKey 走 OS keychain.
+ * - 持久化: provider config + apiKey 走 Rust (load_app_config / save_app_config), 全部存 settings.json 明文.
+ *   v3.37 (2026-08-24): 删 keychain 依赖, apiKey 跟 baseUrl 一样存 config (user 反馈 key 都在本地).
  *   跟 WebView2 localStorage 解耦 — 清 WebView2 缓存不会丢配置.
  */
 import { ref, computed, onMounted } from 'vue';
@@ -35,8 +36,16 @@ const viewMode = ref<'list' | 'add'>('list');
 /** 左侧选中项的 id: built-in 用 PROVIDER_OPTIONS.id (e.g. 'anthropic'), custom 用 config.providers[].id */
 const selection = ref<{ kind: 'builtin'; type: ProviderType } | { kind: 'provider'; id: string } | null>(null);
 
-/** keychain 状态: providerId -> { configured, preview } */
+/** v3.37 (2026-08-24): apiKey 存 config 明文, keyStatus 从 config store 算 (之前 keychain 状态从 Tauri 拉) */
 const keyStatus = ref<Record<string, { configured: boolean; preview: string | null }>>({});
+
+/** v3.37 (2026-08-24): 前端 mask (之前 Tauri 端 keyring::mask). apiKey 现在明文存 config,
+ *  UI 显示时 mask. 规则: 短于 8 字符全 mask, 否则前 2 + "..." + 后 4. */
+function maskKey(key: string | undefined | null): string | null {
+  if (!key) return null;
+  if (key.length <= 8) return '***';
+  return `${key.slice(0, 2)}...${key.slice(-4)}`;
+}
 
 /** 内置 provider 的 key 输入 */
 const newBuiltinKey = ref<string>('');
@@ -276,16 +285,15 @@ onMounted(async () => {
 });
 
 async function refreshAllKeyStatus() {
-  try {
-    const list = await piTauri.listApiKeys();
-    const next: Record<string, { configured: boolean; preview: string | null }> = {};
-    for (const k of list) {
-      next[k.providerId] = { configured: k.configured, preview: k.preview };
-    }
-    keyStatus.value = next;
-  } catch (e) {
-    console.error('[provider-tab] listApiKeys failed', e);
+  // v3.37 (2026-08-24): 从 config store 读 apiKey 状态 (之前调 listApiKeys 走 keychain)
+  const next: Record<string, { configured: boolean; preview: string | null }> = {};
+  for (const p of config.providers) {
+    next[p.id] = {
+      configured: !!p.apiKey && p.apiKey.length > 0,
+      preview: maskKey(p.apiKey),
+    };
   }
+  keyStatus.value = next;
 }
 
 /** ====== 内置 provider: 配 key ====== */
@@ -297,14 +305,12 @@ async function configureBuiltin() {
     return;
   }
   builtinKeyState.value = 'saving';
-  builtinKeyMsg.value = '存 keychain…';
+  builtinKeyMsg.value = '存 settings.json…';
   const t = currentBuiltinType.value;
   try {
-    // 1. 建 provider (还没存 model, 先建个空壳)
-    const provider = config.addProvider({ type: t });
-    // 2. 存 keychain
-    await piTauri.saveApiKey(provider.id, newBuiltinKey.value.trim());
-    // 3. 设为 active provider
+    // v3.37 (2026-08-24): apiKey 一次性 addProvider 时存 (跟 baseUrl 一样, 之前走 keychain 两步)
+    const provider = config.addProvider({ type: t, apiKey: newBuiltinKey.value.trim() });
+    // 2. 设为 active provider
     config.setActiveProvider(provider.id);
     // 4. 刷新
     await refreshAllKeyStatus();
@@ -329,12 +335,13 @@ async function saveKey() {
     return;
   }
   keyState.value = 'saving';
-  keyMessage.value = '存 keychain…';
+  keyMessage.value = '存 settings.json…';
   try {
-    await piTauri.saveApiKey(selectedProvider.value.id, newKeyInput.value.trim());
+    // v3.37 (2026-08-24): apiKey 改存 config (跟 baseUrl 等一起), updateProvider 写 settings.json
+    config.updateProvider(selectedProvider.value.id, { apiKey: newKeyInput.value.trim() });
     newKeyInput.value = '';
     keyState.value = 'idle';
-    keyMessage.value = '已存 OS keychain';
+    keyMessage.value = '已存 settings.json';
     await refreshAllKeyStatus();
     setTimeout(() => { keyMessage.value = ''; }, 2000);
   } catch (e) {
@@ -348,17 +355,18 @@ async function deleteKey() {
   // P1 #1: 用 ConfirmDialog 替代 window.confirm
   const ok = await showConfirm({
     title: '删除 API key',
-    message: `从 OS keychain 删除 ${selectedProvider.value.label} 的 API key? (provider 配置会保留, 只是断开 key)`,
+    message: `从 settings.json 清空 ${selectedProvider.value.label} 的 API key? (provider 配置会保留, 只是断开 key)`,
     confirmLabel: '删除',
     danger: true,
   });
   if (!ok) return;
   keyState.value = 'deleting';
-  keyMessage.value = '删 keychain…';
+  keyMessage.value = '清空…';
   try {
-    await piTauri.deleteApiKey(selectedProvider.value.id);
+    // v3.37 (2026-08-24): apiKey 改存 config, 清空用 updateProvider 设 undefined
+    config.updateProvider(selectedProvider.value.id, { apiKey: undefined });
     keyState.value = 'idle';
-    keyMessage.value = '已从 keychain 删除';
+    keyMessage.value = '已从 settings.json 清空';
     await refreshAllKeyStatus();
     setTimeout(() => { keyMessage.value = ''; }, 2000);
   } catch (e) {
@@ -373,7 +381,7 @@ async function testConnection() {
   const status = keyStatus.value[p.id];
   if (!status?.configured) {
     testState.value = 'fail';
-    testMessage.value = '需要先配 key (存到 keychain)';
+    testMessage.value = '需要先配 apiKey (Settings → Provider 详情)';
     return;
   }
   testState.value = 'testing';
@@ -435,26 +443,15 @@ async function removeProvider(provider: ProviderConfig) {
   } else {
     const ok = await showConfirm({
       title: '删除 provider',
-      message: `确定删除 "${provider.label}"? 会清除这个 provider 的本地 config + keychain 里的 key.`,
+      message: `确定删除 "${provider.label}"? 会清除这个 provider 的本地 config (含 settings.json 里的 apiKey 字段).`,
       confirmLabel: '删除',
       danger: true,
     });
     if (!ok) return;
   }
-  // P1 #6 fix: 顺序改为先删 keychain, 成功后再删 config, 失败回滚提示 user
-  try {
-    await piTauri.deleteApiKey(provider.id);
-  } catch (e) {
-    console.error('[ProviderTab] deleteApiKey failed:', e);
-    await showConfirm({
-      title: '删除 keychain 失败',
-      message: `从 OS keychain 删除 API key 失败: ${e instanceof Error ? e.message : String(e)}\n\nprovider 配置已保留, keychain 里的 key 可能成孤儿. 请去系统凭据管理器手动清理.`,
-      confirmLabel: '我知道了',
-      cancelLabel: '',
-      danger: true,
-    });
-    return;
-  }
+  // v3.37 (2026-08-24): keychain 完全移除, 不需要再单独 deleteApiKey. config.removeProvider
+  //   直接清 apiKey 字段 (跟 baseUrl 一起). 之前 P1 #6 顺序改成"先删 keychain 再删 config",
+  //   现在一步 removeProvider 全清.
   config.removeProvider(provider.id);
   void refreshAllKeyStatus();
   // 选回这个 type 对应的 builtin (新建或重选)
@@ -516,7 +513,7 @@ async function fetchModels(provider: ProviderConfig) {
   const status = keyStatus.value[provider.id];
   if (!status?.configured) {
     fetchState.value = 'fail';
-    fetchMessage.value = '需要先在 API Key 段保存 key (存 OS keychain)';
+    fetchMessage.value = '需要先在 API Key 段保存 key (存 settings.json)';
     return;
   }
   fetchState.value = 'fetching';
@@ -687,7 +684,7 @@ function onProviderAdded(id: string) {
           <div class="pad-provider-detail__row">
             <div class="pad-provider-detail__row-label">
               <span>API Key</span>
-              <span class="pad-provider-detail__hint">存 OS keychain (Windows Credential Manager / macOS Keychain / Linux Secret Service)</span>
+              <span class="pad-provider-detail__hint">v3.37: 存 settings.json 明文 (跟 baseUrl 一起, 明文 key 在本地 config.json)</span>
             </div>
             <div class="pad-provider-detail__key-form">
               <input
@@ -753,11 +750,11 @@ function onProviderAdded(id: string) {
             />
           </div>
 
-          <!-- API Key (keychain) -->
+          <!-- API Key (v3.37 改: 存 settings.json 明文, 不走 keychain) -->
           <div class="pad-provider-detail__row">
             <div class="pad-provider-detail__row-label">
               <span>API Key</span>
-              <span class="pad-provider-detail__hint">存 OS keychain</span>
+              <span class="pad-provider-detail__hint">存 settings.json 明文 (跟 baseUrl 一起)</span>
             </div>
             <div v-if="currentKeyStatus?.configured" class="pad-provider-detail__key-configured">
               <span class="pad-provider-detail__key-status">
@@ -788,20 +785,20 @@ function onProviderAdded(id: string) {
                 @click="saveKey"
               >
                 <Save v-if="keyState !== 'saving'" :size="12" :stroke-width="1.75" />
-                <span>{{ keyState === 'saving' ? '存中…' : '存 keychain' }}</span>
+                <span>{{ keyState === 'saving' ? '存中…' : '保存到 settings.json' }}</span>
               </button>
             </div>
             <p v-if="keyMessage" class="pad-provider-detail__hint" :class="{ 'is-err': keyState === 'idle' && keyMessage.includes('不能') }">
               {{ keyMessage }}
             </p>
 
-            <!-- P0 #1: 测试连接 (keychain 配好 key 后才能测) -->
+            <!-- P0 #1: 测试连接 (apiKey 配好 key 后才能测) -->
             <div v-if="currentKeyStatus?.configured" class="pad-provider-detail__row" style="margin-top: 8px;">
               <div class="pad-provider-detail__row-label">
                 <span>连通性</span>
                 <span class="pad-provider-detail__hint">
                   <template v-if="selectedProvider!.type === 'openai-compatible'">真实 HTTP 测试 ({{ selectedProvider!.baseUrl || 'no baseUrl' }})</template>
-                  <template v-else>keychain 验证 (内置 provider 首次对话时验通)</template>
+                  <template v-else>首次对话时验通 (内置 provider LLM 调)</template>
                 </span>
               </div>
               <div class="pad-provider-detail__key-form">

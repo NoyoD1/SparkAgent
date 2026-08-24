@@ -3,8 +3,9 @@
  *
  * v0.3.8+: 持久化改走 Rust (load_app_config / save_app_config) → %APPDATA%\com.piagent.desktop\config.json
  * - 之前用 WebView2 localStorage 会被清 WebView2 缓存时一起擦掉
- * - 现在独立 OS 文件, 跟 keychain 一样安全 + 持久
- * - apiKey 继续走 OS keychain (永不出前端)
+ * - 现在独立 OS 文件持久
+ * - v3.37 (2026-08-24): apiKey 也存 settings.json (跟 baseUrl 一起, 明文)
+ *   之前走 OS keychain, user 反馈 key 都在本地 + keychain 解析 60s timeout 拖慢链路
  *
  * v0.3.8.1+: Pinia HMR 保护 (防止 Vite 热更时 store 状态被重置为 [] 触发 watch 写空)
  * 初始化: 空状态起步, App.vue onMounted 调 init() 异步加载
@@ -97,13 +98,16 @@ export interface ProviderConfig {
   type: ProviderType;
   label: string;
   /**
-   * v0.2: apiKey 不在这里, 走 server .env (process.env[`${PROVIDER}_API_KEY`])
-   * 兼容旧版: load 时读到 apiKey 字段会丢弃 (红色 migrate)
+   * v3.37 (2026-08-24): apiKey 改存 settings.json 明文 (跟 baseUrl 一起, 跟 MCP / external tool
+   *   配置文件同 pattern). 之前走 OS keychain, user 反馈 "key 都在本地个人电脑, 不需要 keychain
+   *   多一层" + keychain 解析 60s timeout 拖慢 send_prompt 链路. v3.37 整个移除.
+   *   user 在 Settings → Providers 加 provider 时直填 apiKey 字段, Settings UI 同步改.
+   *   明文存 .pi/agent/config.json, 跟 .env / 配置文件明文 secret 一样.
    */
-  apiKey?: string;  // deprecated, will be stripped on load
+  apiKey?: string;
   baseUrl?: string;
   // P2 #1 fix: 删 apiKeyEnv dead code 字段. v0.2 设计是"openai-compatible 用 env 名取 key",
-  //   实际 BYOK 全部走 keychain, 整个字段没人读 (UI / sidecar / Rust DTO 全无引用).
+  //   BYOK 走 keychain (v3.22-v3.36) / settings.json (v3.37), 整个字段没人读 (UI / sidecar / Rust DTO 全无引用).
   //   保留 schema 字段反而是 tech debt, 后续开发看到会以为是 feature.
   models: ModelInfo[];
   activeModelId?: string;
@@ -178,12 +182,8 @@ export const useConfigStore = defineStore('config', () => {
   async function init() {
     try {
       const cfg = await piTauri.loadAppConfig();
-      // 强制 strip apiKey 字段 (防御性, 旧数据可能带过来)
-      const cleanProviders = (cfg.providers ?? []).map((p: any) => {
-        const { apiKey: _apiKey, ...rest } = p;
-        return rest as ProviderConfig;
-      });
-      providers.value = cleanProviders;
+      // v3.37 (2026-08-24): apiKey 改存 settings.json, load 时保留 (不再 strip)
+      providers.value = (cfg.providers ?? []) as ProviderConfig[];
       activeProviderId.value = cfg.activeProviderId ?? null;
       // v0.3.8.1 fix: 旧 build 写过空串, 落盘后读出还是空. 用 || 替代 ?? 让 "" 也走 fallback
       const tl = (cfg.thinkingLevel as any) || 'medium';
@@ -301,6 +301,9 @@ export const useConfigStore = defineStore('config', () => {
     baseUrl?: string;
     /** P2 #2 fix: 内置 type 已配过, 允许覆盖 (例如用户误删想重建). 走 builtin UI 流程时 force=true. */
     force?: boolean;
+    /** v3.37 (2026-08-24): apiKey 改存 settings.json 明文 (跟 baseUrl 一起). 可选, 内置 type 走 builtin
+     *   UI 流程时一次性传 (apiKey 一起存进 config). openai-compatible 通常走详情面板 updateProvider. */
+    apiKey?: string;
   }): ProviderConfig {
     // P2 #2 fix: 防重复 type 拒绝 (内置 provider 配过就不让再加; openai-compatible 允许多个)
     if (!input.force && input.type !== 'openai-compatible') {
@@ -316,6 +319,8 @@ export const useConfigStore = defineStore('config', () => {
       type: input.type,
       label: input.label?.trim() || `${defaultLabel} #${providers.value.length + 1}`,
       baseUrl: input.baseUrl?.trim() || undefined,
+      // v3.37 (2026-08-24): apiKey 存 config 明文 (之前 keychain 完全移除)
+      apiKey: input.apiKey?.trim() || undefined,
       models: [],
       enabled: true,
       createdAt: new Date().toISOString(),
@@ -499,20 +504,16 @@ export const useConfigStore = defineStore('config', () => {
       if (!Array.isArray(parsed.providers) || parsed.providers.length === 0) {
         return { migrated: 0, source: 'none' };
       }
-      // 强制 strip apiKey (旧 v2/v3 数据如果带过的话)
-      const cleanProviders: ProviderConfig[] = parsed.providers.map((p: any) => {
-        const { apiKey: _apiKey, ...rest } = p;
-        return rest as ProviderConfig;
-      });
-      providers.value = cleanProviders;
+      // v3.37 (2026-08-24): apiKey 改存 settings.json, 不 strip (从 localStorage 迁移时保留)
+      providers.value = parsed.providers as ProviderConfig[];
       if (parsed.activeProviderId) activeProviderId.value = parsed.activeProviderId;
       if (parsed.thinkingLevel && (parsed.thinkingLevel === 'off' || parsed.thinkingLevel === 'low' || parsed.thinkingLevel === 'medium' || parsed.thinkingLevel === 'high')) {
         thinkingLevel.value = parsed.thinkingLevel;
       }
-      console.log('[config] migrated', cleanProviders.length, 'providers from localStorage → config.json');
+      console.log('[config] migrated', providers.value.length, 'providers from localStorage → config.json');
       // 主动 persist 一次 (写盘), 之后 watch 也会触发
       void persist();
-      return { migrated: cleanProviders.length, source: 'localStorage' };
+      return { migrated: providers.value.length, source: 'localStorage' };
     } catch (e) {
       console.warn('[config] migrateFromLocalStorage failed', e);
       return { migrated: 0, source: 'none' };

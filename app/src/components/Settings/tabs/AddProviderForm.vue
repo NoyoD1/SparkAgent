@@ -2,10 +2,10 @@
 /**
  * AddProviderForm — Phase 3 Tauri 流程
  *
- * 流程: 类型 + (openai-compatible) baseUrl + API Key (存 OS keychain) + 创建 + 拉取模型
- *   - API key 不存 localStorage, 不进 WS, 永不出现在前端 (除了输入框输入瞬间)
- *   - 走 piTauri.saveApiKey(providerId, apiKey) 存到 Windows Credential Manager
- *   - 拉模型走 piTauri.fetchProviderModels(providerId, baseUrl), Rust 从 keychain 取 key
+ * 流程: 类型 + (openai-compatible) baseUrl + (可选) API Key + 创建
+ *   - v3.37 (2026-08-24): apiKey 改可选 — 留空也能 create 空 provider, 后续到详情面板用 updateProvider 填
+ *   - 之前强制要填是因为 keychain 两步 (addProvider + saveApiKey) 容易忘
+ *   - 拉模型走 piTauri.fetchProviderModels(providerId, baseUrl), Rust 从 settings.json 取 key
  */
 import { ref, computed } from 'vue';
 import { Plus, Server, Globe, Sparkles, AlertCircle, Loader2, Check, ArrowLeft, KeyRound } from 'lucide-vue-next';
@@ -35,15 +35,17 @@ const testMessage = ref<string>('');
 const needsBaseUrl = computed(() =>
   PROVIDER_OPTIONS.find((o) => o.id === type.value)?.needsBaseUrl ?? false,
 );
-const needsApiKey = computed(() => true); // 全部 provider 都需要 key
+// v3.37 (2026-08-24): apiKey 改可选 — 允许先建空 provider, 后续到详情面板填.
+//   之前强制要填是因为 keychain 两步 (addProvider + saveApiKey) 容易忘, 现在 settings.json
+//   一处存, 详情面板改 updateProvider 一样, user 体验上更顺 (先建结构, 后填 key).
 
 const typeOptions = computed<PadSelectOption<ProviderType>[]>(() =>
   PROVIDER_OPTIONS.map((o) => ({
     value: o.id,
     label: o.label,
     description: o.needsBaseUrl
-      ? '需要 baseUrl + API Key, key 存 OS keychain'
-      : '需要 API Key, key 存 OS keychain (Phase 3 内置 provider LLM 调 待补)',
+      ? '需要 baseUrl (apiKey 可后续在详情面板填, 存 settings.json 明文)'
+      : 'apiKey 可后续在详情面板填 (存 settings.json 明文)',
   })),
 );
 
@@ -57,24 +59,30 @@ async function submit() {
     submitMessage.value = 'OpenAI 兼容需要 baseUrl';
     return;
   }
-  if (needsApiKey.value && !apiKey.value.trim()) {
-    submitState.value = 'fail';
-    submitMessage.value = '需要填 API Key';
-    return;
-  }
+  // v3.37: apiKey 改可选, 留空也能 create (后续到详情面板填)
   submitState.value = 'submitting';
-  submitMessage.value = '创建 + 存 keychain + 拉取模型…';
+  submitMessage.value = apiKey.value.trim()
+    ? '创建 + 存 settings.json + 拉取模型…'
+    : '创建空 provider (apiKey 留空, 后续到详情面板填)…';
   try {
-    // 1. 先在 localStorage 建占位 (拿到 providerId, 后面用)
+    // v3.37 (2026-08-24): apiKey 改存 settings.json 明文, 一次性 addProvider 时传 (跟 baseUrl 一起)
+    //   之前 keychain 两步 (addProvider + saveApiKey), 现在一步.
+    //   apiKey 留空也能 create (后续到详情面板用 updateProvider 填).
     const provider = config.addProvider({
       type: type.value,
       label: label.value.trim() || undefined,
       baseUrl: needsBaseUrl.value ? baseUrl.value.trim() : undefined,
+      apiKey: apiKey.value.trim() || undefined,
     });
-    // 2. 存 API key 到 keychain
-    await piTauri.saveApiKey(provider.id, apiKey.value.trim());
-    // 3. 拉取/初始化模型 (2026-08-24 v3.28: 只剩 openai-compatible, 走 fetchProviderModels)
+    // 拉取/初始化模型 (2026-08-24 v3.28: 只剩 openai-compatible, 走 fetchProviderModels)
     //   内置 7 个 provider 删了, model 列表全靠 /v1/models 拉, 或者 user 手输.
+    //   v3.37: apiKey 留空时跳过拉取 (会 401), 直接跳到详情让 user 填.
+    if (!apiKey.value.trim()) {
+      submitState.value = 'ok';
+      submitMessage.value = `已创建空 provider (无 apiKey). 跳到详情面板填 apiKey + 拉模型`;
+      setTimeout(() => emit('added', provider.id), 500);
+      return;
+    }
     const result = await fetchProviderModels({
       type: type.value,
       providerId: provider.id,
@@ -85,12 +93,12 @@ async function submit() {
       const autoFilled = result.models.filter((m) => m.autoSource).length;
       submitState.value = 'ok';
       submitMessage.value = autoFilled > 0
-        ? `已创建, key 已存 keychain, 拉到 ${result.models.length} 个 model (${autoFilled} 个自动填充 metadata)`
-        : `已创建, key 已存 keychain, 拉到 ${result.models.length} 个模型`;
+        ? `已创建, apiKey 存 settings.json, 拉到 ${result.models.length} 个 model (${autoFilled} 个自动填充 metadata)`
+        : `已创建, apiKey 存 settings.json, 拉到 ${result.models.length} 个模型`;
       setTimeout(() => emit('added', provider.id), 700);
     } else {
       submitState.value = 'ok';
-      submitMessage.value = `已创建, key 已存 keychain. 拉模型失败: ${result.error ?? '未知错误'} — 手动加 model id`;
+      submitMessage.value = `已创建, apiKey 存 settings.json. 拉模型失败: ${result.error ?? '未知错误'} — 手动加 model id`;
       setTimeout(() => emit('added', provider.id), 1500);
     }
   } catch (e) {
@@ -105,7 +113,7 @@ function cancel() {
 
 /**
  * P0 #1 fix: 测试连接. 直接传 apiKey 给 Tauri, 不污染 store/config (避免"测个连接就建个临时 provider" 又删).
- * providerId 传一个虚拟的就行 (Tauri 这层在 apiKey 模式下不查 keychain).
+ * providerId 传一个虚拟的就行 (Tauri 这层在 apiKey 模式下不查 settings.json).
  */
 async function testConnection() {
   if (needsBaseUrl.value && !baseUrl.value.trim()) {
@@ -143,7 +151,7 @@ async function testConnection() {
         <ArrowLeft :size="14" :stroke-width="1.75" />
         <span>返回列表</span>
       </button>
-      <p class="pad-addprov__sub">选 provider 类型, API key 存 OS keychain (Windows Credential Manager / macOS Keychain / Linux Secret Service)</p>
+      <p class="pad-addprov__sub">选 provider 类型, apiKey 可留空后续到详情面板填 (v3.37 存 settings.json 明文)</p>
     </div>
 
     <div class="pad-addprov__body">
@@ -189,21 +197,21 @@ async function testConnection() {
         </div>
       </Transition>
 
-      <!-- API Key (Phase 3: 存 OS keychain, 永不出现在前端除了输入瞬间) -->
+      <!-- API Key (v3.37 改: 可选. 留空也能 create, 后续到详情面板填) -->
       <div class="pad-addprov__field">
         <label class="pad-addprov__label">
           <KeyRound :size="12" :stroke-width="1.75" /> API Key
-          <span class="pad-addprov__label-hint">存 OS keychain, 不进 localStorage</span>
+          <span class="pad-addprov__label-hint">可选 — 留空也能创建, 后续到详情面板填 (存 settings.json 明文)</span>
         </label>
         <input
           v-model="apiKey"
           class="pad-addprov__input pad-addprov__input--key"
           type="password"
-          placeholder="sk-..."
+          placeholder="sk-... (留空 → 详情面板填)"
           autocomplete="off"
         />
         <p class="pad-addprov__hint">
-          key 在前端只活在输入瞬间, 提交后立刻进 keychain, 明文不会再出现.
+          填了存 settings.json (跟 baseUrl 一起), 显示在 provider 详情 (mask preview).
         </p>
       </div>
     </div>
@@ -266,7 +274,7 @@ async function testConnection() {
         >
           <Loader2 v-if="submitState === 'submitting'" :size="14" :stroke-width="1.75" class="is-spinning" />
           <Plus v-else :size="14" :stroke-width="1.75" />
-          <span>{{ submitState === 'submitting' ? '创建中' : '创建 + 存 keychain' }}</span>
+          <span>{{ submitState === 'submitting' ? '创建中' : '创建 + 存 settings.json' }}</span>
         </button>
       </div>
     </div>
