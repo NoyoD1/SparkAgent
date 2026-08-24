@@ -267,12 +267,20 @@ const buttonTitle = computed(() => {
           </span>
         </div>
       </div>
-      <!-- 合计行 (D209 累加): 4 分类总和 + context 部分
-           跟 Composer 底部 "上下文 X%" 用同一个 contextTokens 数值, 跟 percent 一致 -->
+      <!-- v3.31: 合计行拆分显示, 解释 6.4K (上) vs 6.7K (合计) 的关系
+           user 反馈 '我看你写合计是 6.7K, 但为什么上面是 6.4K?' (疑惑)
+           - 顶部 6.4K = context 占用 (input + cacheRead + cacheWrite, 跟 Pi SDK ctx window 算法一致)
+           - 合计 6.7K = 4 分类总和 (含 output 250, 不是 context 占用, 是 total token 使用)
+           拆成 "context 6.4K + output 250 = 6.7K total" 避免 user 数字对比疑惑.
+           保留括号内 context 部分供快速 reference. -->
       <div class="pad-ctx-popover-total">
-        合计 {{ formatTokens(realBreakdown.input + realBreakdown.output + realBreakdown.cacheRead + realBreakdown.cacheWrite) }} tokens
-        <span class="pad-ctx-popover-total-context">
-          ({{ formatTokens(realBreakdown.input + realBreakdown.cacheRead) }} context)
+        context {{ formatTokens(realBreakdown.input + realBreakdown.cacheRead + realBreakdown.cacheWrite) }}
+        <span v-if="realBreakdown.output > 0" class="pad-ctx-popover-total-output">
+          + output {{ formatTokens(realBreakdown.output) }}
+        </span>
+        =
+        <span class="pad-ctx-popover-total-sum">
+          {{ formatTokens(realBreakdown.input + realBreakdown.output + realBreakdown.cacheRead + realBreakdown.cacheWrite) }} total
         </span>
       </div>
       <!-- v0.6 (N3): 6 分类 FE 估算 (来源构成) - 跟图 1/图 2 用户期望一致
@@ -663,7 +671,8 @@ const buttonTitle = computed(() => {
 .dot-cache-write { background: #f59e0b; } /* 橙: cache 新写 */
 
 /* v0.5.0-D 第22轮 (D209): 合计行 (REAL 4 分类总和 + context 部分)
- *   跟 Composer 底部 "上下文 X%" 用同一个 contextTokens 数值, 跟 percent 一致 */
+ *   跟 Composer 底部 "上下文 X%" 用同一个 contextTokens 数值, 跟 percent 一致
+ *   v3.31: 拆成 'context X + output Y = Z total' (解释顶部 6.4K vs 合计 6.7K 疑惑) */
 .pad-ctx-popover-total {
   margin-top: 4px;
   padding-top: 8px;
@@ -674,9 +683,14 @@ const buttonTitle = computed(() => {
   text-align: right;
   font-weight: var(--pad-fw-medium, 500);
 }
-.pad-ctx-popover-total-context {
+.pad-ctx-popover-total-output {
   color: var(--pad-fg-tertiary, #71717a);
   font-weight: var(--pad-fw-regular, 400);
+  margin: 0 4px;
+}
+.pad-ctx-popover-total-sum {
+  color: var(--pad-fg-primary);
+  font-weight: var(--pad-fw-semibold, 600);
   margin-left: 4px;
 }
 
