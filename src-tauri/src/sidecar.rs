@@ -221,13 +221,43 @@ pub fn run_prompt(
             }
         };
 
-        // v0.5.8: 写初始 RpcCommand 到 stdin (CommandChild.write 是 sync method,
-        //   内部用 BufWriter flush, 不会阻塞 event loop).
-        let line = format!("{initial_command_json}\n");
-        if let Err(e) = child.write(line.as_bytes()) {
+        // v3.33 (2026-08-24): sync child.write 改 std::thread::spawn + oneshot 异步写.
+        // 之前 line 226 `child.write(line.as_bytes())` 是 sync, 注释说"内部 BufWriter flush, 不会阻塞".
+        //   但实测 vision 场景 images 数组含 100KB+ base64, sync write 会等 pipe buffer 消费.
+        //   sidecar JS 启动 + attach stdin reader 需要几十 ms, 期间 pipe buffer 写满 → Tauri 阻塞.
+        //   更糟: 如果 sidecar 启动某处依赖 stdin reader attach, 死锁 (Tauri 等 sidecar read,
+        //   sidecar 等 stdin reader attach). 表现: images=1 sendPrompt 全 hang, images=0 全正常.
+        // 修法: write 走 std::thread::spawn (spawn_blocking 等价但 child ownership 好处理),
+        //   通过 oneshot 把 child 拿回来再 insert. async task 让出, abort send_rpc_command 不被卡.
+        let line_bytes = format!("{initial_command_json}\n").into_bytes();
+        debug_log(&format!(
+            "run_prompt: writing initial RpcCommand via thread, line_len={}",
+            line_bytes.len()
+        ));
+        let (write_tx, write_rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let mut c = child;
+            let res = c.write(&line_bytes);
+            let _ = write_tx.send((res, c));
+        });
+        let (write_res, child) = match write_rx.await {
+            Ok(pair) => pair,
+            Err(e) => {
+                emit_error(
+                    &app,
+                    &session_id,
+                    &format!("write initial command join: {e}"),
+                );
+                return;
+            }
+        };
+        if let Err(e) = write_res {
             emit_error(&app, &session_id, &format!("write initial command: {e}"));
             return;
         }
+        debug_log(&format!(
+            "run_prompt: initial RpcCommand written, registering child to map"
+        ));
 
         // 注册 CommandChild 到 active map, 让 FE 端 send_rpc_command 找得到.
         {
@@ -595,14 +625,29 @@ pub async fn send_rpc_command(
         session_id,
         command_json.chars().take(120).collect::<String>()
     ));
-    let mut map = active.0.lock().await;
-    let child = map
-        .get_mut(&session_id)
-        .ok_or_else(|| format!("no active sidecar for session={}", session_id))?;
-    let line = format!("{}\n", command_json);
-    child
-        .write(line.as_bytes())
-        .map_err(|e| format!("write rpc_command: {e}"))?;
+    // v3.33 (2026-08-24): 跟 run_prompt 同步改 — sync write 改 std::thread::spawn + oneshot.
+    //   虽然后续 RpcCommand 一般小 (1-10KB, pipe buffer 64KB 不会满), 但保持一致性 —
+    //   任何 stdin write 走非阻塞, 避免 async task 锁死. 写完把 child 插回 map.
+    let child = {
+        let mut map = active.0.lock().await;
+        map.remove(&session_id)
+            .ok_or_else(|| format!("no active sidecar for session={}", session_id))?
+    };
+    let line_bytes = format!("{}\n", command_json).into_bytes();
+    let (write_tx, write_rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut c = child;
+        let res = c.write(&line_bytes);
+        let _ = write_tx.send((res, c));
+    });
+    let (write_res, child) = write_rx
+        .await
+        .map_err(|e| format!("write rpc_command join: {e}"))?;
+    write_res.map_err(|e| format!("write rpc_command: {e}"))?;
+    {
+        let mut map = active.0.lock().await;
+        map.insert(session_id.clone(), child);
+    }
     Ok(())
 }
 

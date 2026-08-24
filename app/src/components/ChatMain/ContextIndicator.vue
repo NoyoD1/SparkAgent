@@ -267,21 +267,19 @@ const buttonTitle = computed(() => {
           </span>
         </div>
       </div>
-      <!-- v3.31: 合计行拆分显示, 解释 6.4K (上) vs 6.7K (合计) 的关系
-           user 反馈 '我看你写合计是 6.7K, 但为什么上面是 6.4K?' (疑惑)
-           - 顶部 6.4K = context 占用 (input + cacheRead + cacheWrite, 跟 Pi SDK ctx window 算法一致)
-           - 合计 6.7K = 4 分类总和 (含 output 250, 不是 context 占用, 是 total token 使用)
-           拆成 "context 6.4K + output 250 = 6.7K total" 避免 user 数字对比疑惑.
-           保留括号内 context 部分供快速 reference. -->
+      <!-- v3.33 (2026-08-24): 拆分行措辞优化
+           v3.31 拆 "context 6.4K + output 250 = 6.7K total" 仍是英文术语, user 反馈看着不直观.
+           改中文 + 数学等式: "累计 6.7K = 上下文 6.4K + 输出 250"
+           - "累计" = 4 分类总和 (含 output, session 全消耗)
+           - "上下文" = 顶部 progress bar 用的数字 (input + cacheRead + cacheWrite, 跟 Pi SDK ctx window 算法一致)
+           - "输出" = LLM 生成的 token (不算 context 占用, 但要算总开销)
+           output = 0 时只显示 "累计 6.4K" (无拆分需要). -->
       <div class="pad-ctx-popover-total">
-        context {{ formatTokens(realBreakdown.input + realBreakdown.cacheRead + realBreakdown.cacheWrite) }}
-        <span v-if="realBreakdown.output > 0" class="pad-ctx-popover-total-output">
-          + output {{ formatTokens(realBreakdown.output) }}
-        </span>
-        =
-        <span class="pad-ctx-popover-total-sum">
-          {{ formatTokens(realBreakdown.input + realBreakdown.output + realBreakdown.cacheRead + realBreakdown.cacheWrite) }} total
-        </span>
+        累计 {{ formatTokens(realBreakdown.input + realBreakdown.output + realBreakdown.cacheRead + realBreakdown.cacheWrite) }}
+        <template v-if="realBreakdown.output > 0">
+          = 上下文 {{ formatTokens(realBreakdown.input + realBreakdown.cacheRead + realBreakdown.cacheWrite) }}
+          + 输出 {{ formatTokens(realBreakdown.output) }}
+        </template>
       </div>
       <!-- v0.6 (N3): 6 分类 FE 估算 (来源构成) - 跟图 1/图 2 用户期望一致
            在 4 分类 REAL 下面, 用 section 分隔, 标注 "FE 估算" 跟 4 区分开
