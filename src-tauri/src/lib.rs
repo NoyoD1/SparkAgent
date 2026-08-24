@@ -429,6 +429,15 @@ const UPLOAD_EXT_BLOCKLIST: &[&str] = &[
     "ps1", "psm1", "msi", "msp", "dll", "jar", "sh", "app", "dmg", "iso",
 ];
 
+// ====== 2026-08-25 v3.60.4 排查: 把 FE console.log 写进 .tauri-debug.log, 排查 streaming 节奏控制 ======
+//   之前 D213 撤了 diag_log, 但排查 MarkdownContent 节奏是否真起作用需要看 FE 端 watch/tick 触发.
+//   Tauri command 极轻量, 加回来不破坏生产.
+#[tauri::command]
+async fn diag_log(msg: String) -> Result<(), String> {
+    debug_log(&format!("[DIAG-FE] {}", msg));
+    Ok(())
+}
+
 #[tauri::command]
 async fn save_uploaded_file(
     app: AppHandle,
@@ -4899,6 +4908,7 @@ pub fn run() {
             remove_dangerous_whitelist_item,
             // v0.5.0: 通用 RpcCommand 透传 (替代 v0.4.x 的 3 个特殊 stdin command)
             sidecar::send_rpc_command,
+            diag_log,  // 2026-08-25 v3.60.4 排查: FE console.log 转 Rust .tauri-debug.log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

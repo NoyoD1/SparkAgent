@@ -18,6 +18,7 @@
  * - post-processor: v18+ **bold** 边界补丁 (跟 memory 教训一致, 防升级踩坑)
  */
 import { computed, ref, onMounted, onUpdated, nextTick, watch } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import { Marked } from 'marked';
 import hljs from 'highlight.js';
 import katex from 'katex';
@@ -234,13 +235,18 @@ function pickStep(): number {
   return Math.random() < 0.7 ? 1 : 2;
 }
 
+function diag(msg: string) {
+  // 写 .tauri-debug.log (跟之前 D213 一样), WebView2 DevTools 之外能看
+  invoke('diag_log', { msg: `[MarkdownContent] ${msg}` }).catch(() => {});
+}
+
 function tick() {
   queueTimer = null;
   const target = props.content || '';
   if (displayedContent.value.length >= target.length) {
+    diag(`tick: displayed already at target length=${displayedContent.value.length}`);
     return;
   }
-  // 真正累加: 推进 1-2 chars
   const step = pickStep();
   const prevLen = displayedContent.value.length;
   const nextLen = Math.min(prevLen + step, target.length);
@@ -248,7 +254,7 @@ function tick() {
   displayedContent.value = slice;
   lastChar = slice.charAt(slice.length - 1);
   charsSincePause += step;
-  // 如果还有, 继续 schedule
+  diag(`tick: prev=${prevLen} → next=${nextLen}, lastChar=${JSON.stringify(lastChar)}`);
   const remaining = target.length - nextLen;
   if (remaining > 0) {
     queueTimer = setTimeout(tick, pickInterval());
@@ -258,15 +264,16 @@ function tick() {
 watch(
   () => [props.content, props.isStreaming] as const,
   ([content, streaming]) => {
+    diag(`watch trigger: streaming=${streaming}, contentLen=${content.length}`);
     if (!streaming) {
-      // message_end: 立即 flush 全部, 取消节流 (不能让 message 卡顿)
       if (queueTimer) { clearTimeout(queueTimer); queueTimer = null; }
       displayedContent.value = content || '';
       lastChar = displayedContent.value.charAt(displayedContent.value.length - 1);
+      diag(`message_end: flush all, len=${displayedContent.value.length}`);
       return;
     }
-    // streaming: 启动节奏 (如果还没启)
     if (!queueTimer) {
+      diag(`streaming start: schedule first tick`);
       queueTimer = setTimeout(tick, pickInterval());
     }
   },
