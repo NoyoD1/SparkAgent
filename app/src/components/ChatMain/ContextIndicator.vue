@@ -197,23 +197,13 @@ const buttonTitle = computed(() => {
 
     <!-- Popover 二级展开 (Claude Code 风格) -->
     <div v-if="showPopover" class="pad-ctx-popover" @click.stop>
-      <!-- v3.29: 删 popover 顶部 summary 行 (6.3K / 200K / 3% / model 名).
-           user 反馈: '上面计数的3%不要重复两个, 顶部那个删了, 因为下面有详情图显示了'.
-           6.3K 在 '合计 X tokens' 行有, 200K 在 '上下文窗口' 标题 + 0% 表示, 3% 在
-           head 段 '压缩 | 0%' + 进度条有, model 名挪到 head 段 (紧跟 '上下文窗口' 标题后).
-           删 summary 减少 1 个 3% 重复, popover 视觉更紧凑, 详情图主导. -->
+      <!-- v3.30: head 段只放标题 + 压缩按钮 (没 model, 没 percent, 不挤).
+           单独区域 "上下文总量" 显示 6.4K / 200K 大数字 + percent, 拉长 panel 容纳.
+           进度条移到单独区域下面, 满宽. model 名不在 popover 显示 (它已经显示在
+           Composer 底部 model chip, 详情面板不重复).
+           percent 只在单独区域显示 1 处 (bar 宽度用 percent, 不重复文本). -->
       <div class="pad-ctx-popover-head">
         <span class="pad-ctx-popover-title">上下文窗口</span>
-        <!-- v3.29: model 名挪到这里 (之前在 summary 行, summary 删了) -->
-        <span class="pad-ctx-popover-model" :title="currentModelLabel">
-          {{ currentModelLabel }}
-        </span>
-        <!-- v0.4.3.2.5 (user 原话 2026-08-18 02:30): 压缩按钮紧跟 "上下文窗口" 标题 x 轴后面
-         *   我之前 4 轮都理解成"放在 0% 后面", 完全错. user 凌晨 2:30 强烈不满.
-         *   现在改成: 标题文字 [4px gap] 压缩 text link [auto gap] 0%
-         *   - 压缩字号 12px, icon 10px (跟 4 行 token 一致, 视觉重量平齐)
-         *   - 0% 还是 margin-left: auto 推到 popover 内容最右, 跟 4 行 token 数字严格右对齐
-         *   - 弹窗靠 click outside 关 (D183 弹窗默认行为) -->
         <button
           v-if="!isCompacting"
           class="pad-ctx-popover-compress-link"
@@ -225,10 +215,21 @@ const buttonTitle = computed(() => {
           <span>压缩</span>
         </button>
         <Loader2 v-else :size="10" :stroke-width="1.75" class="pad-ctx-btn-spinner" />
-        <span class="pad-ctx-popover-pct">{{ percent }}%</span>
       </div>
-      <div class="pad-ctx-popover-bar">
-        <div class="pad-ctx-popover-bar-fill" :style="{ width: percent + '%' }"></div>
+
+      <!-- v3.30 新加: 上下文总量单独区域 (不挤在 title 区)
+           user 反馈: '将面板拉长给单独显示上下文总量数值一个区域, 不要都挤在 title 那边'
+           大数字 X / Y + percent 一行显示, 下面进度条满宽, 视觉显眼 -->
+      <div class="pad-ctx-popover-totals">
+        <div class="pad-ctx-popover-totals-row">
+          <span class="pad-ctx-popover-totals-tokens">{{ formatTokens(contextTokens) }}</span>
+          <span class="pad-ctx-popover-totals-divider">/</span>
+          <span class="pad-ctx-popover-totals-window">{{ formatTokens(contextWindow) }}</span>
+          <span class="pad-ctx-popover-totals-pct">{{ percent }}%</span>
+        </div>
+        <div class="pad-ctx-popover-bar">
+          <div class="pad-ctx-popover-bar-fill" :style="{ width: percent + '%' }"></div>
+        </div>
       </div>
 
       <!-- v0.5.0-D 第22轮 (D209) 重构: 单一区块, Pi SDK REAL 4 分类 (累加)
@@ -558,6 +559,58 @@ const buttonTitle = computed(() => {
 }
 .is-high .pad-ctx-popover-bar-fill {
   background: var(--pad-fg-warning, #d97706);
+}
+
+/* v3.30: 上下文总量单独区域 (不挤在 title 区)
+   user 反馈 '将面板拉长给单独显示上下文总量数值一个区域, 不要都挤在 title 那边'.
+   panel 拉长容纳大数字 + percent + 满宽进度条. */
+.pad-ctx-popover-totals {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  background: var(--pad-bg-secondary, rgba(0, 0, 0, 0.025));
+  border-radius: var(--pad-radius-sm, 4px);
+  transition: background var(--pad-dur-fast, 0.15s) ease;
+}
+.is-high .pad-ctx-popover-totals {
+  background: var(--pad-bg-warning-soft, rgba(217, 119, 6, 0.08));
+}
+.pad-ctx-popover-totals-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.pad-ctx-popover-totals-tokens {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--pad-fg-primary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.pad-ctx-popover-totals-divider {
+  font-size: 14px;
+  color: var(--pad-fg-tertiary, #71717a);
+  font-weight: 400;
+  margin: 0 2px;
+}
+.pad-ctx-popover-totals-window {
+  font-size: 14px;
+  color: var(--pad-fg-secondary, #52525b);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.pad-ctx-popover-totals-pct {
+  margin-left: auto;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--pad-fg-primary);
+  font-variant-numeric: tabular-nums;
+}
+.is-high .pad-ctx-popover-totals-pct {
+  color: var(--pad-fg-warning, #d97706);
+}
+.pad-ctx-popover-totals .pad-ctx-popover-bar {
+  margin-bottom: 0;  /* 区域里 bar 不再加底部 margin (区域本身已有) */
 }
 
 /* Token 来源行 */
