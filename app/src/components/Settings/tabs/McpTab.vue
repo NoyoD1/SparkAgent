@@ -26,7 +26,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import {
-  Plug, Plus, X, Trash2, AlertCircle, Check, Info, Pencil, Upload, FileJson,
+  Plug, Plus, X, Trash2, AlertCircle, Check, Info, Pencil, Upload, FileJson, RefreshCw,
 } from 'lucide-vue-next';
 import { useMcpServersStore, type McpServerScope } from '@/stores/mcpServers';
 import { useSessionStore } from '@/stores/session';
@@ -38,8 +38,26 @@ import {
 } from '@/lib/mcpImport';
 
 const mcpStore = useMcpServersStore();
-const { servers, loading, error } = storeToRefs(mcpStore);
+const { servers, loading, error, runtimeStatus, runtimeWorkspacePath } = storeToRefs(mcpStore);
 const sessionStore = useSessionStore();
+
+// 2026-08-24 P3-F: helper — 从 runtimeStatus 找 server 状态
+//   runtimeStatus 是 sidecar emit 的 snapshot, 按 name 索引
+//   workspacePath 不一致 (e.g. user 切了 ws) 时不显示 (防止误判)
+const statusByName = computed(() => {
+  const map = new Map<string, typeof runtimeStatus.value[number]>();
+  if (runtimeWorkspacePath.value && runtimeWorkspacePath.value !== currentWsPath.value) {
+    return map;  // 跨 workspace snapshot, 不显示
+  }
+  for (const s of runtimeStatus.value) {
+    map.set(s.name, s);
+  }
+  return map;
+});
+
+const startedCount = computed(() => runtimeStatus.value.filter((s) => s.status === 'started').length);
+const failedCount = computed(() => runtimeStatus.value.filter((s) => s.status === 'failed').length);
+const hasSnapshot = computed(() => runtimeStatus.value.length > 0);
 
 // v0.6.3-rc1 P2-1.2: 记录当前 MCP 操作的 workspace path, 给 UI 显示 + 排查
 //   list_mcp_servers 拿不到 server 时, user 一看路径就知道是不是 active workspace 选错了
@@ -445,6 +463,27 @@ const isImporting_apply = ref(false);       // 跟 isImporting 区分: 前者是
 
 // ====== Toast ======
 const toast = ref<{ type: 'ok' | 'fail'; message: string } | null>(null);
+
+// 2026-08-24 P3-F: 强制重测 — triggerRestart 让 sidecar 重启并重跑 MCP 初始化
+//   用于改了 keychain secret / 修了 MCP config 后, 不用 restart app
+const isForceRetesting = ref(false);
+async function forceRetestMcp() {
+  if (isForceRetesting.value) return;
+  isForceRetesting.value = true;
+  toast.value = null;
+  try {
+    // triggerRestart 走 mcpServersStore 内部 (跟 write/delete 一样的 pattern)
+    //   内部 fire-and-forget Tauri restart_all_sidecars, 整个 Tauri 进程会 kill active sidecar
+    //   下次 send_prompt lazy spawn 新 sidecar, 重新跑 createAgentSessionRuntime
+    await mcpStore.triggerRestart('user_force_retest');
+    toast.value = { type: 'ok', message: '已触发 sidecar 重启 — 下次发消息时新 sidecar 会重测 MCP, 几秒后回到这里刷新状态' };
+  } catch (e) {
+    toast.value = { type: 'fail', message: e instanceof Error ? e.message : String(e) };
+  } finally {
+    // 5s 后解除按钮 disable (不管 sidecar 是否真的重启完)
+    setTimeout(() => { isForceRetesting.value = false; }, 5000);
+  }
+}
 
 async function removeServer(scope: McpServerScope, name: string) {
   if (!confirm(`确认删除 MCP server "${name}" (scope=${scope})?`)) return;
@@ -1013,6 +1052,33 @@ async function refreshAndShowPath() {
       <h3 class="pad-mcptab__section-title">
         <Plug :size="14" :stroke-width="1.75" />
         <span>MCP Servers ({{ servers.length }})</span>
+        <!-- 2026-08-24 P3-F: runtime 状态汇总 — 顶部一眼看到 connected/failed 数量 -->
+        <span
+          v-if="hasSnapshot"
+          class="pad-mcptab__runtime-summary"
+          :title="`sidecar mcp_status snapshot: ${runtimeStatus.length} server(s)`"
+        >
+          <template v-if="failedCount > 0">
+            <AlertCircle :size="12" :stroke-width="2" class="pad-mcptab__runtime-icon-fail" />
+            {{ startedCount }} 启好, {{ failedCount }} 失败
+          </template>
+          <template v-else>
+            <Check :size="12" :stroke-width="2" class="pad-mcptab__runtime-icon-ok" />
+            全部 {{ startedCount }} 启好
+          </template>
+        </span>
+        <span v-else class="pad-mcptab__runtime-summary is-pending">未启动 sidecar</span>
+        <!-- 2026-08-24 P3-F: 强制重测 — triggerRestart 让 sidecar 重新跑 MCP 初始化 -->
+        <button
+          v-if="!isCreating && !isImporting"
+          class="pad-mcptab__btn"
+          @click="forceRetestMcp"
+          title="强制 sidecar 重启并重跑 MCP 初始化 (用最新 keychain 配置)"
+          :disabled="isForceRetesting"
+        >
+          <RefreshCw :size="12" :stroke-width="1.75" :class="{ 'is-spinning': isForceRetesting }" />
+          <span>{{ isForceRetesting ? '重测中…' : '重测' }}</span>
+        </button>
         <button
           v-if="!isCreating && !isImporting"
           class="pad-mcptab__btn pad-mcptab__btn--primary"
@@ -1058,11 +1124,54 @@ async function refreshAndShowPath() {
               <code>{{ s.name }}</code>
               <span class="pad-mcptab__scope-tag" :class="`is-${s.scope}`">{{ s.scope }}</span>
               <span class="pad-mcptab__type-tag" :class="`is-${s.serverType}`">{{ s.serverType }}</span>
+              <!-- 2026-08-24 P3-F: runtime 状态 (sidecar mcp_status snapshot) -->
+              <span
+                v-if="statusByName.get(s.name)"
+                class="pad-mcptab__status-tag"
+                :class="`is-${statusByName.get(s.name)!.status}`"
+                :title="statusByName.get(s.name)!.reason || (statusByName.get(s.name)!.status === 'started' ? `${statusByName.get(s.name)!.toolCount} tool(s) loaded` : 'see below')"
+              >
+                <template v-if="statusByName.get(s.name)!.status === 'started'">
+                  <Check :size="11" :stroke-width="2" />
+                  启好 · {{ statusByName.get(s.name)!.toolCount }} tool
+                </template>
+                <template v-else>
+                  <AlertCircle :size="11" :stroke-width="2" />
+                  启动失败
+                </template>
+              </span>
+              <span
+                v-else-if="hasSnapshot"
+                class="pad-mcptab__status-tag is-pending"
+                title="sidecar 没报告这个 server (可能未配置或 scope 不匹配)"
+              >
+                未检查
+              </span>
             </div>
             <div class="pad-mcptab__item-cmd">
               <code>{{ s.command }}</code>
               <span class="pad-mcptab__item-args">{{ summarizeArgs(s.body) }}</span>
             </div>
+            <!-- 2026-08-24 P3-F: 失败原因 + tools 列表 -->
+            <div
+              v-if="statusByName.get(s.name)?.status === 'failed' && statusByName.get(s.name)?.reason"
+              class="pad-mcptab__item-error"
+            >
+              <AlertCircle :size="11" :stroke-width="2" />
+              {{ statusByName.get(s.name)!.reason }}
+            </div>
+            <details
+              v-else-if="statusByName.get(s.name)?.status === 'started' && (statusByName.get(s.name)?.tools?.length ?? 0) > 0"
+              class="pad-mcptab__item-tools"
+            >
+              <summary>{{ statusByName.get(s.name)!.tools.length }} tool(s) — LLM 看到 mcp_<code>{{ s.name }}</code>_<code>...</code></summary>
+              <ul>
+                <li v-for="t in statusByName.get(s.name)!.tools" :key="t.name">
+                  <code>mcp_{{ s.name }}_{{ t.name }}</code>
+                  <span v-if="t.description" class="pad-mcptab__tool-desc">{{ t.description }}</span>
+                </li>
+              </ul>
+            </details>
           </div>
           <div class="pad-mcptab__item-actions">
             <button
@@ -1535,6 +1644,135 @@ async function refreshAndShowPath() {
 .pad-mcptab__type-tag.is-sse {
   background: color-mix(in srgb, #9333ea 14%, transparent);
   color: #9333ea;
+}
+
+/* 2026-08-24 P3-F: runtime 状态 tag (sidecar mcp_status 反馈) */
+.pad-mcptab__status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--pad-fs-10, 10px);
+  padding: 1px 6px;
+  border-radius: var(--pad-radius-sm);
+  font-weight: var(--pad-fw-medium);
+}
+.pad-mcptab__status-tag.is-started {
+  background: color-mix(in srgb, var(--pad-success, #16a34a) 14%, transparent);
+  color: var(--pad-success, #16a34a);
+}
+.pad-mcptab__status-tag.is-failed {
+  background: color-mix(in srgb, #dc2626 14%, transparent);
+  color: #dc2626;
+}
+.pad-mcptab__status-tag.is-pending {
+  background: var(--pad-muted);
+  color: var(--pad-fg-tertiary);
+}
+.pad-mcptab__status-tag code {
+  font-family: var(--pad-font-mono);
+}
+
+/* 2026-08-24 P3-F: 失败原因 (单行, 可换行) */
+.pad-mcptab__item-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 4px 8px;
+  background: color-mix(in srgb, #dc2626 8%, transparent);
+  border-left: 2px solid #dc2626;
+  border-radius: 2px;
+  font-size: var(--pad-fs-11, 11px);
+  color: var(--pad-fg-secondary);
+  line-height: 1.4;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.pad-mcptab__item-error :first-child {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: #dc2626;
+}
+
+/* 2026-08-24 P3-F: tools 列表 (折叠) */
+.pad-mcptab__item-tools {
+  margin-top: 4px;
+  font-size: var(--pad-fs-11, 11px);
+  color: var(--pad-fg-secondary);
+}
+.pad-mcptab__item-tools summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+  list-style: none;
+}
+.pad-mcptab__item-tools summary::-webkit-details-marker {
+  display: none;
+}
+.pad-mcptab__item-tools summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 4px;
+  transition: transform 0.15s;
+}
+.pad-mcptab__item-tools[open] summary::before {
+  transform: rotate(90deg);
+}
+.pad-mcptab__item-tools ul {
+  list-style: none;
+  padding: 4px 0 0 18px;
+  margin: 0;
+}
+.pad-mcptab__item-tools li {
+  padding: 2px 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+.pad-mcptab__item-tools code {
+  font-family: var(--pad-font-mono);
+  color: var(--pad-fg-primary);
+  background: var(--pad-bg-active);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+.pad-mcptab__tool-desc {
+  color: var(--pad-fg-tertiary);
+  font-size: var(--pad-fs-10, 10px);
+}
+
+/* 2026-08-24 P3-F: 顶部 runtime summary */
+.pad-mcptab__runtime-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: var(--pad-radius-sm);
+  font-size: var(--pad-fs-11, 11px);
+  font-weight: var(--pad-fw-medium);
+  background: var(--pad-bg-active);
+  color: var(--pad-fg-secondary);
+}
+.pad-mcptab__runtime-summary.is-pending {
+  opacity: 0.6;
+  font-style: italic;
+}
+.pad-mcptab__runtime-icon-ok {
+  color: var(--pad-success, #16a34a);
+}
+.pad-mcptab__runtime-icon-fail {
+  color: #dc2626;
+}
+
+/* 2026-08-24 P3-F: refresh button 旋转动画 */
+.is-spinning {
+  animation: pad-spin 0.8s linear infinite;
+}
+@keyframes pad-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* v0.6.3-rc1 P2-1.4: inline radio (P2-1.4 还在用, 高级区作用域 radio) */

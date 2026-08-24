@@ -28,11 +28,40 @@ export type McpServerScope = 'workspace' | 'global';
 // 跟 Rust 端 parse_mcp_server_name / BUILTIN_TOOL_NAMES 校验同步
 export const BUILTIN_TOOL_NAMES_MCP = ['read', 'write', 'edit', 'bash', 'ls', 'find', 'grep'] as const;
 
+// 2026-08-24 P3-F: MCP server runtime 状态 (sidecar 启好/失败/工具列表, McpTab 渲染用)
+//   跟 TauriMcpServerInfo (Rust 端 list_mcp_servers 返) 区分:
+//   - TauriMcpServerInfo: 配置文件读出来的 (静态)
+//   - McpRuntimeServerStatus: sidecar runtime 实际启的状态 (动态, 每次重启 sidecar 都变)
+export interface McpRuntimeTool {
+  name: string;        // 短名 (mcp_<server>_<tool> 里的 <tool> 部分)
+  description: string; // LLM 看到的 tool description
+}
+export interface McpRuntimeServerStatus {
+  name: string;
+  status: 'started' | 'failed';  // 'skipped' 在 sidecar 里也归 failed (env 解析失败)
+  reason: string | null;        // 失败原因 (keychain 找不到 / subprocess 启失败 / 等)
+  toolCount: number;            // 实际启好后的 tool 数
+  tools: McpRuntimeTool[];      // tool 短名 + description
+  durationMs: number;           // 启这个 server 花的毫秒
+}
+
 export const useMcpServersStore = defineStore('mcpServers', () => {
   // 列表 (含 workspace + global, workspace 优先, 跟 Rust 端 list_mcp_servers 一致)
   const servers = ref<TauriMcpServerInfo[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
+
+  // 2026-08-24 P3-F: MCP runtime 状态 (sidecar emit 的 mcp_status snapshot, McpTab 显示用)
+  //   - status: 'started' = 启好, LLM 可见 mcp_<name>_<tool>; 'failed' = 启失败, 不进 LLM tools list
+  //   - reason: 失败原因 (keychain 找不到 / subprocess 启失败 / timeout 等)
+  //   - tools: 该 server 暴露的 tool 列表 (name + description, LLM 看到的就是这些)
+  //   - toolCount: tool 数量 (跟 tools.length 一致, 冗余方便 McpTab 显示)
+  //   - durationMs: sidecar 启这个 server 花的毫秒
+  //   - ts: snapshot 时间戳 (ms), 用于 detect stale
+  //   - workspacePath: snapshot 对应的 workspace (McpTab 多 workspace 时按 ws 过滤)
+  const runtimeStatus = ref<McpRuntimeServerStatus[]>([]);
+  const runtimeTs = ref<number>(0);
+  const runtimeWorkspacePath = ref<string | null>(null);
 
   /**
    * 拉取 MCP server 列表. 从当前 active workspace + agentDir 拉.
@@ -346,6 +375,9 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
     servers,
     loading,
     error,
+    runtimeStatus,  // P3-F: 来自 sidecar mcp_status snapshot
+    runtimeTs,
+    runtimeWorkspacePath,
     // actions
     refresh,
     read,
@@ -357,9 +389,30 @@ export const useMcpServersStore = defineStore('mcpServers', () => {
     buildBodyFromForm,  // v0.6.3-rc1 P2-1.3: form 模式拼 body
     parseBodyToForm,  // v0.6.3-rc1 P2-3: JSON body 反解到 form 字段 (切 tab 用)
     ensureActiveWorkspace,  // v0.6.3-rc1 P2-1.2: UI 用来同步 ws path 显示 + 排查
+    triggerRestart,  // 2026-08-24 P3-F: McpTab "重测" 按钮调, 强制 sidecar 重启 + 重跑 MCP 初始化
     // 暴露给 UI
     BUILTIN_TOOL_NAMES_MCP,
   };
+});
+
+// 2026-08-24 P3-F: 订阅 sidecar mcp_status snapshot (走 chat:event channel, 跟 skills_snapshot / slash_snapshot 同 pattern)
+//   sidecar 在 createAgentSessionRuntime 后 emit {type:"mcp_status", servers:[...]} 到 stdout,
+//   Tauri 端 forward 给 FE, 这里更新 runtimeStatus. McpTab 据此显示每个 server 的
+//   connected / failed 状态 + 实际 tool 列表 (LLM 看到的 mcp_<server>_<tool>).
+piTauri.on((event) => {
+  if (event && (event as any).type === 'mcp_status') {
+    const snap = event as any;
+    const store = useMcpServersStore();
+    store.runtimeStatus = Array.isArray(snap.servers) ? snap.servers : [];
+    store.runtimeTs = typeof snap.ts === 'number' ? snap.ts : Date.now();
+    store.runtimeWorkspacePath = typeof snap.workspacePath === 'string' ? snap.workspacePath : null;
+    const started = store.runtimeStatus.filter((s) => s.status === 'started').length;
+    const failed = store.runtimeStatus.filter((s) => s.status === 'failed').length;
+    console.log(
+      `[mcp] status snapshot: ws=${store.runtimeWorkspacePath ?? '?'} ` +
+      `${store.runtimeStatus.length} server(s): ${started} started, ${failed} failed`,
+    );
+  }
 });
 
 /**

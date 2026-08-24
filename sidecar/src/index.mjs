@@ -1781,6 +1781,48 @@ try {
   console.error(`[sidecar] P3-E: write sentinel failed:`, e instanceof Error ? e.message : String(e));
 }
 
+// ====== 2026-08-24 P3-F: MCP self-check — emit mcp_status snapshot 到 stdout (McPtab 显示用) ======
+//   跟 skills_snapshot 同 pattern: 必须 runRpcMode() 之前 emit, 一旦 runRpcMode 接管 stdout 走 takeOverStdout 后,
+//     我们写 process.stdout.write 会被 buffer / 拦截. 但 mcpState 在 createAgentSessionRuntime 后已就绪.
+//   Tauri 端: 收到 stdout 走 chat:event emit, FE 听 type="mcp_status" 更新 mcpServersStore.
+//   McpTab 渲染: 状态(✓/✗) + toolCount + tools 列表 + 错误信息. 让用户能 self-check 配置后状态.
+{
+  // 1. 构造 mcpCustomToolsByName: tool name → ToolDefinition (name, description)
+  //   mcpState.customTools 是 ToolDefinition 数组 (从 mcpClient.mjs 的 McpServerClient.toolDefinitions 拼出来的)
+  const mcpToolDefs = mcpState.customTools || [];
+  // 2. 按 server name 分组: mcp_<server>_<tool> 形式
+  const byServer = new Map();
+  for (const td of mcpToolDefs) {
+    const m = /^mcp_([^_]+(?:_[^_]+)*)_(.+)$/.exec(td.name);
+    if (m) {
+      const serverName = m[1];
+      const toolName = m[2];
+      if (!byServer.has(serverName)) byServer.set(serverName, []);
+      byServer.get(serverName).push({ name: toolName, description: td.description || '' });
+    }
+  }
+  // 3. 构造 server 列表 (按 mcpState.results 顺序, 保持 config 顺序)
+  const servers = (mcpState.results || []).map((r) => {
+    const tools = byServer.get(r.name) || [];
+    return {
+      name: r.name,
+      status: r.status,  // 'started' | 'failed' | 'skipped'
+      reason: r.reason || null,
+      toolCount: r.toolCount || tools.length,
+      tools,
+      durationMs: r.durationMs || 0,
+    };
+  });
+  // 4. emit 到 stdout (Tauri 会 emit 给 FE)
+  process.stdout.write(JSON.stringify({
+    type: 'mcp_status',
+    ts: Date.now(),
+    workspacePath,
+    servers,
+  }) + '\n');
+  console.error(`[sidecar] P3-F: mcp_status emitted (${servers.length} server(s), ${servers.filter((s) => s.status === 'started').length} started, ${servers.filter((s) => s.status === 'failed').length} failed)`);
+}
+
 // ====== ADR-0023 P3-E: file queue watcher — 处理 Tauri → sidecar 的 tool_call_direct ======
 //   Tauri 写 <agentDir>/tool_call_request.json = { id, name, args }, sidecar poll 读到后
 //   调 callExternalToolByName, 写 <agentDir>/tool_call_response.json = { id, ok, content?, error? }.
