@@ -268,7 +268,7 @@ async fn list_secrets(app: AppHandle) -> Result<Vec<KeychainInfoDto>, String> {
 
 #[tauri::command]
 async fn resolve_secrets(values: Vec<String>) -> Result<Vec<String>, String> {
-    // 给 sidecar 调: 批量解析 env 值, 把 "keychain:pi-agent:<name>" 替换成实际值
+    // 给 sidecar 调: 批量解析 env 值, 把 "keychain:..." 替换成实际值
     //   - 输入: env values 列表 (跟 mcp/external tool 的 env dict 同 shape)
     //   - 输出: 解析后的 values 列表, 跟输入 1:1 对应
     //   - 失败 (keychain 找不到): 返错误, 让 caller 决定是 fail-fast 还是 fallback
@@ -277,14 +277,37 @@ async fn resolve_secrets(values: Vec<String>) -> Result<Vec<String>, String> {
     //   不会拿到 LLM apiKey (就算 user 配了同名 entry 也不行, 命名空间完全隔离)
     //
     // 不在 keychain 引用 (没有 "keychain:" 前缀) 直接 pass-through
+    //
+    // 2026-08-24 v3.22 P3-F+: lookup 太严格 bug fix — user 配 "keychain:pi-agent:MCP_MINIMAX_API_KEY"
+    //   但实际存的 secret 是 short name "MCP_MINIMAX_API_KEY" (Settings → Secrets 加时只填 name,
+    //   不会带 service 前缀). 老逻辑用整个 "pi-agent:MCP_MINIMAX_API_KEY" 去 SERVICE_SECRET
+    //   找 → 永远 None. 改用 last-segment 做 fallback: 先试整个 name, None 就试最后一个 ":" 后面的.
+    //   例:
+    //     "MCP_MINIMAX_API_KEY"               → 直接拿
+    //     "pi-agent:MCP_MINIMAX_API_KEY"      → 试 "pi-agent:MCP_MINIMAX_API_KEY", None 就试 "MCP_MINIMAX_API_KEY"
+    //     "pi-agent-secret:MCP_MINIMAX_API_KEY" → 同上, 试 "MCP_MINIMAX_API_KEY"
+    //   跟 LLM apiKey service (SERVICE_LLM="pi-agent") 完全隔离 — 只 fallback 到 short name
+    //   (跟 SERVICE_SECRET 走), 不会撞 SERVICE_LLM 的 entry.
     const PREFIX: &str = "keychain:";
     let mut out = Vec::with_capacity(values.len());
     for v in values {
         if let Some(name) = v.strip_prefix(PREFIX) {
-            match keyring::get_secret(name)? {
-                Some(secret) => out.push(secret),
+            // 1) 先按整个 name 找 (兼容 "keychain:MCP_XXX" 短引用)
+            let secret = keyring::get_secret(name)?
+                // 2) fallback: 取 last ":" 后面的 short name (兼容 "keychain:service:NAME" 长引用)
+                .or_else(|| {
+                    name.rsplit(':').next().and_then(|short| {
+                        if short != name {
+                            keyring::get_secret(short).ok().flatten()
+                        } else {
+                            None
+                        }
+                    })
+                });
+            match secret {
+                Some(s) => out.push(s),
                 None => return Err(format!(
-                    "keychain 引用 '{v}' 解析失败: 找不到 secret '{name}' (请在 Settings → Secrets 加)"
+                    "keychain 引用 '{v}' 解析失败: 找不到 secret '{name}' (请在 Settings → Secrets 加 — name 字段填 \"{name}\" 即可)"
                 )),
             }
         } else {

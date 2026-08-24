@@ -49,6 +49,10 @@ const slashPopoverQuery = ref('');
 const slashPopoverTrigger = ref<'/' | '@' | null>(null);
 const slashPopoverCursor = ref(0);  // 当前选中项
 type RefKind = 'skill' | 'tool' | 'mcp' | 'extension';
+// 2026-08-24 v3.22: 区分 source — kind='extension' 可能是 browser (内置 web_*) 或 external (Tavily)
+//   pickSlashItem 据此决定走 modal (external 真调) 还是关 popover (browser LLM 直接调)
+type ToolSource = 'browser' | 'external' | 'mcp' | 'user-tool' | 'skill';
+
 interface SlashItem {
   group: 'Skills' | 'Tools' | 'MCP';
   slug: string;       // 显示用, e.g. /skill:code-review 或 @skill:code-review
@@ -57,6 +61,7 @@ interface SlashItem {
   isPlaceholder?: boolean;
   kind?: RefKind;     // 资源类型, force-read 时区分
   name?: string;      // 资源名
+  source?: ToolSource;  // 跟 kind 配合, 区分 browser/external/mcp/user-tool
 }
 const slashItems = computed<SlashItem[]>(() => {
   const out: SlashItem[] = [];
@@ -85,6 +90,7 @@ const slashItems = computed<SlashItem[]>(() => {
   // v3.20: Extension tools (browser + external) 也走 Tools 分组
   //   slug 走 /tools:tavily_search 走"/"触发, 让 LLM 看到 / 引用时知道这是 tool
   //   (LLM 直接调, 跟 @tool:foo 等价, 但 user 在 composer 里用 "/" 也能看到)
+  // 2026-08-24 v3.22 P3-F+: 加 source 区分 browser (web_*, 关 popover 即可) vs external (Tavily, 走 modal)
   for (const t of allExtensionTools.value) {
     // 跳过 builtin 7 tool, 它们已经走 builtin 内部, 不需要走 slash
     if (['read', 'write', 'edit', 'bash', 'ls', 'find', 'grep'].includes(t.name)) continue;
@@ -95,6 +101,7 @@ const slashItems = computed<SlashItem[]>(() => {
       description: `[${t.source}] ${t.description}`,
       kind: 'extension',
       name: t.name,
+      source: t.source === 'browser' ? 'browser' : 'external',
     });
   }
   // 3. MCP (D214 Phase 1: 接 useMcpServersStore, 没 server 时显示 placeholder)
@@ -564,6 +571,19 @@ function onClickOutsideAnyMenu(e: MouseEvent) {
 }
 onMounted(() => {
   document.addEventListener('click', onClickOutsideAnyMenu);
+  // 2026-08-24 v3.22 P3-F+: extension tools (e.g. tavily_search) 启动时立刻 load, 不然
+  //   user 必须先去 Settings → Tools 点一下才能在 "/" 看到. 直接调 listExternalTools,
+  //   跟 ToolsTab 的 refreshExternal 同 pattern, 但走 active workspace + agent dir.
+  //   失败静默 (e.g. sidecar 没启, list_external_tools 返空), 不影响 composer 主流程.
+  (async () => {
+    try {
+      const wsPath = sessionStore.activeWorkspace?.path ?? null;
+      const agentDir = await piTauri.getAgentDir().catch(() => null);
+      await extensionToolsStore.refreshExternal(wsPath, agentDir);
+    } catch (e) {
+      console.warn('[Composer] extension tools refresh failed:', e);
+    }
+  })();
 });
 onUnmounted(() => document.removeEventListener('click', onClickOutsideAnyMenu));
 
@@ -1024,12 +1044,31 @@ async function pickSlashItem(item: SlashItem) {
     console.warn('[Composer / popover] missing kind/name:', item);
     return;
   }
-  // v3.21 ADR-0023 P3-E: extension tool 走 modal 真调, 不插 marker (sidecar 不识别 kind:extension)
-  if (item.kind === 'extension') {
+  // 2026-08-24 v3.22 P3-F+: 按 source 决定 UX, 别再用 [[ref:xxx]] 一刀切
+  //   - 'external' (外部 tool, e.g. tavily_search): 走 modal 真调, 用户在 dialog 里填 args
+  //     (sidecar 走 callExternalToolByName, 不走 marker 路径). 需要 sidecar running.
+  //   - 'browser' (web_navigate / web_get_text / web_screenshot): LLM 直接调, 关 popover
+  //     即可. 不插 marker (browser tool 已内置在 LLM tool 列表, marker 多余).
+  //     之前 [[ref:browser:web_navigate]] 会让 sidecar 误以为 user 引用, 实际无意义.
+  //   - 'mcp' (MCP server, e.g. MiniMax): 同 browser, 走 marker 路径会拉 server JSON body
+  //     (force-read 时), 但 user 多数情况是直接调, 关 popover 即可.
+  //   - 'skill' / 'tool' / 'user': 插 marker (老逻辑, 触发 LLM 上下文注入)
+  if (item.kind === 'extension' && item.source === 'external') {
     openToolCallModal(item.name);
     return;
   }
+  if (item.kind === 'extension' && item.source === 'browser') {
+    closeSlashPopover();
+    console.log(`[Composer / popover] browser tool '${item.name}' 选中, LLM 直接调, 不插 marker`);
+    return;
+  }
+  if (item.kind === 'mcp') {
+    closeSlashPopover();
+    console.log(`[Composer / popover] MCP '${item.name}' 选中, LLM 通过 mcp_<name>_<tool> 直接调, 不插 marker (除非 user 显式想拉 server JSON body)`);
+    return;
+  }
   // D214: 统一 marker 格式 [[ref:kind:name]], send 时按 kind 解析
+  //   适用: skill / tool / user (3 个老 reference kind)
   const marker = `[[ref:${item.kind}:${item.name}]]`;
   await insertMarkerAtCursor(marker);
   console.log(`[Composer / popover] ${item.kind} reference inserted: ${item.name}`);
