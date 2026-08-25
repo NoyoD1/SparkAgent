@@ -1340,13 +1340,20 @@ async fn reload_skills(
 ) -> Result<(), String> {
     debug_log(&format!("reload_skills: session={}", session_id));
     let mut map = active.0.lock().await;
-    let child = map
-        .get_mut(&session_id)
-        .ok_or_else(|| format!("no active sidecar for session={}", session_id))?;
+    // v3.68 (2026-08-25): 适配 ActiveSidecars value 改 Arc<Mutex<CommandChild>>.
+    //   get() 返 Option<&Arc<Mutex<>>>, clone 出来, drop map lock 再 lock child (避免嵌套 lock).
+    let child_arc = {
+        let map = active.0.lock().await;
+        map.get(&session_id)
+            .ok_or_else(|| format!("no active sidecar for session={}", session_id))?
+            .clone()
+    };
     // Pi SDK 内置 reload 命令: rebuild runtime + reload skills + extensions + prompts + themes
     let line = format!("{{\"type\":\"reload\"}}\n");
-    child
-        .write(line.as_bytes())
+    let mut c = child_arc
+        .lock()
+        .map_err(|e| format!("child mutex poisoned: {e}"))?;
+    c.write(line.as_bytes())
         .map_err(|e| format!("write reload: {e}"))?;
     // emit skills_reloaded event → FE 刷新 skills store (skills_snapshot 会重新 emit)
     let event = serde_json::json!({

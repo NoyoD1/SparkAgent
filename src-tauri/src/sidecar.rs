@@ -38,12 +38,45 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
+
+/// v3.68 (2026-08-25): helper — 用 pid + taskkill (Windows) / kill -9 (Unix) 杀 child.
+/// 背景: tauri-plugin-shell 2.3.5 CommandChild::kill(self) consumes self, 不能从
+///   `Arc<Mutex<CommandChild>>` 的 MutexGuard move out (E0507). 改走 pid + std::process
+///   绕开, 跨平台.
+/// race 风险: pid 被 OS 回收后可能被新进程复用, kill 错杀 — 但 sidecar 进程持有
+///   时被回收概率极低, 且后续 ActiveSidecars 移除 entry 时我们不再依赖 child 句柄.
+fn kill_child_by_pid(child_arc: &Arc<std::sync::Mutex<CommandChild>>) {
+    let pid = match child_arc.lock() {
+        Ok(c) => c.pid(),
+        Err(_) => return,
+    };
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+    }
+}
 use tokio::sync::Mutex;
 
 /// v0.5.8 active sidecar 进程 CommandChild 全局表 (per-session).
 /// 让 FE 端 invoke (send_rpc_command) 能写到指定 session 的 stdin.
 /// task 结束 (agent_end) 时移除 entry, 避免悬空 handle.
-pub struct ActiveSidecars(pub Mutex<HashMap<String, CommandChild>>);
+///
+/// v3.68 (2026-08-25): value 改 `Arc<std::sync::Mutex<CommandChild>>` —
+///   之前 `CommandChild` 直接 move 进 map, 写 stdin (130KB image) 同步阻塞
+///   tauri task 永久 (Windows pipe default 64KB buffer + sidecar V8 readJsonl
+///   慢, 双方互相等, 死锁; v3.32 注释"1 分内能写完"乐观估计错, 实际永久死锁).
+///   改 Arc<Mutex<>> 后, run_prompt 把 initial RpcCommand 写 stdin 放 std::thread
+///   (sync write 阻塞 thread, 不阻塞 tauri task), tauri task 继续 insert map +
+///   rx loop; 后续 send_rpc_command 走同一把 Mutex (内部 BufWriter 锁, 多写排队).
+pub struct ActiveSidecars(pub Mutex<HashMap<String, std::sync::Arc<std::sync::Mutex<CommandChild>>>>);
 
 impl Default for ActiveSidecars {
     fn default() -> Self {
@@ -221,34 +254,59 @@ pub fn run_prompt(
             }
         };
 
-        // v3.35 (2026-08-24): 回滚到 v3.32 sync child.write() 阻塞.
-        //   v3.33 (thread spawn) 跟 v3.34 (chunked helper) 都没解 vision 死锁:
-        //     - v3.33: 0.4s 写完 130KB, sidecar 0.4s 启动期间 stdin pipe 130KB 已满 → sidecar 启动 hang → exit 1
-        //     - v3.34: 0.32s 写 48KB 期间 sidecar 0.4s 启动 hang (同样 race)
-        //   真正稳的行为: Tauri sync 阻塞 1 分写完 130KB, 期间 sidecar 0.4s 启动 OK (stdin pipe 一直是空的),
-        //     1 分后 Tauri 写完, sidecar 早就 ready → vision 通.
-        //   关键: vision LLM API 本身 1 分, user 感知不到 Tauri 多阻塞 1 分.
-        //   v3.33/v3.34 我之前以为"修了 1 分阻塞", 实际暴露了 race, 现在承认局限回滚.
+        // v3.68 (2026-08-25): initial RpcCommand 写 stdin 改 std::thread spawn 异步,
+        //   不阻塞 tauri task. 之前 v3.32 sync child.write() 永久死锁: 130KB image > 64KB
+        //   Windows pipe default buffer, sidecar V8 readJsonl 慢 (Pi SDK init 1-2s), 双方
+        //   互相等, 死锁. v3.33 (thread spawn) 跟 v3.34 (chunked) 之前没真修 — v3.33 0.4s
+        //   写完 + sidecar 0.4s 启动, race window 暴露; v3.34 同样.
+        //   这次修法: child 句柄包 Arc<Mutex<>>, std::thread 拿 clone 在 thread 内 sync write
+        //   (阻塞 thread 不阻塞 tauri task), tauri task 立即 insert map + 进 rx loop.
+        //   后续 send_rpc_command 走同一把 Mutex (内部 BufWriter 锁, 多写线程安全).
+        let child_arc = std::sync::Arc::new(std::sync::Mutex::new(child));
         let line = format!("{initial_command_json}\n");
         debug_log(&format!(
-            "run_prompt: writing initial RpcCommand sync, line_len={}",
+            "run_prompt: writing initial RpcCommand in std::thread, line_len={}",
             line.len()
         ));
-        if let Err(e) = child.write(line.as_bytes()) {
-            emit_error(&app, &session_id, &format!("write initial command: {e}"));
-            return;
-        }
-        debug_log(&format!(
-            "run_prompt: initial RpcCommand written, registering child to map"
-        ));
+        let child_for_write = child_arc.clone();
+        let session_id_for_log = session_id.clone();
+        std::thread::spawn(move || {
+            let lock_result = child_for_write.lock();
+            match lock_result {
+                Ok(mut c) => {
+                    if let Err(e) = c.write(line.as_bytes()) {
+                        eprintln!(
+                            "[sidecar:{session_id_for_log}] write initial command failed: {e}"
+                        );
+                        debug_log(&format!(
+                            "run_prompt: write initial command failed: {e}"
+                        ));
+                    } else {
+                        debug_log(&format!(
+                            "run_prompt: initial RpcCommand written (in std::thread, line_len={})",
+                            line.len()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[sidecar:{session_id_for_log}] child mutex poisoned: {e}"
+                    );
+                    debug_log(&format!(
+                        "run_prompt: child mutex poisoned: {e}"
+                    ));
+                }
+            }
+        });
 
-        // 注册 CommandChild 到 active map, 让 FE 端 send_rpc_command 找得到.
+        // 注册 child (Arc clone) 到 active map, 让 FE 端 send_rpc_command 找得到.
+        // 立刻注册, 不等 initial write 完成 — 即使 write 慢 / 死锁, FE 也能 send abort 等操作.
         {
             let mut map = active.0.lock().await;
-            map.insert(session_id.clone(), child);
+            map.insert(session_id.clone(), child_arc);
         }
         debug_log(&format!(
-            "run_prompt: wrote initial RpcCommand, child registered to active map"
+            "run_prompt: child registered to active map (initial RpcCommand 异步 thread 写)"
         ));
 
         // v0.5.8: 主 task 循环 Receiver<CommandEvent>, 替代之前 BufReader 读 stdout.
@@ -256,7 +314,38 @@ pub fn run_prompt(
         //   Terminated(TerminatedPayload { code, signal }).
         let mut got_agent_end = false;
         let mut event_count = 0u32;
-        while let Some(event) = rx.recv().await {
+        // v3.67 OOM fix (ADR-0026 次要 #5.1): 循环加 60s 无事件超时强杀.
+        //   背景: MiniMax / DeepSeek V4 Flash 等 provider 上 Pi SDK 0.84.2 偶发
+        //   agent_end lost → sidecar 进程不主动 exit, rx.recv() 永远等不到事件 →
+        //   sidecar 一直 hold 几百 MB V8 heap (实测 PRIV 381MB), ActiveSidecars map
+        //   entry 也不释放. 之前只有 kill_sidecar / restart_all_sidecars 手动兜底,
+        //   abort / stream hang 后的重试路径仍会累积.
+        //   修法: 每次 recv 最多等 60s, 期间无任何 stdout/stderr 事件 = stream hang,
+        //   强杀 child + 走下面 synthesized agent_end 收尾 (FE 30s watchdog + 这里
+        //   60s 兜底双层保护, 不误杀正常长 LLM 调用 — 正常流式 thinking/text/tool
+        //   事件远密于 60s 一次).
+        loop {
+            let recv_result = tokio::time::timeout(Duration::from_secs(60), rx.recv()).await;
+            let event = match recv_result {
+                Ok(Some(ev)) => ev,
+                Ok(None) => break,  // stream closed (sidecar 正常退出)
+                Err(_elapsed) => {
+                    log::warn!("[sidecar:{session_id}] no events for 60s, killing sidecar (stream hang guard)");
+                    debug_log(&format!(
+                        "run_prompt: 60s no events, killing sidecar (stream hang guard, event_count={event_count})"
+                    ));
+                    // child 的 handle 在 ActiveSidecars map 里 (line 248 insert 时 move),
+                    // 从 map 取出再 kill (跟 kill_sidecar 同 pattern), 顺便清 entry.
+                    {
+                        let mut map = active.0.lock().await;
+                        if let Some(child_arc) = map.remove(&session_id) {
+                            // v3.68: 走 kill_child_by_pid helper (consume Arc 释放)
+                            kill_child_by_pid(&child_arc);
+                        }
+                    }
+                    break;
+                }
+            };
             event_count += 1;
             match event {
                 CommandEvent::Stdout(bytes) => {
@@ -419,7 +508,24 @@ pub fn run_compact(
 
         let mut got_compaction_end = false;
         let mut event_count = 0u32;
-        while let Some(event) = rx.recv().await {
+        // v3.67 OOM fix (ADR-0026 次要 #5.1): 跟 run_prompt 同款 60s 无事件超时强杀.
+        //   compact 走 LLM 总结, 同样可能 agent/compaction_end lost → sidecar 挂住
+        //   hold 内存. 超时后 kill child (结束时有主动 kill, 这里超时 kill 一致).
+        loop {
+            let recv_result = tokio::time::timeout(Duration::from_secs(60), rx.recv()).await;
+            let event = match recv_result {
+                Ok(Some(ev)) => ev,
+                Ok(None) => break,  // stream closed
+                Err(_elapsed) => {
+                    log::warn!("[sidecar:compact:{session_id}] no events for 60s, killing (stream hang guard)");
+                    debug_log(&format!(
+                        "run_compact: 60s no events, killing sidecar (stream hang guard, event_count={event_count})"
+                    ));
+                    // 不在这里 kill child — 循环外的 `let _ = child.kill()` 统一收尾
+                    // (run_compact 的 child 没进 ActiveSidecars map, 仍在本地作用域).
+                    break;
+                }
+            };
             event_count += 1;
             match event {
                 CommandEvent::Stdout(bytes) => {
@@ -514,11 +620,17 @@ pub async fn kill_sidecar(
     session_id: String,
     active: State<'_, Arc<ActiveSidecars>>,
 ) -> Result<bool, String> {
-    let mut map = active.0.lock().await;
-    let existed = if let Some(mut child) = map.remove(&session_id) {
+    // v3.68 (2026-08-25): 适配 Arc<Mutex<CommandChild>>.
+    //   拿 Arc clone, drop map lock, 再 lock child kill (跟 send_rpc_command 同 pattern, 避免嵌套 lock).
+    let child_arc = {
+        let mut map = active.0.lock().await;
+        map.remove(&session_id)
+    };
+    let existed = if let Some(child_arc) = child_arc {
         log::warn!("[sidecar] kill_sidecar: session={} killing child", session_id);
-        // child.kill() 是 sync, 内部用 Child::kill (Windows TerminateProcess)
-        let _ = child.kill();
+        // v3.68: tauri CommandChild::kill(self) consumes, 不能 from MutexGuard move out.
+        // 走 kill_child_by_pid helper (taskkill /F /T Windows, kill -9 Unix)
+        kill_child_by_pid(&child_arc);
         true
     } else {
         log::info!("[sidecar] kill_sidecar: session={} no active child (already exited?)", session_id);
@@ -552,23 +664,29 @@ pub async fn restart_all_sidecars(
     active: State<'_, Arc<ActiveSidecars>>,
     app: AppHandle,
 ) -> Result<u32, String> {
-    let mut map = active.0.lock().await;
-    let session_ids: Vec<String> = map.keys().cloned().collect();
-    let count = session_ids.len() as u32;
-    log::info!("[sidecar] restart_all_sidecars: reason={reason} killing {count} sidecar(s)");
-    for session_id in &session_ids {
-        if let Some(mut child) = map.remove(session_id) {
-            log::warn!(
-                "[sidecar] restart_all_sidecars: session={session_id} killing (reason={reason})"
-            );
-            let _ = child.kill();
-            // 注意: 不要在这里 emit agent_end. run_prompt task 自己会 emit synthesized
-            //   agent_end 走 stream-ended-without-agent_end 路径. 那个事件已经被 FE
-            //   处理为 streaming=false + error indicator, 跟"被 restart 打断"是
-            //   一样的视觉, 没必要多发一次.
-        } else {
-            log::info!("[sidecar] restart_all_sidecars: session={session_id} not in map (race?)");
-        }
+    // v3.68 (2026-08-25): 适配 Arc<Mutex<CommandChild>>. 同 kill_sidecar pattern —
+    //   一次性 drain map (拿 Arc), drop lock, 然后逐个 kill (kill 是 sync, 走 Mutex 内部).
+    let child_arcs: Vec<(String, std::sync::Arc<std::sync::Mutex<CommandChild>>)> = {
+        let mut map = active.0.lock().await;
+        let session_ids: Vec<String> = map.keys().cloned().collect();
+        let count = session_ids.len() as u32;
+        log::info!("[sidecar] restart_all_sidecars: reason={reason} killing {count} sidecar(s)");
+        session_ids
+            .into_iter()
+            .filter_map(|sid| map.remove(&sid).map(|c| (sid, c)))
+            .collect()
+    };
+    let count = child_arcs.len() as u32;
+    for (session_id, child_arc) in &child_arcs {
+        log::warn!(
+            "[sidecar] restart_all_sidecars: session={session_id} killing (reason={reason})"
+        );
+        // v3.68: 走 kill_child_by_pid helper (taskkill /F /T Windows, kill -9 Unix)
+        kill_child_by_pid(child_arc);
+        // 注意: 不要在这里 emit agent_end. run_prompt task 自己会 emit synthesized
+        //   agent_end 走 stream-ended-without-agent_end 路径. 那个事件已经被 FE
+        //   处理为 streaming=false + error indicator, 跟"被 restart 打断"是
+        //   一样的视觉, 没必要多发一次.
     }
     // 全局事件: 通知 FE "已经 restart, 新配置下次 send_prompt 生效"
     let event = serde_json::json!({
@@ -608,16 +726,20 @@ pub async fn send_rpc_command(
         session_id,
         command_json.chars().take(120).collect::<String>()
     ));
-    // v3.35 (2026-08-24): 跟 run_prompt 同步回滚到 v3.32 sync write.
-    //   跟 run_prompt 同样理由: 写 stdin 跟 sidecar 启动没同步, sync 阻塞 1 分期间 sidecar 启动 OK.
-    //   后续 RpcCommand 一般小 (1-10KB), sync write 几 ms 完, 实际不阻塞. 一致性也保留.
-    let mut map = active.0.lock().await;
-    let child = map
-        .get_mut(&session_id)
-        .ok_or_else(|| format!("no active sidecar for session={}", session_id))?;
+    // v3.68 (2026-08-25): 适配 ActiveSidecars value 改 Arc<Mutex<CommandChild>>.
+    //   后续 RpcCommand 一般小 (1-10KB), sync write 几 ms 完, 实际不阻塞.
+    //   走 Arc clone + Mutex lock, 多写线程安全 (跟 run_prompt std::thread 写 initial 不冲突).
+    let map = active.0.lock().await;
+    let child_arc = map
+        .get(&session_id)
+        .ok_or_else(|| format!("no active sidecar for session={}", session_id))?
+        .clone();
+    drop(map);  // 释放 active.0 lock 再 lock child, 避免嵌套 lock 反向
     let line = format!("{}\n", command_json);
-    child
-        .write(line.as_bytes())
+    let mut c = child_arc
+        .lock()
+        .map_err(|e| format!("child mutex poisoned: {e}"))?;
+    c.write(line.as_bytes())
         .map_err(|e| format!("write rpc_command: {e}"))?;
     Ok(())
 }
@@ -856,11 +978,12 @@ pub fn ensure_external_tools_watcher(app: AppHandle) {
                 "[external_tools] watcher: killing {count} sidecar(s) (reason={reason})"
             );
             for session_id in &session_ids {
-                if let Some(mut child) = map.remove(session_id) {
+                if let Some(child_arc) = map.remove(session_id) {
                     log::warn!(
                         "[external_tools] watcher: killing session={session_id} (reason={reason})"
                     );
-                    let _ = child.kill();
+                    // v3.68: 走 kill_child_by_pid helper
+                    kill_child_by_pid(&child_arc);
                 }
             }
             // emit sidecar:event 跟 FE 走同样 toast 链路 (App.vue 监听 type==sidecar_restarted 弹 toast)
