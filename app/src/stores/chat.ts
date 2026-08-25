@@ -42,6 +42,20 @@ import {
   emptySessionData,
   type SessionChatData,
 } from './chatStorage';
+// v3.64: streaming / retry / hang / phase / listener 状态抽到 chatStream.ts
+import {
+  streamingBySession,
+  retryBySession,
+  streamHangBySession,
+  phaseBySession,
+  listenerOffBySession,
+  touchStreamEvent,
+  startStreamHangWatchdog,
+  stopStreamHangWatchdog,
+  setPhase,
+  getPhase,
+  cleanupListenerForSession,
+} from './chatStream';
 
 export type { ChatMessage, ThinkingBlock, ToolCallBlock, Step };
 
@@ -153,8 +167,12 @@ export const useChatStore = defineStore('chat', () => {
     return errorBySession.value[sessionId] ?? null;
   }
 
-  // ===== Streaming state =====
-  const streamingBySession = ref<Record<string, boolean>>({});
+  // ===== Streaming state (v3.64 抽到 chatStream.ts, module-level singleton) =====
+  // 共享 ref: streamingBySession / retryBySession / streamHangBySession / phaseBySession,
+  // 闭包函数: isStreaming / clearStreamHang / touchStreamEvent / startStreamHangWatchdog /
+  // stopStreamHangWatchdog / setPhase / getPhase / cleanupListenerForSession
+  // 抽到 module-level 是因为这些状态在 chat store 外也被 watch 触发 (e.g. ChatMain.vue
+  // 的 rAF 滚动跟随 watch isSessionStreaming 状态, v3.60), 共享 ref 避免循环 import.
   const errorBySession = ref<Record<string, string | null>>({});
   // 2026-08-20 P0-1 补充 A: send queue (per-session FIFO, 多消息支持)
   // 业务约束: 用户在 LLM 还在回的时候可以继续编辑+点 send, 但不能再 spawn 一个 sidecar (状态机冲突),
@@ -186,38 +204,8 @@ export const useChatStore = defineStore('chat', () => {
     sendQueueBySession.value = { ...sendQueueBySession.value, [sessionId]: next };
     console.log('[chat] removeFromQueue: session=', sessionId, 'index=', index, 'remaining=', next.length);
   }
-  // v0.4.2+ LLM 错误重试: retryBySession 记录当前 retry 状态 (attempt 进度 + 上次错误)
-  // FE UI 可以根据这个显示"重试中 1/5..."提示
-  // v0.6.3-rc1: 取消了 D210 的 FE 端 auto-retry (force stop + resend). 当前 retryBySession
-  //   只反映 Pi SDK 内部 retry 状态 (auto_retry_start / auto_retry_end events).
-  const retryBySession = ref<Record<string, { attempt: number; maxAttempts: number; errorMessage: string } | null>>({});
-  // v0.5.0-D 第17轮 (D204): stream hang detector — 30s 无事件 + 仍 isStreaming → 标 hang
-  //   替代 D200/D202/D203 的 emptyResponse 主动告警 (那个有 false positive: model 合法的空 message)
-  //   这个是真正兜底: 只有 stream 真的 hang 住 (没新事件, 也等不到 agent_end) 才告警
-  //   UI 在 chat 区域显示横线 (不是 popup), user 自行决定重发
-  const streamHangBySession = ref<Record<string, boolean>>({});
-  const lastStreamEventAt = new Map<string, number>();
-  const streamHangTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  // v0.5.0-D 第25轮 (D210.2) BUG FIX: listener off 函数 Map
-  //   之前 sendPrompt 创建的 listener (const off = await piTauri.on(...)) 是 local 变量,
-  //   sendPrompt 返回后 off 函数就丢了. agent_end willRetry=true 分支不调 off (因为它要
-  //   继续等 Pi SDK 内部 retry 的 events), 但这样就再也没机会调 off() 了 — 下次 sendPrompt
-  //   又调 piTauri.on() 加新 listener, 老 listener 一直活着. 多次 retry 后 N 个老 listener
-  //   都活着, 每个事件被处理 N 次.
-  //   修法: Map 跟踪 off 函数, sendPrompt 进来前 + watchdog force stop 时 + agent_end
-  //   willRetry=false (正常收尾) 都调 cleanupListenerForSession 清掉.
-  const listenerOffBySession = new Map<string, () => void>();
-  function cleanupListenerForSession(sessionId: string) {
-    const off = listenerOffBySession.get(sessionId);
-    if (off) {
-      try { off(); } catch (e) { console.warn('[chat] D210.2: listener off() failed (ignored)', e); }
-      listenerOffBySession.delete(sessionId);
-    }
-  }
-  const STREAM_HANG_TIMEOUT_MS = 30_000;
-  function touchStreamEvent(sessionId: string) {
-    lastStreamEventAt.set(sessionId, Date.now());
-  }
+  // v0.4.2+ retryBySession / v0.5.0-D hang / v0.5.0-D D210.2 listener 状态 — 全部抽到 chatStream.ts
+  // (v3.64 抽) — module-level singleton 跟 chat.ts Pinia store 共享.
   // ====== v0.5.0-D 第26轮 (D210.3) BUG FIX: compaction 事件 helper
   //   之前 compaction_start / compaction_end 的处理逻辑全部内联在 sendPrompt 创建的
   //   listener 闭包里. 但 compact() 不创建 listener (它直接调 piTauri.compactSession
@@ -486,42 +474,7 @@ export const useChatStore = defineStore('chat', () => {
     return { friendly: raw, raw, category: 'unknown' };
   }
 
-  function startStreamHangWatchdog(sessionId: string): ReturnType<typeof setTimeout> {
-    stopStreamHangWatchdog(sessionId);
-    const timer = setTimeout(() => {
-      // 2026-08-21 v0.6.3-rc1: 30s watchdog 只 warn + UI 提示, **不** force stop streaming
-      //   user 反馈: "AI 有时候回复确实会超过 30 秒, 但实际上它真的在回复"
-      //   之前 D209 + D210 的 force stop + auto retry 强制打断, 不合理.
-      //   业务规则: 除非 sidecar 主动 emit error event, 或 user 主动 stop, 否则不中断 stream.
-      //
-      // 现在的行为:
-      //   1. 30s 无事件 + 仍 isStreaming → 标 streamHang=true (UI 横线提示 "AI 响应较慢")
-      //   2. console.warn 一行给 dev 排查 (P1-1 风格的埋点)
-      //   3. **不**改 streaming / retry / listener 任何状态, 让 LLM 自然跑完
-      //   4. 如果 LLM 真的 emit agent_end, UI 正常收尾
-      //   5. 如果真 hang 了 (emit 错误丢了), user 看 UI 提示 + 手动点 stop
-      //   6. P1-1 埋点 (PERM-LOST / PERM-OK) 留作 lost 排查工具
-      const last = lastStreamEventAt.get(sessionId) || 0;
-      const stillStreaming = !!streamingBySession.value[sessionId];
-      if (stillStreaming && Date.now() - last >= STREAM_HANG_TIMEOUT_MS) {
-        streamHangBySession.value = { ...streamHangBySession.value, [sessionId]: true };
-        console.warn(
-          `[chat] 30s slow stream detected for ${sessionId} (no events for ${STREAM_HANG_TIMEOUT_MS}ms). ` +
-          `UI shows slow-response hint. Stream NOT force-stopped (user 反馈: AI 真的在回复时被强打断不合理). ` +
-          `User 可以手动点 stop, 或继续等 LLM 真正 emit agent_end.`,
-        );
-      }
-    }, STREAM_HANG_TIMEOUT_MS);
-    streamHangTimers.set(sessionId, timer);
-    return timer;
-  }
-  function stopStreamHangWatchdog(sessionId: string) {
-    const t = streamHangTimers.get(sessionId);
-    if (t) {
-      clearTimeout(t);
-      streamHangTimers.delete(sessionId);
-    }
-  }
+  // startStreamHangWatchdog / stopStreamHangWatchdog 抽到 chatStream.ts (v3.64)
   // v0.5.0-D 第12轮: 引用回复 (quote & reply)
   //   user 在 assistant 消息点 "引用" button → quoteBySession[sid] 存一条引用.
   //   Composer 显示引用预览, 发送时自动把引用作为 markdown blockquote 前缀拼到 user message.
@@ -614,14 +567,7 @@ export const useChatStore = defineStore('chat', () => {
   //   显示 "思考中…" / "正在下笔…" / "调用工具…" 等不同文字, 文字轮换 (每 1.8s 换一次).
   //   用户反馈 "实际当前任务还在后台继续跑, 但是因为是一段一段回复的, 正文可能有多条,
   //   导致看起来像是卡了, 需要加适当的提示icon动画, 表示当前是在走的"
-  const phaseBySession = ref<Record<string, 'idle' | 'thinking' | 'text' | 'tool'>>({});
-  function setPhase(sessionId: string, phase: 'idle' | 'thinking' | 'text' | 'tool') {
-    if (phaseBySession.value[sessionId] === phase) return;
-    phaseBySession.value = { ...phaseBySession.value, [sessionId]: phase };
-  }
-  function getPhase(sessionId: string): 'idle' | 'thinking' | 'text' | 'tool' {
-    return phaseBySession.value[sessionId] ?? 'idle';
-  }
+  // phaseBySession / setPhase / getPhase 抽到 chatStream.ts (v3.64)
 
   // v0.4.3: context window 占用跟踪 + compaction 状态
   // - lastUsageBySession[sessionId] = Pi SDK AgentMessageLite.usage (上次 assistant 消息的 cumulative usage)
