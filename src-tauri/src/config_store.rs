@@ -39,6 +39,19 @@ pub struct AppConfig {
     /// 旧 config.json 没这字段 → 默认空 HashMap, 第一次切 workspace 时 sidecar 会生成新 sessionId.
     #[serde(default)]
     pub per_workspace_session_id: std::collections::HashMap<String, String>,
+    /// 2026-08-25 v3.62: Browser Panel 用户调过的 inner_size (width, height).
+    /// 关闭后再开恢复 user 调过的大小, 不回到默认 800x450.
+    /// 旧 config.json 没这字段 → None → 用默认 800x450.
+    #[serde(default)]
+    pub browser_panel_size: Option<BrowserPanelSize>,
+}
+
+/// 2026-08-25 v3.62: Browser Panel inner_size 持久化
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserPanelSize {
+    pub width: f64,
+    pub height: f64,
 }
 
 fn default_thinking_level() -> String {

@@ -10,11 +10,23 @@
 // - sanitizeForStorage 剥图片 in-memory base64 (避免 5MB quota 撑爆), 保留 savedPath
 
 import type { ChatMessage, ThinkingBlock, ToolCallBlock } from '@/lib/mock/types';
+import { ref, type Ref } from 'vue';
 
 export interface SessionChatData {
   messages: ChatMessage[];
   thinking: ThinkingBlock[];
   toolCalls: ToolCallBlock[];
+}
+
+/** v3.66 抽 (撤回版, 留 export 防止 chatErrors.ts / 后续 module 引用时 TS 报错):
+ *  chatData ref 从 chat.ts Pinia store 闭包提到 module-level singleton.
+ *  跟 chatStream / chatQueue 同 pattern. 多个 useChatStore() 实例共享同一份 ref. */
+export const chatData: Ref<Record<string, SessionChatData>> = ref<Record<string, SessionChatData>>({});
+
+/** v3.66 抽 (撤回版): 拿 session 的 chat data, 没就返回空白.
+ *  之前在 chat.ts 闭包, 现在 module-level. */
+export function getSessionData(sessionId: string): SessionChatData {
+  return chatData.value[sessionId] ?? emptySessionData();
 }
 
 export const STORAGE_KEY = 'pi-agent:chat:v1';
