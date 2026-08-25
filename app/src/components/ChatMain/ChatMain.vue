@@ -335,23 +335,34 @@ function jumpToMessage(messageId: string) {
 
         <div ref="listRef" class="pad-chatmain__list pad-scroll" @scroll="onListScroll">
           <div class="pad-chatmain__list-inner">
-            <ChatMessage
+            <!-- v3.67 OOM fix (ADR-0026 真凶 #4): 每条消息包一层 content-visibility 容器.
+                 content-visibility: auto 让浏览器原生跳过视口外消息的渲染/布局/绘制
+                 (DOM 节点仍在, IntersectionObserver / querySelectorAll / nav tick 定位
+                 全部不受影响), 长对话几百条消息不再全量绘制 → 渲染进程 DOM 层开销
+                 从 O(n) 降到 O(viewport). contain-intrinsic-size: auto 记住已渲染消息
+                 的真实高度, 滚动经过后不再跳. -->
+            <div
               v-for="(msg, idx) in messages"
               :key="msg.id"
-              :message="msg"
-              :session-id="activeSession?.id"
-              :steps="msg.role === 'assistant' ? (msg.steps || []) : []"
-              :model-name="activeModelName"
-              :is-streaming="isMessageStreaming(idx)"
-              :error-message="
-                isMessageStreaming(idx) || idx < messages.length - 1
-                  ? null
-                  : chatStore.getError(activeSession?.id)
-              "
-              :retry="
-                isMessageStreaming(idx) ? (chatStore.retryBySession?.[activeSession?.id || ''] ?? null) : null
-              "
-            />
+              class="pad-chatmain__msg"
+              :data-message-id="msg.id"
+            >
+              <ChatMessage
+                :message="msg"
+                :session-id="activeSession?.id"
+                :steps="msg.role === 'assistant' ? (msg.steps || []) : []"
+                :model-name="activeModelName"
+                :is-streaming="isMessageStreaming(idx)"
+                :error-message="
+                  isMessageStreaming(idx) || idx < messages.length - 1
+                    ? null
+                    : chatStore.getError(activeSession?.id)
+                "
+                :retry="
+                  isMessageStreaming(idx) ? (chatStore.retryBySession?.[activeSession?.id || ''] ?? null) : null
+                "
+              />
+            </div>
             <!-- v0.5.0-D 第17轮 (D204): stream hang error line
                  真正兜底: 30s 无事件 + 仍 isStreaming → 显示横线在 chat 区域中间
                  user 反馈: "我不要弹窗, 我要的是在chat区域中间一个'------error具体详情-------'这样的横线"
@@ -550,6 +561,17 @@ function jumpToMessage(messageId: string) {
   margin: 0 auto;
   width: 100%;
   box-sizing: border-box;
+}
+
+/* v3.67 OOM fix (ADR-0026 真凶 #4): 长对话虚拟滚动前的轻量缓解 —
+   content-visibility: auto 跳过视口外消息的渲染/布局 (DOM 仍在, 不影响
+   ChatMessageNav 的 IntersectionObserver / querySelectorAll 定位),
+   长会话从"全部消息全量绘制"变成"只绘制视口附近的消息".
+   contain-intrinsic-size: auto 200px: 未渲染消息先用 200px 占位高度
+   (auto 关键字会记住已渲染消息的真实尺寸, 滚动经过后不再跳). */
+.pad-chatmain__msg {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 200px;
 }
 
 /* ===== jump 按钮: 在 chat body 内的底部中央 ===== */

@@ -63,13 +63,34 @@ export function saveToStorage(data: Record<string, SessionChatData>): void {
 /**
  * 深拷贝 + 剥掉 message.images[].data (in-memory base64)
  * 其余字段全部保留, 包括 images 的 savedPath / thumbnail / mimeType / bytes
+ *
+ * v3.67 OOM fix (ADR-0026 真凶 #3 配套): 改成"按需拷贝" — 只有包含 in-memory
+ *   base64 (img.data) 的 message 才 copy + strip, 其余 message / session 全部
+ *   浅引用. 之前每次 save 都重建整棵对象图 (1 turn 20-50 次 message_update =
+ *   20-50 次全量深拷贝, 瞬时内存 2x + 同步阻塞主线程).
+ *   配合 chat.ts 修复 #2 (message.images 不再写 data) 之后, 这里几乎总是零拷贝,
+ *   saveToStorage 只剩 JSON.stringify + setItem 开销 (且被 debounce 合并到 1 次).
  */
 export function sanitizeForStorage(data: Record<string, SessionChatData>): Record<string, SessionChatData> {
   const out: Record<string, SessionChatData> = {};
   for (const [k, v] of Object.entries(data)) {
+    let messagesNeedCopy = false;
+    for (const m of v.messages) {
+      if (m.images && m.images.some((img) => img.data)) {
+        messagesNeedCopy = true;
+        break;
+      }
+    }
+    // 无任何 in-memory base64 → 整 session 浅引用 (零拷贝)
+    if (!messagesNeedCopy) {
+      out[k] = v;
+      continue;
+    }
     out[k] = {
       messages: v.messages.map((m) => {
         if (!m.images || m.images.length === 0) return m;
+        // 这个 message 没有带 data 的 image → 浅引用
+        if (!m.images.some((img) => img.data)) return m;
         return {
           ...m,
           images: m.images.map((img) => {

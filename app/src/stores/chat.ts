@@ -88,12 +88,37 @@ export const useChatStore = defineStore('chat', () => {
   const data = pruneOrphanedMessages();
   const chatData = ref<Record<string, SessionChatData>>(data);
 
-  // 持久化
+  // 持久化 — v3.67 OOM fix (ADR-0026 真凶 #3):
+  //   之前 watch(chatData, { deep: true }) 在每次事件末尾的 `chatData.value = {...}`
+  //   (含每个 text_delta 的 message_update, 1 turn 20-50 次) 都触发 saveToStorage →
+  //   sanitizeForStorage 全量深拷贝 + JSON.stringify + localStorage.setItem (同步阻塞
+  //   主线程, 瞬时内存 2x). 长 session 累积 base64 时峰值叠加 → WebView2 OOM.
+  //   修法: flush:'post' (DOM 更新后跑, 不阻塞渲染) + 500ms debounce (1 turn 内所有
+  //   mutation 合并成 1 次 save) + sanitizeForStorage 改按需浅拷贝 (见 chatStorage.ts).
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  const flushSave = () => {
+    if (saveTimer !== null) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    saveToStorage(chatData.value);
+  };
   watch(
     chatData,
-    (v) => saveToStorage(v),
-    { deep: true },
+    () => {
+      if (saveTimer !== null) clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        saveTimer = null;
+        saveToStorage(chatData.value);
+      }, 500);
+    },
+    { deep: true, flush: 'post' },
   );
+  // debounce 的代价: 变更后 500ms 内关窗口会丢最后一次 save. 用 beforeunload flush 兜底
+  // (Tauri WebView2 关闭会触发 beforeunload). setup 只跑一次, listener 不需要 off.
+  if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', flushSave);
+  }
 
   // 监听 session 删除, 同步删 messages
   watch(
@@ -990,12 +1015,22 @@ export const useChatStore = defineStore('chat', () => {
     //   v3.9: image 存 MessageImage 全字段 (savedPath + thumbnail + data),
     //         data 在持久化时会被 sanitizeForStorage 剥掉, reload 后变 undefined
     //         但 savedPath + thumbnail 还在 — click preview 时从 savedPath 重读
+    // v3.67 OOM fix (ADR-0026 真凶 #2): 不再把 base64 data 放进 message.images.
+    //   chatData 是常驻内存 + deep watch 全量追踪的对象, base64 放这里会让每个
+    //   session 累积 6.7MB+ (实测 .tauri-debug.log: 5 个 user event 共 6.7MB base64),
+    //   且切 session 不释放 → WebView2 JS heap 爆 OOM.
+    //   base64 只通过 attachmentsStore.buildForPrompt() 传给 Pi SDK (vision 发送),
+    //   不落 store. message.images 只留持久化字段 (savedPath + thumbnail + mimeType
+    //   + bytes):
+    //     - 渲染: ChatMessage.vue 用 thumbnail (200x200 JPEG, ~10-30KB)
+    //     - 点击预览: openAttachmentPreviewImage 走 savedPath → openImageFromPath
+    //       (Tauri command 已存在, reload 后也是这条路径, 行为一致)
+    //     - TaskDrawer: base64 是 optional, 预览同样走 savedPath fallback
     const attachmentImagesForMsg = attachmentsStore.pendingImages.map((img) => ({
       mimeType: img.mimeType,
       bytes: img.bytes,
       savedPath: img.savedPath,
       thumbnail: img.thumbnail,
-      data: img.base64,  // in-memory, sendPrompt 走 Pi SDK images[] 用同一份 base64
     }));
     const attachmentFilesForMsg = attachmentsStore.pendingFiles.map((f) => ({
       path: f.path,

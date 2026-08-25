@@ -1958,9 +1958,30 @@ function installUserToolsWatcher(workspacePath, agentDir) {
 // 修法: sidecar 启动 runtime 后, 手动调 buildSessionContext() 把 sessionManager 的 entries
 //   灌进 agent.state.messages. 这一行解决了单 session 上下文丢失 bug.
 // 同 Pi SDK compaction 流程 (agent-session.ts:1880-1881) 一样的 sync, 只不过我们每次启动都做.
+//
+// v3.67 (ADR-0026 次要 #5.2): 全量灌 session history 是 sidecar 侧 OOM 次要风险 —
+//   200K context 的长 session 恢复时, 几百条 message + 工具结果的对象图可达几百 MB,
+//   在 sidecar 1GB Job 限制下接近爆. 这里加轻量估算 + 超阈值 warning (不 JSON.stringify
+//   大对象, 避免瞬时再翻一倍内存; 只遍历已有对象图取字符数).
+//   截断 / 自动 compact 涉及 LLM 看到的上下文语义, 留给后续单独评估.
 const initialMessages = runtime.session.sessionManager.buildSessionContext().messages;
+let historyChars = 0;
+for (const m of initialMessages) {
+  if (typeof m?.content === 'string') {
+    historyChars += m.content.length;
+  } else if (Array.isArray(m?.content)) {
+    for (const b of m.content) {
+      if (b && typeof b.text === 'string') historyChars += b.text.length;
+      if (b && typeof b.thinking === 'string') historyChars += b.thinking.length;
+    }
+  }
+}
+const historyMb = (historyChars * 3 / 1024 / 1024).toFixed(1);  // 中文 UTF-8 ≈ 3 bytes/char 粗估
+if (historyMb > 10) {
+  console.error(`[sidecar] WARNING: session history large: ${initialMessages.length} msgs, ~${historyMb}MB est. serialized — sidecar OOM risk (ADR-0026 #5.2), 建议压缩该 session`);
+}
 runtime.session.agent.state.messages = initialMessages;
-console.error(`[sidecar] synced ${initialMessages.length} messages from session to agent state`);
+console.error(`[sidecar] synced ${initialMessages.length} messages from session to agent state (~${historyMb}MB est.)`);
 
 // ====== 5. (无 readline 要关) ======
 // v0.5.0 fix: 不需要 rl.close() — 我们用 raw process.stdin 读了 line 1, 没用 readline.
