@@ -240,6 +240,10 @@ static MAIN_WINDOW_LABEL: OnceLock<String> = OnceLock::new();
 // 2026-08-25 v3.62: Browser Panel 当前 inner_size, Resized 事件实时更新, Destroyed 时持久化
 //   到 config.browser_panel_size. 跨 session 重启恢复 user 调过的大小.
 static BROWSER_PANEL_SIZE: OnceLock<StdMutex<Option<(f64, f64)>>> = OnceLock::new();
+// 2026-08-25 v3.62.1: ephemeral webview (LLM 调 web_navigate 用) 的 data_dir 跟踪.
+//   ensure_ephemeral_browser 创建时登记, destroy 时取出来整个删 (清 cache).
+//   key = webview label (uuid 唯一), value = data_dir path.
+static EPHEMERAL_DATA_DIRS: OnceLock<StdMutex<HashMap<String, std::path::PathBuf>>> = OnceLock::new();
 
 fn page_load_signal_cell() -> &'static StdMutex<Option<oneshot::Sender<()>>> {
     PAGE_LOAD_SIGNAL.get_or_init(|| StdMutex::new(None))
@@ -409,7 +413,9 @@ async fn ensure_browser_window(app: &tauri::AppHandle) -> Result<tauri::WebviewW
 //   navigate + get text + 立即 destroy. 跟 user panel 彻底隔离.
 ///   限制: 不注入 target=_blank 拦截 JS (LLM 只读 text 不 click, 简化), 不走 owner() dock
 ///   (一次性不需要), 完即销毁 (不持久化, 每次 navigate 重新创建).
-async fn ensure_ephemeral_browser(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+async fn ensure_ephemeral_browser(
+    app: &tauri::AppHandle,
+) -> Result<(tauri::WebviewWindow, String), String> {
     // label 唯一 (uuid v4). 旧 ephemeral 残留 (上次没 destroy 干净) 顺手清掉.
     let label = format!("pi-browser-ephemeral-{}", uuid::Uuid::new_v4());
     // 清理之前残留的 ephemeral (webview_windows() 返 HashMap, iter 出来是 (label, window) tuple)
@@ -419,6 +425,20 @@ async fn ensure_ephemeral_browser(app: &tauri::AppHandle) -> Result<tauri::Webvi
             let _ = win.destroy();
         }
     }
+    // 2026-08-25 v3.62.1: 独立 user data dir, destroy 时整个删 (清 localStorage / cookies / cache).
+    //   之前 ephemeral 跟 user panel 共享 Tauri 默认 user data dir, cache 污染 user panel.
+    //   每次 ephemeral 用独立 uuid dir, 完即删, 不污染 user panel, 也不在 disk 上堆积.
+    let app_data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+    let data_dir = app_data_root
+        .join("browser-ephemeral")
+        .join(uuid::Uuid::new_v4().to_string());
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        log::warn!("[browser] create ephemeral data dir failed (继续用默认): {e}");
+    }
+    log::info!("[browser] ephemeral data dir: {}", data_dir.display());
     let window = WebviewWindowBuilder::new(
         app,
         &label,
@@ -435,10 +455,14 @@ async fn ensure_ephemeral_browser(app: &tauri::AppHandle) -> Result<tauri::Webvi
     .decorations(false) // 无标题栏 / 无边框, 一次性 webview
     .skip_taskbar(true)
     .resizable(false)
+    .data_directory(data_dir.clone())
     .build()
     .map_err(|e| format!("create ephemeral browser: {e}"))?;
     log::info!("[browser] ephemeral webview created: {label}");
-    Ok(window)
+    // 2026-08-25 v3.62.1: 记下 data_dir, destroy 时删整个 dir (清 cache).
+    //   用 OnceLock<HashMap<label, PathBuf>> 跟踪每个 ephemeral 自己的 dir, destroy 时取出来删.
+    EPHEMERAL_DATA_DIRS.get_or_init(|| StdMutex::new(HashMap::new())).lock().unwrap().insert(label.clone(), data_dir);
+    Ok((window, label))
 }
 
 /// 把 webview 窗口 dock 到主窗口右侧 (紧密贴合):
@@ -695,7 +719,7 @@ async fn browser_navigate(app: tauri::AppHandle, url: String) -> Result<String, 
     log::info!("[browser] browser_navigate: {url}");
     // 2026-08-24 v3.26: 用 ephemeral webview (跟 user 视觉的 pi-browser-panel 隔离).
     //   完即 destroy, 状态不残留. LLM 调用走这个, user 走 browser_navigate_url (走 user panel).
-    let window = ensure_ephemeral_browser(&app).await?;
+    let (window, label) = ensure_ephemeral_browser(&app).await?;
     // setup oneshot 等 page load
     let (tx, rx) = oneshot::channel::<()>();
     *page_load_signal_cell().lock().unwrap() = Some(tx);
@@ -753,6 +777,21 @@ async fn browser_navigate(app: tauri::AppHandle, url: String) -> Result<String, 
         log::warn!("[browser] ephemeral destroy failed (非致命): {e}");
     } else {
         log::info!("[browser] ephemeral webview closed after navigate");
+    }
+    // 2026-08-25 v3.62.1: 删 ephemeral 自己的 data dir (清 cache / cookies / localStorage)
+    if let Some(dir) = EPHEMERAL_DATA_DIRS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .remove(&label)
+    {
+        if dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                log::warn!("[browser] remove_dir_all ephemeral data dir failed: {e} (path={})", dir.display());
+            } else {
+                log::info!("[browser] cleaned up ephemeral data dir: {}", dir.display());
+            }
+        }
     }
     Ok(truncated)
 }
