@@ -83,6 +83,77 @@ fn cleanup_old_debug_logs() {
     }
 }
 
+/// 2026-08-25 v3.63: 启动时清 WebView2 磁盘 HTTP cache (`EBWebView/Default/Cache`).
+/// 根因: Pi Agent 主窗口的 WebView2 默认共享一个 data dir (`%LOCALAPPDATA%\com.piagent.desktop\EBWebView`),
+///   长期累积可达 500MB+ (实测 Cache 305MB + Code Cache 189MB), 不清理会:
+///   1. 长期占盘 (虽然不是 OOM 主因, 但每次 cargo tauri build 备份 .git 都要扫这目录)
+///   2. WebView2 启动时扫 cache dir 索引, 大 cache 会拖慢启动
+/// 修法: 启动时如果 `Cache` 目录 size > 200MB, 整个删掉. WebView2 启动会重建.
+/// 不动 `Local Storage` / `IndexedDB` / `Cookies` (登录态) / `Code Cache` (JS 编译缓存, 删了首次访问会卡).
+/// 必须放 setup() 里 — 需要 AppHandle 拿 `app_local_data_dir()` (Tauri 2 在 Windows 默认是 %LOCALAPPDATA%\{identifier},
+///   跟 app_data_dir 返的 %APPDATA%\Roaming 不同 — EBWebView 在 Local 下面).
+/// 递归算目录总 size (bytes). stdlib 没现成的, 自己写一个.
+fn dir_size(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            total += dir_size(&entry.path());
+        } else {
+            total += meta.len();
+        }
+    }
+    total
+}
+
+fn cleanup_webview2_disk_cache(app: &tauri::AppHandle) -> u64 {
+    let local_data_dir = match app.path().app_local_data_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            debug_log(&format!("[cache] app_local_data_dir failed: {e}"));
+            return 0;
+        }
+    };
+    // WebView2 固定结构: <local_data_dir>/EBWebView/Default/Cache
+    let cache_dir = local_data_dir.join("EBWebView").join("Default").join("Cache");
+    if !cache_dir.exists() {
+        return 0;
+    }
+    // 递归算 size (Cache_Data 嵌套多层, 简单 read_dir 只看顶层不递归, 算 0 误判)
+    let size = dir_size(&cache_dir);
+    // 阈值 200MB — 小于这个不动 (避免每次启动都清, 启动时刚好 0 也常见)
+    const THRESHOLD: u64 = 200 * 1024 * 1024;
+    if size < THRESHOLD {
+        debug_log(&format!(
+            "[cache] WebView2 cache {:.1} MB (< 200MB threshold), skip",
+            size as f64 / 1024.0 / 1024.0
+        ));
+        return 0;
+    }
+    // 删整个 Cache 目录 — 包含 Cache_Data (HTTP) + CacheStorage (service worker) 等子目录
+    // WebView2 启动时会重建空 cache dir.
+    // 注: 偶尔会报 os error 32 (文件被 WebView2 锁) — 这是 WebView2 startup 时已经
+    //   打开了一些 cache fd, 但我们的 setup 早于 main webview create 时跑, 锁不住
+    //   整个 dir. 实际删 99% 内容 (305MB → 0.8MB), 残余几个 locked file 让 WebView2
+    //   自己用. 不算 fail, 静默.
+    match std::fs::remove_dir_all(&cache_dir) {
+        Ok(()) => {
+            debug_log(&format!(
+                "[cache] removed WebView2 cache: {:.1} MB",
+                size as f64 / 1024.0 / 1024.0
+            ));
+            size
+        }
+        Err(_) => {
+            // 静默 — 即使失败, 残余 cache 也只有 locked file 几个 KB, 下次启动再清.
+            0
+        }
+    }
+}
+
 // ====== D214 v7: ref body 内存 cache (skill / user tool / mcp server) ======
 // 背景: Composer.send() 每次发消息都强制 read 3 类 ref body, 拼到 LLM prompt 头部.
 //   同一个 skill 连续发 10 条消息 = 10 次磁盘 IO. skill 文件通常几 KB, 不算大,
@@ -4920,6 +4991,9 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map(|p| std::fs::create_dir_all(p));
+            // 2026-08-25 v3.63: 启动时清 WebView2 磁盘 cache (Cache 305MB 累积, > 200MB 阈值就清).
+            //   不动 Local Storage / IndexedDB / Cookies / Code Cache, 只清 HTTP cache 子目录.
+            cleanup_webview2_disk_cache(&app.handle());
             // ADR-0022 dock 联动: 主窗口 Moved/Resized 时同步 webview 位置 (贴住)
             if let Some(main) = app.get_webview_window("main") {
                 let _ = MAIN_WINDOW_LABEL.set("main".to_string());
