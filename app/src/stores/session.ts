@@ -50,6 +50,10 @@ export interface Session {
   archived?: boolean;
   /** 归档时间 (ISO), 排序用 */
   archivedAt?: string;
+  /** 2026-08-25 v3.61: 90 天没动后, jsonl 已删, metadata 保留 (跟 "永久删除" 不同, metadata 还在) */
+  jsonlDeleted?: boolean;
+  /** 2026-08-25 v3.61: 90 天没动后, jsonl 删除时间 (ISO), UI 提示用 */
+  jsonlDeletedAt?: string;
   /** Pin / 收藏, true = 在 workspace 树顶部 "📌 Pinned" section 显示 */
   pinned?: boolean;
   /** Pin 时间 (ISO), 排序用 */
@@ -532,6 +536,85 @@ export const useSessionStore = defineStore('session', () => {
     s.updatedAt = new Date().toISOString();
   }
 
+  // ====== 2026-08-25 v3.61 配套: session lifecycle 自动清理 ======
+  //   user 反馈: 跑久了 100+ session 累积, chat store 内存吃紧 (ADR-0024 真凶 #2 副作用).
+  //   之前手动 v3.58 清空按钮缓解, 现在加自动 lifecycle.
+  //   策略: pinned 不动, 30 天没动 auto archive, 90 天没动 auto 删 jsonl (保留 metadata).
+  //   启动时跑一次. 后续可挂 daily timer.
+  //   保留 metadata: archived / 已删 (只是 jsonl 没) 都在 store 里, user 能看历史.
+  //   区别于 v3.58 deleteAllArchivedSessions: 那个手动, 这个自动后台跑.
+  const LIFECYCLE_ARCHIVE_DAYS = 30;
+  const LIFECYCLE_DELETE_DAYS = 90;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  function runSessionLifecycleCleanup(): {
+    archived: number;
+    deletedJsonl: number;
+    failed: Array<{ id: string; title: string; step: 'archive' | 'delete'; error: string }>;
+  } {
+    const now = Date.now();
+    const archiveCutoff = now - LIFECYCLE_ARCHIVE_DAYS * DAY_MS;
+    const deleteCutoff = now - LIFECYCLE_DELETE_DAYS * DAY_MS;
+    let archived = 0;
+    let deletedJsonl = 0;
+    const failed: Array<{ id: string; title: string; step: 'archive' | 'delete'; error: string }> = [];
+    for (const s of sessions.value) {
+      if (s.pinned) continue;  // pinned 不动
+      const updatedAtMs = Date.parse(s.updatedAt);
+      if (Number.isNaN(updatedAtMs)) continue;
+      // 已归档: 检查是否到期删
+      if (s.archived) {
+        if (updatedAtMs < deleteCutoff) {
+          // 90 天没动 + 已归档 → 删 jsonl
+          try {
+            // 跟 deleteSessionPermanently 区别: 不调 store filter (s 还在 sessions 数组, 只 jsonl 删)
+            //   Tauri deleteSessionFiles 失败 throw 走 catch
+            const ws = workspaces.value.find((w) => w.id === s.workspaceId);
+            // 同步调, 但 deleteSessionPermanently 是 async. 用 fire-and-forget 风险
+            // 用 void 包 async, 在 catch 里记 failed.
+            void (async () => {
+              try {
+                if (s.piSessionId) {
+                  const result = await piTauri.deleteSessionFiles({
+                    piSessionId: s.piSessionId,
+                    workspacePath: ws?.path ?? null,
+                    agentDir: null,
+                  });
+                  console.log(`[session] lifecycle: deleted jsonl for ${s.id} (${result.deleted} file(s))`);
+                }
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                failed.push({ id: s.id, title: s.autoTitle || s.title || '新任务', step: 'delete', error: msg });
+                console.warn(`[session] lifecycle: delete jsonl failed for ${s.id}: ${msg}`);
+              }
+            })();
+            deletedJsonl++;
+            // 标 s.jsonlDeleted = true (新增字段, 表示 jsonl 已删, metadata 保留)
+            // 因为 s 是 reactive ref, 改字段会触发响应
+            (s as { jsonlDeleted?: boolean }).jsonlDeleted = true;
+          } catch (e) {
+            // 同步抛错 (一般不会, 上面 void 包了)
+            const msg = e instanceof Error ? e.message : String(e);
+            failed.push({ id: s.id, title: s.autoTitle || s.title || '新任务', step: 'delete', error: msg });
+          }
+        }
+        continue;
+      }
+      // 未归档: 检查是否到期 archive
+      if (updatedAtMs < archiveCutoff) {
+        s.archived = true;
+        s.archivedAt = new Date(updatedAtMs).toISOString();  // 保留原 updatedAt 作为 archive 基准
+        archived++;
+        console.log(`[session] lifecycle: auto-archived ${s.id} (last used ${s.updatedAt})`);
+      }
+    }
+    // s 改了 archived / archivedAt / jsonlDeleted, 触发 reactive 更新
+    // 重新赋值 sessions (因为对象内部 mutation 可能不触发 ref 替换)
+    sessions.value = [...sessions.value];
+    console.log(`[session] lifecycle: done. archived=${archived} deletedJsonl=${deletedJsonl} failed=${failed.length}`);
+    return { archived, deletedJsonl, failed };
+  }
+
   function selectSession(id: string) {
     activeSessionId.value = id;
     const s = sessions.value.find((x) => x.id === id);
@@ -834,6 +917,7 @@ export const useSessionStore = defineStore('session', () => {
     restoreSession,
     deleteSessionPermanently,
     deleteAllArchivedSessions,
+    runSessionLifecycleCleanup,  // 2026-08-25 v3.61: 30d auto archive + 90d auto 删 jsonl
     setPinned,
     togglePin,
     setAutoTitle,

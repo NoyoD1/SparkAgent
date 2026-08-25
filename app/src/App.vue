@@ -101,6 +101,15 @@ onMounted(async () => {
         // 未来可加: sidecar_ready / sidecar_error 等
       },
     );
+    // 2026-08-25 v3.61: 启动时跑一次 session lifecycle cleanup
+    //   30 天没动 auto archive, 90 天没动 auto 删 jsonl
+    //   fire-and-forget, 不阻塞 startup, 失败只 console.warn
+    const lifecycleResult = sessions.runSessionLifecycleCleanup();
+    if (lifecycleResult.archived > 0 || lifecycleResult.deletedJsonl > 0) {
+      console.log(
+        `[App] session lifecycle: archived=${lifecycleResult.archived}, deletedJsonl=${lifecycleResult.deletedJsonl}, failed=${lifecycleResult.failed.length}`,
+      );
+    }
   } catch (e) {
     console.error('[App] listen sidecar:event failed', e);
   }
