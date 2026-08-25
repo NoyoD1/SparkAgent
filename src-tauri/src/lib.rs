@@ -22,18 +22,64 @@ use std::time::SystemTime;
 // v0.4.4.6: ClientConfig 用 sidecar::SkillsConfig / sidecar::ModelMetadataConfig
 use sidecar::{SkillsConfig, ModelMetadataConfig};
 
-/// Debug log to <project>/.tauri-debug.log (DEBUG ONLY).
+/// Debug log to <project>/.tauri-debug-YYYY-MM-DD.log (rotates daily, 7-day retention).
 /// 用 file 而非 stderr 是因为 cargo tauri dev 的 stderr 被 bash task pipe 吃了看不见.
+/// 2026-08-25 v3.62: 改 daily rotate + 7 天自动清理. 之前单文件 145MB 跨几天累积, 排查难.
+/// 写当前日期 sub-file, 启动时清理 7 天前 .log.
 fn debug_log(msg: &str) {
-    let log_path = std::path::PathBuf::from("D:/UnityWork/Tools/Pi/.tauri-debug.log");
+    use std::io::Write;
+    let now = chrono::Utc::now();
+    let log_dir = std::path::PathBuf::from("D:/UnityWork/Tools/Pi");
+    let today = now.format("%Y-%m-%d").to_string();
+    let log_path = log_dir.join(format!(".tauri-debug-{today}.log"));
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)
     {
-        use std::io::Write;
-        let ts = chrono::Utc::now().format("%H:%M:%S%.3f");
+        let ts = now.format("%H:%M:%S%.3f");
         let _ = writeln!(f, "[{ts}] {msg}");
+    }
+    // 旧 .tauri-debug.log (无日期后缀) 也兼容, 写到今天 (避免 user 升级前已有大 log 找不到)
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join(".tauri-debug.log"))
+        .and_then(|mut f| writeln!(f, "[{ts}] {msg}", ts = now.format("%H:%M:%S%.3f")));
+}
+
+/// 2026-08-25 v3.62: 启动时清理 7 天前的 .tauri-debug-YYYY-MM-DD.log.
+/// 保留 .tauri-debug.log (无日期) 不动 (兼容老格式).
+/// 失败静默 (写权限 / 文件被锁等).
+fn cleanup_old_debug_logs() {
+    use std::time::{Duration, SystemTime};
+    let log_dir = std::path::PathBuf::from("D:/UnityWork/Tools/Pi");
+    let Ok(entries) = std::fs::read_dir(&log_dir) else { return };
+    let now = SystemTime::now();
+    let cutoff = now.checked_sub(Duration::from_secs(7 * 24 * 60 * 60));
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        if !name.starts_with(".tauri-debug-") || !name.ends_with(".log") { continue; }
+        // 跳过无日期后缀的旧文件
+        if name == ".tauri-debug.log" { continue; }
+        // 提取日期: .tauri-debug-2026-08-25.log → "2026-08-25"
+        let date_part = name.trim_start_matches(".tauri-debug-").trim_end_matches(".log");
+        // 解析日期, 算 file age
+        if let Ok(file_date) = chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
+            // 简化: 文件 mtime (如果 mtime < 7 天前 → 删)
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(mtime) = meta.modified() {
+                    if let Some(cutoff_time) = cutoff {
+                        if mtime < cutoff_time {
+                            let _ = std::fs::remove_file(&path);
+                            eprintln!("[cleanup] removed old debug log: {}", name);
+                        }
+                    }
+                    let _ = file_date;  // 暂时不解析日期字符串, 用 mtime 判断更稳
+                }
+            }
+        }
     }
 }
 
@@ -4753,6 +4799,9 @@ pub fn run() {
     // v0.4.1+ active sidecar stdin map, 跨 invoke handler 共享.
     // Arc 包一层让 spawn task + invoke handler 都能拿到 owned clone.
     let active_sidecars = std::sync::Arc::new(sidecar::ActiveSidecars::default());
+
+    // 2026-08-25 v3.62: 启动时清理 7 天前的 .tauri-debug-YYYY-MM-DD.log
+    cleanup_old_debug_logs();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())  // v0.5.8: Tauri 2 sidecar 机制 (D172)
