@@ -10,19 +10,44 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, statSync } 
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-const require = createRequire(import.meta.url);
-// 用绝对路径定位 typescript (在 app/node_modules/), 避免 node_modules 解析失败
-const ts = require('D:/UnityWork/Tools/Pi/app/node_modules/typescript');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
+// v3.69 (开源整理): 原来硬编码 `D:/UnityWork/Tools/Pi/app/node_modules/typescript`,
+//   别人 clone 后 require 直接抛 MODULE_NOT_FOUND, sidecar build 走不下去.
+//   改成走 app/node_modules 的标准解析路径.
+const require = createRequire(join(projectRoot, 'app', 'package.json'));
+const ts = require('typescript');
+
 const sidecarDir = join(projectRoot, 'sidecar');
 const sidecarSrc = join(sidecarDir, 'src');
 const tmpDir = join(sidecarDir, '.ts-stripped');
 const sidecarOut = join(sidecarDir, 'dist', 'pi-agent-sidecar.exe');
 const sidecarBin = join(projectRoot, 'src-tauri', 'binaries', 'pi-agent-sidecar-x86_64-pc-windows-msvc.exe');
 
-const bunExe = 'C:\\Users\\nx_computer\\.bun\\bun-windows-x64\\bun.exe';
+// v3.69 (开源整理): 原来硬编码本机 bun 绝对路径 `C:\Users\nx_computer\.bun\...`,
+//   别人机器上没有. 优先从 PATH 找 bun, 找不到再试常见的 install 位置.
+function resolveBun() {
+  const candidates = [
+    'bun',                                              // PATH (推荐: install 后自带)
+    join(process.env.USERPROFILE || '', '.bun', 'bin', 'bun.exe'),
+    join(process.env.USERPROFILE || '', '.bun', 'bun-windows-x64', 'bun.exe'),
+    '/usr/local/bin/bun',
+    '/opt/homebrew/bin/bun',
+  ];
+  for (const c of candidates) {
+    try {
+      if (c === 'bun') {
+        execSync('bun --version', { stdio: 'ignore' });
+        return 'bun';
+      }
+      if (existsSync(c)) return c;
+    } catch { /* 试下一个 */ }
+  }
+  console.error('[sidecar-build] 找不到 bun. 请先安装: https://bun.sh  (安装后确保 bun 在 PATH)');
+  process.exit(1);
+}
+const bunExe = resolveBun();
 
 console.log('[sidecar-build] 1/4 stripping TS types from .mjs files...');
 if (existsSync(tmpDir)) {

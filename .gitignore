@@ -74,6 +74,12 @@ src-tauri/WixTools/
 # sidecar/dist/pi-agent-sidecar.exe 是 bun build --compile 产物, 必须 commit (D163
 #   跨项目规则: Tauri release 不依赖 system Node, 必须 ship standalone .exe). 例外:
 !sidecar/dist/pi-agent-sidecar.exe
+# sidecar/.ts-stripped/ 是 build-sidecar-stage1.mjs 的中间产物 (剥完 TS 类型待 bun 编译)
+sidecar/.ts-stripped/
+# v3.69 (开源整理): chatErrors.ts 是 v3.66 撤回遗留的半成品 — chat.ts 内
+#   pushErrorDivider / pushWarningDivider / friendlyErrorMessage 仍是重复定义,
+#   该文件没有被任何地方 import. 不进开源仓库.
+app/src/stores/chatErrors.ts
 
 # ---- 其他仓库 / 临时目录 ----
 # pi/ 是另一份 git 仓库的 clone (不同的项目, 不要混)

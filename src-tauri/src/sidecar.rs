@@ -891,7 +891,10 @@ pub fn ensure_browser_watcher(app: AppHandle) {
 }
 
 fn debug_log(msg: &str) {
-    let log_path = std::path::PathBuf::from("D:/UnityWork/Tools/Pi/.tauri-debug.log");
+    // v3.69 (开源整理): 原来硬编码 `D:/UnityWork/Tools/Pi/`, 别人 clone 后
+    //   log 写到不存在的路径 (静默失败), debug 时看不到任何日志.
+    //   改用当前工作目录 (从项目根启动 binary 时就是项目根), 写不进去就静默.
+    let log_path = std::path::PathBuf::from(".tauri-debug.log");
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

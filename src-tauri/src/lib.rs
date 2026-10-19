@@ -29,7 +29,9 @@ use sidecar::{SkillsConfig, ModelMetadataConfig};
 fn debug_log(msg: &str) {
     use std::io::Write;
     let now = chrono::Utc::now();
-    let log_dir = std::path::PathBuf::from("D:/UnityWork/Tools/Pi");
+    // v3.69 (开源整理): 原来硬编码 `D:/UnityWork/Tools/Pi/`, 别人 clone 后写不到
+    //   (静默失败, debug 时看不到日志). 改用当前工作目录.
+    let log_dir = std::path::PathBuf::from(".");
     let today = now.format("%Y-%m-%d").to_string();
     let log_path = log_dir.join(format!(".tauri-debug-{today}.log"));
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -53,7 +55,8 @@ fn debug_log(msg: &str) {
 /// 失败静默 (写权限 / 文件被锁等).
 fn cleanup_old_debug_logs() {
     use std::time::{Duration, SystemTime};
-    let log_dir = std::path::PathBuf::from("D:/UnityWork/Tools/Pi");
+    // v3.69 (开源整理): 同 debug_log, 改相对路径.
+    let log_dir = std::path::PathBuf::from(".");
     let Ok(entries) = std::fs::read_dir(&log_dir) else { return };
     let now = SystemTime::now();
     let cutoff = now.checked_sub(Duration::from_secs(7 * 24 * 60 * 60));

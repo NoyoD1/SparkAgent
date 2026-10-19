@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../app/dist",
     "devUrl": "http://localhost:5174",
-    "beforeDevCommand": "node D:/UnityWork/Tools/Pi/scripts/dev-fe.mjs",
-    "beforeBuildCommand": "node D:/UnityWork/Tools/Pi/scripts/build-fe.mjs"
+    "beforeDevCommand": "node ../scripts/dev-fe.mjs",
+    "beforeBuildCommand": "node ../scripts/build-fe.mjs"
   },
   "app": {
     "windows": [
